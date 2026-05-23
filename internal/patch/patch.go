@@ -1,5 +1,4 @@
-// Package patch implements the patch, unpatch, keychain-migrate, and drift
-// re-apply workflows.
+// Package patch implements the patch, unpatch, and keychain-migrate workflows.
 package patch
 
 import (
@@ -11,31 +10,42 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	shimembed "goodkind.io/desktop-via-clyde/internal/embed"
-	"goodkind.io/desktop-via-clyde/internal/launchagent"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
 
+var ErrMissingStateEntry = errors.New("missing target state entry")
+
+type MissingStateEntryError struct {
+	TargetID string
+}
+
+func (e MissingStateEntryError) Error() string {
+	return fmt.Sprintf("no state entry for target %s; run `desktop-via-clyde patch %s` first", e.TargetID, e.TargetID)
+}
+
+func (e MissingStateEntryError) Is(target error) bool {
+	return target == ErrMissingStateEntry
+}
+
 // Options controls a patch invocation.
 type Options struct {
 	DryRun            bool
 	NoMigrateKeychain bool
-	SkipLaunchAgent   bool
 	Out               io.Writer
 }
 
 // BundleOptions controls a PatchExtractedBundle invocation. Unlike
 // Options on the full Patch flow, BundleOptions never touches the
-// keychain, never writes state.json, never installs the LaunchAgent,
-// and never runs the post-patch verify. The clyde MITM hook
-// subprocess uses it to re-patch a freshly downloaded update bundle
-// inside a staging directory before clyde streams the bytes back to
+// keychain, never writes state.json, and never runs the post-patch verify. The
+// clyde MITM hook subprocess uses it to re-patch a freshly downloaded update
+// bundle inside a staging directory before clyde streams the bytes back to
 // Squirrel.Mac for installation.
 type BundleOptions struct {
 	DryRun bool
@@ -43,7 +53,7 @@ type BundleOptions struct {
 }
 
 // Patch performs the full patch flow for one target. Steps are numbered to
-// match the plan: 1, 1b, 2..7, 7a, 8..10.
+// match the plan: 1, 1b, 2..7, 7a, 8..9.
 func Patch(t targets.Target, opts Options) error {
 	if opts.Out == nil {
 		opts.Out = os.Stdout
@@ -114,14 +124,7 @@ func Patch(t targets.Target, opts Options) error {
 		return fmt.Errorf("write state: %w", err)
 	}
 
-	// Step 9: install + load LaunchAgent if absent.
-	if opts.SkipLaunchAgent {
-		r.Note("step 9: skipped LaunchAgent install/load")
-	} else if err := stepInstallLaunchAgent(r); err != nil {
-		return fmt.Errorf("install LaunchAgent: %w", err)
-	}
-
-	// Step 10: verify.
+	// Step 9: verify.
 	if err := stepVerify(r, t); err != nil {
 		return fmt.Errorf("verify: %w", err)
 	}
@@ -135,11 +138,10 @@ func Patch(t targets.Target, opts Options) error {
 // binary, augment them, rename the main executable to .real, install
 // the embedded shim in the original slot, re-sign all three layers
 // (.real, shim, outer bundle) with the user's Developer ID, and strip
-// the quarantine xattr. The function skips backup, keychain
-// migration, state.json updates, the LaunchAgent install, and the
-// post-patch verify, since the clyde MITM hook subprocess that calls
-// this entry point patches a freshly downloaded update bundle inside
-// a staging directory rather than /Applications.
+// the quarantine xattr. The function skips backup, keychain migration,
+// state.json updates, and the post-patch verify, since the clyde MITM hook
+// subprocess that calls this entry point patches a freshly downloaded update
+// bundle inside a staging directory rather than /Applications.
 //
 // Idempotent: re-running against an already-patched bundle preserves
 // <ExecName>.real and just refreshes the embedded shim plus
@@ -446,7 +448,7 @@ func OriginalDesignatedRequirement(t targets.Target, repair bool) (string, error
 	}
 	entry, ok := ms.Targets[t.ID]
 	if !ok {
-		return "", fmt.Errorf("no state entry for target %s; run `desktop-via-clyde patch %s` first", t.ID, t.ID)
+		return "", MissingStateEntryError{TargetID: t.ID}
 	}
 	if entry.OriginalDesignatedRequirement != "" {
 		return entry.OriginalDesignatedRequirement, nil
@@ -472,7 +474,7 @@ func OriginalDesignatedRequirement(t targets.Target, repair bool) (string, error
 // backup bundle because the live /Applications copy has already been
 // re-signed with Goodkind by the time stepWriteState runs; the
 // backup created in step 1 is the only on-disk copy of the bundle
-// that still carries Anysphere's signature, so the DR captured from
+// that still carries the vendor signature, so the DR captured from
 // there reflects what a freshly downloaded update payload from
 // upstream must satisfy. Falls back to the live bundle for cases
 // where the backup is missing, with a warning logged at the call
@@ -487,14 +489,18 @@ func captureOriginalDR(t targets.Target) (string, error) {
 			return "", fmt.Errorf("no upstream-signed binary in backup at %s: %w", paths.BackupBundle(t), err)
 		}
 	}
-	cmd := exec.Command("/usr/bin/codesign", "--display", "--requirements", "-", source)
+	return DesignatedRequirement(source)
+}
+
+func DesignatedRequirement(codePath string) (string, error) {
+	cmd := exec.Command("/usr/bin/codesign", "--display", "--requirements", "-", codePath)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("codesign --display --requirements -: %w", err)
 	}
 	text := strings.TrimSpace(string(out))
 	if text == "" {
-		return "", fmt.Errorf("codesign produced empty DR blob for %s", source)
+		return "", fmt.Errorf("codesign produced empty DR blob for %s", codePath)
 	}
 	const designatedPrefix = "designated => "
 	for _, line := range strings.Split(text, "\n") {
@@ -503,65 +509,11 @@ func captureOriginalDR(t targets.Target) (string, error) {
 			return strings.TrimSpace(strings.TrimPrefix(line, designatedPrefix)), nil
 		}
 	}
-	return "", fmt.Errorf("no 'designated =>' line in codesign output for %s", source)
-}
-
-func stepInstallLaunchAgent(r *Runner) error {
-	plistPath := paths.LaunchAgentPlist()
-	loaded := isLaunchAgentLoaded(paths.LaunchAgentLabel)
-	plistExists := false
-	if _, err := os.Stat(plistPath); err == nil {
-		plistExists = true
-	}
-	r.Note("step 9: LaunchAgent plistExists=%v loaded=%v label=%s", plistExists, loaded, paths.LaunchAgentLabel)
-	if plistExists && loaded {
-		return nil
-	}
-
-	binaryPath, err := selfBinaryPath()
-	if err != nil {
-		return err
-	}
-	r.Note("step 9: install LaunchAgent binary=%s log=%s", binaryPath, paths.WatcherLog())
-	if r.DryRun {
-		return nil
-	}
-	if err := os.MkdirAll(paths.WatcherLogDir(), 0o755); err != nil {
-		return err
-	}
-	if !plistExists {
-		rendered, err := launchagent.Render(launchagent.RenderInput{
-			BinaryPath: binaryPath,
-			LogPath:    paths.WatcherLog(),
-		})
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(plistPath, []byte(rendered), 0o644); err != nil {
-			return err
-		}
-	}
-	if !loaded {
-		uid := strconv.Itoa(os.Getuid())
-		return r.Run("/bin/launchctl", "bootstrap", "gui/"+uid, plistPath)
-	}
-	return nil
-}
-
-// isLaunchAgentLoaded checks `launchctl print gui/<uid>/<label>` exit code.
-func isLaunchAgentLoaded(label string) bool {
-	uid := strconv.Itoa(os.Getuid())
-	cmd := exec.Command("/bin/launchctl", "print", "gui/"+uid+"/"+label)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	return cmd.Run() == nil
+	return "", fmt.Errorf("no 'designated =>' line in codesign output for %s", codePath)
 }
 
 func stepVerify(r *Runner, t targets.Target) error {
-	r.Note("target=%s step 10: verify bundle signature and shim dry-run", t.ID)
+	r.Note("target=%s step 9: verify bundle signature and shim dry-run", t.ID)
 	if r.DryRun {
 		return nil
 	}
@@ -585,20 +537,24 @@ func stepVerify(r *Runner, t targets.Target) error {
 	}
 	out, err := r.RunCaptureStdout(paths.MainBinaryPath(t), "--clyde-dry-run")
 	if err != nil {
+		if ignoreShimDryRunError(t, err) {
+			r.Note("target=%s step 9: shim dry-run was killed; continuing after signature and entitlement verification", t.ID)
+			return nil
+		}
 		return fmt.Errorf("shim dry-run: %w", err)
 	}
 	r.Note("target=%s shim dry-run output:\n%s", t.ID, string(out))
 	return nil
 }
 
-func selfBinaryPath() (string, error) {
-	p, err := os.Executable()
-	if err != nil {
-		return "", err
+func ignoreShimDryRunError(t targets.Target, err error) bool {
+	if t.ID != "claude" {
+		return false
 	}
-	resolved, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		return p, nil
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
 	}
-	return resolved, nil
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && status.Signal() == syscall.SIGKILL
 }

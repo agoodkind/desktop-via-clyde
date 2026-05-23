@@ -147,13 +147,30 @@ func verifyRequiredEntitlements(r *Runner, t targets.Target) error {
 	if t.Entitlements == nil {
 		return fmt.Errorf("target %s has no entitlement policy", t.ID)
 	}
-	required := t.Entitlements.RequiredBooleanEntitlements
-	if len(required) == 0 || r.DryRun {
+	if r.DryRun {
 		return nil
 	}
 	main := paths.MainBinaryPath(t)
-	r.Note("target=%s step 10: verify required entitlements on %s", t.ID, main)
-	return verifyBooleanEntitlements(r, main, required)
+	r.Note("target=%s step 9: verify required entitlements on %s", t.ID, main)
+	if err := verifyEntitlementPolicy(r, main, *t.Entitlements); err != nil {
+		return err
+	}
+	realPath := paths.RealBinaryPath(t)
+	if _, err := os.Stat(realPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat real binary %s: %w", realPath, err)
+	}
+	r.Note("target=%s step 9: verify required entitlements on %s", t.ID, realPath)
+	return verifyEntitlementPolicy(r, realPath, *t.Entitlements)
+}
+
+func verifyEntitlementPolicy(r *Runner, codePath string, policy targets.EntitlementsPolicy) error {
+	if err := verifyBooleanEntitlements(r, codePath, policy.RequiredBooleanEntitlements); err != nil {
+		return err
+	}
+	return verifyAbsentEntitlements(r, codePath, policy.Strip)
 }
 
 func verifyBooleanEntitlements(r *Runner, codePath string, required []string) error {

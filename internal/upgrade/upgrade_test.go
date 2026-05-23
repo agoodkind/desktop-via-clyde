@@ -10,10 +10,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/patch"
+	"goodkind.io/desktop-via-clyde/internal/paths"
+	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
+
+const anthropicRequirement = `identifier "com.anthropic.claudefordesktop" and anchor apple generic and certificate leaf[subject.OU] = Q6L2SF6YDW`
+const goodkindRequirement = `identifier "com.anthropic.claudefordesktop" and anchor apple generic and certificate leaf[subject.OU] = H3BMXM4W7H`
 
 func TestParseCursorManifest(t *testing.T) {
 	body := []byte(`{"url":"https://downloads.cursor.com/production/abc/darwin/arm64/Cursor-darwin-arm64.zip","name":"3.5.30"}`)
@@ -102,6 +108,85 @@ func TestArchiveNameFallback(t *testing.T) {
 	}
 }
 
+func TestLoadOriginalDRUsesStateEntry(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tg := targets.Target{
+		ID:       "claude",
+		AppPath:  "/Applications/Claude.app",
+		ExecName: "Claude",
+	}
+	multiState := state.MultiState{
+		Targets: map[string]state.TargetState{
+			"claude": {
+				PatchedVersion:                "1.8089.1",
+				PatchedAt:                     time.Unix(0, 0).UTC(),
+				SignIdentity:                  paths.SignIdentity,
+				OriginalDesignatedRequirement: anthropicRequirement,
+			},
+		},
+	}
+	if err := state.Save(paths.StateFile(), multiState); err != nil {
+		t.Fatalf("state.Save: %v", err)
+	}
+	got, err := loadOriginalDR(tg, false)
+	if err != nil {
+		t.Fatalf("loadOriginalDR: %v", err)
+	}
+	if got != anthropicRequirement {
+		t.Fatalf("loadOriginalDR = %q, want %q", got, anthropicRequirement)
+	}
+}
+
+func TestLoadOriginalDRBootstrapsCleanClaude(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tg := testClaudeTarget(t)
+	restore := replaceReadDesignatedRequirement(func(path string) (string, error) {
+		if path != paths.MainBinaryPath(tg) {
+			t.Fatalf("readDesignatedRequirement path = %q, want %q", path, paths.MainBinaryPath(tg))
+		}
+		return anthropicRequirement, nil
+	})
+	t.Cleanup(restore)
+	got, err := loadOriginalDR(tg, false)
+	if err != nil {
+		t.Fatalf("loadOriginalDR: %v", err)
+	}
+	if got != anthropicRequirement {
+		t.Fatalf("loadOriginalDR = %q, want %q", got, anthropicRequirement)
+	}
+}
+
+func TestLoadOriginalDRRejectsMissingStateWithRealBinary(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tg := testClaudeTarget(t)
+	if err := os.WriteFile(paths.RealBinaryPath(tg), []byte("patched"), 0o755); err != nil {
+		t.Fatalf("WriteFile real binary: %v", err)
+	}
+	_, err := loadOriginalDR(tg, false)
+	if err == nil {
+		t.Fatal("expected missing state plus real binary error")
+	}
+	if !strings.Contains(err.Error(), "has no state entry") {
+		t.Fatalf("error = %q, want missing state text", err.Error())
+	}
+}
+
+func TestLoadOriginalDRRejectsLocalRequirementBootstrap(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tg := testClaudeTarget(t)
+	restore := replaceReadDesignatedRequirement(func(string) (string, error) {
+		return goodkindRequirement, nil
+	})
+	t.Cleanup(restore)
+	_, err := loadOriginalDR(tg, false)
+	if err == nil {
+		t.Fatal("expected local signing requirement error")
+	}
+	if !strings.Contains(err.Error(), paths.SignTeamID) {
+		t.Fatalf("error = %q, want local team id", err.Error())
+	}
+}
+
 func TestVerifyDownloadSignature(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -129,6 +214,32 @@ func TestVerifyDownloadSignature(t *testing.T) {
 	}
 	if !ok {
 		t.Fatalf("verifyDownloadSignature ok = false, want true")
+	}
+}
+
+func testClaudeTarget(t *testing.T) targets.Target {
+	t.Helper()
+	appPath := filepath.Join(t.TempDir(), "Claude.app")
+	macosDir := filepath.Join(appPath, "Contents", "MacOS")
+	if err := os.MkdirAll(macosDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll MacOS: %v", err)
+	}
+	tg := targets.Target{
+		ID:       "claude",
+		AppPath:  appPath,
+		ExecName: "Claude",
+	}
+	if err := os.WriteFile(paths.MainBinaryPath(tg), []byte("clean"), 0o755); err != nil {
+		t.Fatalf("WriteFile main binary: %v", err)
+	}
+	return tg
+}
+
+func replaceReadDesignatedRequirement(fn func(string) (string, error)) func() {
+	original := readDesignatedRequirement
+	readDesignatedRequirement = fn
+	return func() {
+		readDesignatedRequirement = original
 	}
 }
 

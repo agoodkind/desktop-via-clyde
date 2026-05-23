@@ -32,7 +32,9 @@ func TestLookupUnknown(t *testing.T) {
 
 // Cursor declares Apple Events because upstream Cursor ships with that
 // entitlement and appshot capture can target Cursor. Claude declares the shared
-// runtime entitlement required by the shim. Codex's original signature includes
+// runtime entitlement required by the shim. Codex and Claude both ship
+// Team-bound entitlements that are invalid after local signing. Codex's
+// original signature includes
 // Team-bound keys (application-identifier, developer.team-identifier,
 // keychain-access-groups) that AMFI refuses to honor cross-Team and that block
 // launch entirely (verified empirically: AppleMobileFileIntegrityError
@@ -46,7 +48,11 @@ func TestEntitlementsPolicyPerTarget(t *testing.T) {
 			"com.apple.developer.team-identifier",
 			"keychain-access-groups",
 		},
-		"claude": {},
+		"claude": {
+			"com.apple.application-identifier",
+			"com.apple.developer.team-identifier",
+			"keychain-access-groups",
+		},
 	}
 	wantRequired := map[string][]string{
 		"cursor": {

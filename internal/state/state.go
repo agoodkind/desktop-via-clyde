@@ -1,5 +1,5 @@
 // Package state persists the per-target patched state recorded by the most
-// recent patch. The watcher reads this to detect drift.
+// recent patch.
 package state
 
 import (

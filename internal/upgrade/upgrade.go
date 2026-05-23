@@ -39,9 +39,6 @@ type Options struct {
 	DryRun bool
 	// NoMigrateKeychain is forwarded to the post-swap patch run.
 	NoMigrateKeychain bool
-	// SkipLaunchAgent is forwarded to the post-swap patch run. It is useful
-	// for isolated temp-dir upgrade smokes that must not register a watcher.
-	SkipLaunchAgent bool
 	// Out receives progress output. Defaults to os.Stdout.
 	Out io.Writer
 }
@@ -96,6 +93,8 @@ type claudeSquirrelUpdate struct {
 	URL     string `json:"url"`
 }
 
+var readDesignatedRequirement = patch.DesignatedRequirement
+
 // Run fetches, verifies, swaps, and re-patches the target.
 func Run(t targets.Target, opts Options) error {
 	if opts.Out == nil {
@@ -125,6 +124,21 @@ func Run(t targets.Target, opts Options) error {
 		return fmt.Errorf("manifest is missing url or name field: %+v", m)
 	}
 	if m.Name == currentVersion {
+		patched, err := isPatchedBundle(t)
+		if err != nil {
+			return err
+		}
+		if !patched {
+			r.Note("target=%s already on version %s; patching clean bundle", t.ID, currentVersion)
+			return patch.Patch(t, patch.Options{
+				DryRun:            opts.DryRun,
+				NoMigrateKeychain: opts.NoMigrateKeychain,
+				Out:               opts.Out,
+			})
+		}
+		if _, err := loadOriginalDR(t, opts.DryRun); err != nil {
+			return err
+		}
 		r.Note("target=%s already on version %s; nothing to do", t.ID, currentVersion)
 		return nil
 	}
@@ -163,16 +177,6 @@ func Run(t targets.Target, opts Options) error {
 		return err
 	}
 
-	watcherLoaded := false
-	if opts.SkipLaunchAgent {
-		r.Note("skipping watcher unload/load")
-	} else {
-		watcherLoaded, err = unloadWatcher(r, opts.DryRun)
-		if err != nil {
-			return err
-		}
-	}
-
 	if err := swapBundle(r, t, extractedApp, opts.DryRun); err != nil {
 		return err
 	}
@@ -180,18 +184,12 @@ func Run(t targets.Target, opts Options) error {
 	patchOpts := patch.Options{
 		DryRun:            opts.DryRun,
 		NoMigrateKeychain: opts.NoMigrateKeychain,
-		SkipLaunchAgent:   opts.SkipLaunchAgent,
 		Out:               opts.Out,
 	}
 	if err := patch.Patch(t, patchOpts); err != nil {
 		return fmt.Errorf("re-patch after swap: %w", err)
 	}
 
-	if watcherLoaded {
-		if err := loadWatcher(r, opts.DryRun); err != nil {
-			r.Note("warning: failed to reload watcher LaunchAgent: %v", err)
-		}
-	}
 	r.Note("target=%s upgrade to %s complete", t.ID, m.Name)
 	return nil
 }
@@ -383,7 +381,46 @@ func directHTTPClient(timeout time.Duration) *http.Client {
 // state.json. The field is populated at first patch time by reading
 // codesign --display --requirements - against the unmodified upstream bundle.
 func loadOriginalDR(t targets.Target, dryRun bool) (string, error) {
-	return patch.OriginalDesignatedRequirement(t, !dryRun)
+	dr, err := patch.OriginalDesignatedRequirement(t, !dryRun)
+	if err == nil {
+		return verifyOriginalRequirementIsUpstream(t, dr)
+	}
+	if t.ID != "claude" || !errors.Is(err, patch.ErrMissingStateEntry) {
+		return "", err
+	}
+	return bootstrapClaudeOriginalDR(t)
+}
+
+func bootstrapClaudeOriginalDR(t targets.Target) (string, error) {
+	realPath := paths.RealBinaryPath(t)
+	if _, err := os.Stat(realPath); err == nil {
+		return "", fmt.Errorf("target=claude has no state entry but %s exists; restore or unpatch Claude before upgrade", realPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("stat %s: %w", realPath, err)
+	}
+	dr, err := readDesignatedRequirement(paths.MainBinaryPath(t))
+	if err != nil {
+		return "", fmt.Errorf("capture Claude DesignatedRequirement from clean app: %w", err)
+	}
+	return verifyOriginalRequirementIsUpstream(t, dr)
+}
+
+func verifyOriginalRequirementIsUpstream(t targets.Target, dr string) (string, error) {
+	if strings.Contains(dr, paths.SignTeamID) {
+		return "", fmt.Errorf("target=%s DesignatedRequirement identifies local signing team %s, not upstream", t.ID, paths.SignTeamID)
+	}
+	return dr, nil
+}
+
+func isPatchedBundle(t targets.Target) (bool, error) {
+	realPath := paths.RealBinaryPath(t)
+	if _, err := os.Stat(realPath); err == nil {
+		return true, nil
+	} else if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else {
+		return false, fmt.Errorf("stat %s: %w", realPath, err)
+	}
 }
 
 // makeStagingDir creates an isolated directory under the state root for the
@@ -567,40 +604,6 @@ func verifyOriginalDR(r *patch.Runner, appPath, dr string, dryRun bool) error {
 		return nil
 	}
 	return r.Run("/usr/bin/codesign", "--verify", "--deep", "--strict", "-R="+dr, appPath)
-}
-
-// unloadWatcher boots out the watcher LaunchAgent so its FSEvents callback
-// does not fire a concurrent patch flow while the app is mid-swap.
-func unloadWatcher(r *patch.Runner, dryRun bool) (bool, error) {
-	plist := paths.LaunchAgentPlist()
-	if _, err := os.Stat(plist); err != nil {
-		r.Note("watcher LaunchAgent plist not present at %s; nothing to unload", plist)
-		return false, nil
-	}
-	uid := strconv.Itoa(os.Getuid())
-	r.Note("unloading watcher LaunchAgent")
-	if dryRun {
-		return true, nil
-	}
-	if err := exec.Command("/bin/launchctl", "bootout", "gui/"+uid, plist).Run(); err != nil {
-		r.Note("watcher bootout returned %v (was the agent loaded?); continuing", err)
-	}
-	return true, nil
-}
-
-// loadWatcher re-bootstraps the watcher LaunchAgent so post-update drift
-// detection keeps working on the new bundle.
-func loadWatcher(r *patch.Runner, dryRun bool) error {
-	plist := paths.LaunchAgentPlist()
-	if _, err := os.Stat(plist); err != nil {
-		return nil
-	}
-	uid := strconv.Itoa(os.Getuid())
-	r.Note("reloading watcher LaunchAgent")
-	if dryRun {
-		return nil
-	}
-	return exec.Command("/bin/launchctl", "bootstrap", "gui/"+uid, plist).Run()
 }
 
 // swapBundle removes the existing /Applications/<App>.app and the stale

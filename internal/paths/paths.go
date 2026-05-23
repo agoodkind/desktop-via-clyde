@@ -1,6 +1,6 @@
 // Package paths centralizes filesystem locations used by desktop-via-clyde.
-// All paths are per-target unless they are global (state.json, LaunchAgent
-// plist, watcher log, CA cert reference).
+// All paths are per-target unless they are global state or CA certificate
+// references.
 package paths
 
 import (
@@ -14,8 +14,8 @@ import (
 // hash at sign time to disambiguate between duplicate keychain entries.
 const SignIdentity = "Developer ID Application: Alex Goodkind (H3BMXM4W7H)"
 
-// LaunchAgentLabel is the launchd label for the single shared watcher.
-const LaunchAgentLabel = "io.goodkind.desktop-via-clyde.watcher"
+// SignTeamID is the Apple team identifier for SignIdentity.
+const SignTeamID = "H3BMXM4W7H"
 
 // StateRootEnv overrides the Application Support state root for isolated
 // upgrade smokes against copied app bundles.
@@ -76,21 +76,6 @@ func RealBinaryPath(t targets.Target) string {
 // InfoPlistPath is <App>/Contents/Info.plist.
 func InfoPlistPath(t targets.Target) string {
 	return filepath.Join(t.AppPath, "Contents", "Info.plist")
-}
-
-// WatcherLog is the rolling watcher log path.
-func WatcherLog() string {
-	return filepath.Join(Home(), ".local", "state", "clyde", "desktop-via-clyde", "watcher.log")
-}
-
-// WatcherLogDir is the parent of WatcherLog.
-func WatcherLogDir() string {
-	return filepath.Dir(WatcherLog())
-}
-
-// LaunchAgentPlist is the user LaunchAgent plist path.
-func LaunchAgentPlist() string {
-	return filepath.Join(Home(), "Library", "LaunchAgents", LaunchAgentLabel+".plist")
 }
 
 // ClydeCAPath is the read-only reference to the MITM CA the shim relies on.

@@ -76,7 +76,6 @@ func TestPatchDryRunScansComputerUseCacheHelpers(t *testing.T) {
 	if err := Patch(tg, Options{
 		DryRun:            true,
 		NoMigrateKeychain: true,
-		SkipLaunchAgent:   true,
 		Out:               &out,
 	}); err != nil {
 		t.Fatalf("Patch dry-run: %v", err)

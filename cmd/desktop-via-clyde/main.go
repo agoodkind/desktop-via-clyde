@@ -1,10 +1,8 @@
 // Command desktop-via-clyde patches macOS Electron apps (Cursor, Codex, Claude)
-// to route every launch through the clyde MITM proxy on [::1]:48723, and runs
-// a single FSEvents watcher that re-applies each patch after auto-update.
+// to route every launch through the clyde MITM proxy on [::1]:48723.
 //
-//	desktop-via-clyde patch <app>              install shim, re-sign, install watcher
+//	desktop-via-clyde patch <app>              install shim and re-sign
 //	desktop-via-clyde unpatch <app>            restore one target's backup
-//	desktop-via-clyde watch                    long-running FSEvents watcher
 //	desktop-via-clyde status                   per-target state summary
 //	desktop-via-clyde keychain-migrate <app>   re-grant keychain ACLs on an already-patched app
 //
@@ -26,7 +24,6 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 	"goodkind.io/desktop-via-clyde/internal/upgrade"
-	"goodkind.io/desktop-via-clyde/internal/watch"
 )
 
 func main() {
@@ -49,7 +46,6 @@ func newRootCmd(out io.Writer) *cobra.Command {
 
 	root.AddCommand(newPatchCmd(out))
 	root.AddCommand(newUnpatchCmd(out))
-	root.AddCommand(newWatchCmd())
 	root.AddCommand(newStatusCmd(out))
 	root.AddCommand(newKeychainMigrateCmd(out))
 	root.AddCommand(newMITMHookCmd())
@@ -75,11 +71,10 @@ func lookupTarget(arg, appPath string) (targets.Target, error) {
 func newPatchCmd(out io.Writer) *cobra.Command {
 	var dryRun bool
 	var noMigrate bool
-	var skipLaunchAgent bool
 	var appPath string
 	cmd := &cobra.Command{
 		Use:   "patch <app>",
-		Short: "Install the shim into one app bundle and load the watcher LaunchAgent",
+		Short: "Install the shim into one app bundle and re-sign it",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			t, err := lookupTarget(args[0], appPath)
@@ -89,7 +84,6 @@ func newPatchCmd(out io.Writer) *cobra.Command {
 			return patch.Patch(t, patch.Options{
 				DryRun:            dryRun,
 				NoMigrateKeychain: noMigrate,
-				SkipLaunchAgent:   skipLaunchAgent,
 				Out:               out,
 			})
 		},
@@ -97,7 +91,6 @@ func newPatchCmd(out io.Writer) *cobra.Command {
 	cmd.Long = "patch <app>: " + appArg()
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the bundle")
 	cmd.Flags().BoolVar(&noMigrate, "no-migrate-keychain", false, "skip steps 1b and 7a (keychain ACL re-grant)")
-	cmd.Flags().BoolVar(&skipLaunchAgent, "skip-launch-agent", false, "skip watcher LaunchAgent install/load")
 	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
 	return cmd
 }
@@ -107,7 +100,7 @@ func newUnpatchCmd(out io.Writer) *cobra.Command {
 	var appPath string
 	cmd := &cobra.Command{
 		Use:   "unpatch <app>",
-		Short: "Restore one app's bundle from its backup; unload watcher only if it is the last patched target",
+		Short: "Restore one app's bundle from its backup",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			t, err := lookupTarget(args[0], appPath)
@@ -127,7 +120,6 @@ func newUpgradeCmd(out io.Writer) *cobra.Command {
 	var channel string
 	var dryRun bool
 	var noMigrate bool
-	var skipLaunchAgent bool
 	var appPath string
 	cmd := &cobra.Command{
 		Use:   "upgrade <app>",
@@ -142,7 +134,6 @@ func newUpgradeCmd(out io.Writer) *cobra.Command {
 				Channel:           channel,
 				DryRun:            dryRun,
 				NoMigrateKeychain: noMigrate,
-				SkipLaunchAgent:   skipLaunchAgent,
 				Out:               out,
 			})
 		},
@@ -151,7 +142,6 @@ func newUpgradeCmd(out io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&channel, "channel", "stable", "upstream release channel (stable, dev, etc.)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the bundle")
 	cmd.Flags().BoolVar(&noMigrate, "no-migrate-keychain", false, "skip keychain ACL re-grant during the post-swap patch")
-	cmd.Flags().BoolVar(&skipLaunchAgent, "skip-launch-agent", false, "skip watcher LaunchAgent install/load during post-swap patch")
 	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
 	return cmd
 }
@@ -175,29 +165,6 @@ func newKeychainMigrateCmd(out io.Writer) *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without touching keychain items")
 	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
 	return cmd
-}
-
-func newWatchCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "watch",
-		Short: "Run the FSEvents watcher (invoked by the LaunchAgent)",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			logFile, err := openLogFile()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "watcher: opening log file failed: %v\n", err)
-				return watch.Run(os.Stderr)
-			}
-			defer func() { _ = logFile.Close() }()
-			return watch.Run(io.MultiWriter(os.Stdout, logFile))
-		},
-	}
-}
-
-func openLogFile() (*os.File, error) {
-	if err := os.MkdirAll(paths.WatcherLogDir(), 0o755); err != nil {
-		return nil, err
-	}
-	return os.OpenFile(paths.WatcherLog(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 }
 
 func newStatusCmd(out io.Writer) *cobra.Command {

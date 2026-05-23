@@ -211,6 +211,11 @@ var Registry = []Target{
 		BundleID: "com.anthropic.claudefordesktop",
 		ExecName: "Claude",
 		Entitlements: &EntitlementsPolicy{
+			Strip: []string{
+				"com.apple.application-identifier",
+				"com.apple.developer.team-identifier",
+				"keychain-access-groups",
+			},
 			RequiredBooleanEntitlements: []string{
 				"com.apple.security.cs.disable-library-validation",
 			},
