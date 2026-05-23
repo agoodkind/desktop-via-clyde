@@ -6,7 +6,7 @@ route through the local Clyde MITM proxy at `http://[::1]:48723`.
 The tool does not create wrapper apps. It mutates each target app bundle in
 place, keeps the vendor executable as `<ExecName>.real`, installs a universal
 Swift shim at the original executable path, re-signs the bundle, and records
-enough state to re-apply the patch after app updates.
+state for status checks and upgrade verification.
 
 ## Supported Targets
 
@@ -14,7 +14,7 @@ enough state to re-apply the patch after app updates.
 | --- | --- | --- | --- | --- |
 | `cursor` | `/Applications/Cursor.app` | `Cursor` | Cursor JSON manifest | `Cursor Safe Storage` |
 | `codex` | `/Applications/Codex.app` | `Codex` | Sparkle appcast at `https://persistent.oaistatic.com/codex-app-prod/appcast.xml` | `Codex Safe Storage`, `Codex Auth`, `Codex MCP Credentials` |
-| `claude` | `/Applications/Claude.app` | `Claude` | Anthropic Squirrel JSON endpoint | `Claude Safe Storage` |
+| `claude` | `/Applications/Claude.app` | `Claude` | Anthropic Squirrel JSON endpoint used by `desktop-via-clyde upgrade claude` | `Claude Safe Storage` |
 
 The canonical target registry lives in `internal/targets/targets.go`. Each
 target defines the bundle path, executable name, bundle identifier, keychain
@@ -250,12 +250,6 @@ Print the planned patch steps without changing the bundle:
 desktop-via-clyde patch codex --dry-run
 ```
 
-Skip LaunchAgent installation during isolated app-copy tests:
-
-```bash
-desktop-via-clyde patch codex --app-path /tmp/dvc-apps/Codex.app --skip-launch-agent
-```
-
 Skip keychain ACL re-granting when a smoke test should avoid keychain prompts:
 
 ```bash
@@ -304,10 +298,9 @@ updates state, and verifies the result.
 13. Re-grant keychain ACLs on captured items so the re-signed app can keep using
     its existing secrets.
 14. Write or update `state.json`.
-15. Install and load the shared LaunchAgent watcher unless skipped.
-16. Verify signatures with `codesign --verify --verbose=2` and verify required
+15. Verify signatures with `codesign --verify --verbose=2` and verify required
     entitlement keys on the effective main executable.
-17. Run `<ExecName> --clyde-dry-run` and print the resulting launch policy.
+16. Run `<ExecName> --clyde-dry-run` and print the resulting launch policy.
 
 ## Keychain Access
 
@@ -347,32 +340,6 @@ prints one of these labels:
 | `patched` | The bundle has state, the `.real` binary exists, and the version matches. |
 | `drifted` | The state entry exists, but the `.real` binary is missing or the bundle version changed. |
 
-## Watcher
-
-The watcher is a single user LaunchAgent:
-
-```text
-$HOME/Library/LaunchAgents/io.goodkind.desktop-via-clyde.watcher.plist
-```
-
-The watcher command is:
-
-```bash
-desktop-via-clyde watch
-```
-
-The watcher reads `state.json`, watches every target that has a state entry, and
-uses a three-second debounce before checking drift. Drift means either
-`<ExecName>.real` is missing or the current `CFBundleVersion` differs from the
-version recorded at patch time. When drift is detected, the watcher sends a
-desktop notification and runs the same `patch <target>` flow again.
-
-Watcher logs are written to:
-
-```text
-$HOME/.local/state/clyde/desktop-via-clyde/watcher.log
-```
-
 ## Upgrade
 
 Upgrade one app by fetching the upstream update feed directly:
@@ -394,7 +361,7 @@ Target-specific upgrade behavior:
 | --- | --- |
 | `cursor` | Uses Cursor's JSON manifest and verifies the extracted app against the recorded upstream DesignatedRequirement. |
 | `codex` | Uses the Sparkle appcast and verifies Sparkle Ed25519 signatures with the current or extracted `SUPublicEDKey`, then verifies the extracted app against the recorded upstream DesignatedRequirement. |
-| `claude` | Uses Anthropic's Squirrel endpoint with a nonsecret generated `device_id`, then verifies the extracted app against the recorded upstream DesignatedRequirement. |
+| `claude` | Uses Anthropic's Squirrel endpoint with a nonsecret generated `device_id`, then verifies the extracted app against the recorded upstream DesignatedRequirement. A clean installed Claude app can supply the upstream DesignatedRequirement when no Claude entry exists in `state.json`. |
 
 Print upgrade actions without replacing the app:
 
@@ -408,8 +375,7 @@ Run an isolated upgrade smoke against a copied bundle and throwaway state root:
 DESKTOP_VIA_CLYDE_STATE_ROOT=/tmp/dvc-state \
   desktop-via-clyde upgrade codex \
   --app-path /tmp/dvc-apps/Codex.app \
-  --no-migrate-keychain \
-  --skip-launch-agent
+  --no-migrate-keychain
 ```
 
 When launching a copied app with an isolated `HOME`, pass the real Clyde CA path
@@ -437,8 +403,10 @@ response envelope telling Clyde to return the patched zip.
 
 This path is used for update downloads that are intercepted by Clyde before the
 app's own updater installs them. It shares the same bundle mutation code as
-`patch`, but it does not write `state.json`, install the LaunchAgent, re-grant
-keychain items, or run the final installed-app verification.
+`patch`, but it does not write `state.json`, re-grant keychain items, or run the
+final installed-app verification.
+
+Claude Desktop updates use `desktop-via-clyde upgrade claude`.
 
 ## Unpatch
 
@@ -457,7 +425,6 @@ $HOME/Library/Application Support/desktop-via-clyde/backup/<target>/
 ```
 
 It removes that target from `state.json` and verifies the restored signature.
-The LaunchAgent is unloaded only when no other target remains patched.
 
 ## Files and State
 
@@ -467,8 +434,6 @@ The LaunchAgent is unloaded only when no other target remains patched.
 | `$HOME/.local/bin/desktop-via-clyde` | Installed CLI binary. |
 | `$HOME/Library/Application Support/desktop-via-clyde/state.json` | Per-target patched version, signing identity, patch time, and upstream DesignatedRequirement. |
 | `$HOME/Library/Application Support/desktop-via-clyde/backup/<target>/` | Original upstream app bundle backup. |
-| `$HOME/Library/LaunchAgents/io.goodkind.desktop-via-clyde.watcher.plist` | Shared watcher LaunchAgent. |
-| `$HOME/.local/state/clyde/desktop-via-clyde/watcher.log` | Watcher log. |
 | `$HOME/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt` | Clyde MITM CA certificate used by the shim. |
 | `/Applications/<App>.app/Contents/MacOS/<ExecName>` | Installed shim after patching. |
 | `/Applications/<App>.app/Contents/MacOS/<ExecName>.real` | Original vendor executable after patching. |
@@ -522,11 +487,9 @@ make clean
 
 | Path | Purpose |
 | --- | --- |
-| `cmd/desktop-via-clyde/` | Cobra CLI commands for patching, unpatching, watching, status, keychain access re-granting, upgrade, and MITM hook execution. |
+| `cmd/desktop-via-clyde/` | Cobra CLI commands for patching, unpatching, status, keychain access re-granting, upgrade, and MITM hook execution. |
 | `internal/targets/` | Target registry and updater metadata. |
 | `internal/patch/` | Patch, unpatch, keychain access re-granting, signing, state writing, and verification logic. |
-| `internal/watch/` | FSEvents watcher and drift detection. |
-| `internal/launchagent/` | LaunchAgent plist rendering. |
 | `internal/state/` | `state.json` load and save code. |
 | `internal/paths/` | Shared filesystem paths and signing identity. |
 | `internal/upgrade/` | Upstream manifest fetch, archive verification, bundle swap, and post-upgrade patch flow. |
