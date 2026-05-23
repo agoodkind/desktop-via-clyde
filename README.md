@@ -19,7 +19,8 @@ state for status checks and upgrade verification.
 The canonical target registry lives in `internal/targets/targets.go`. Each
 target defines the bundle path, executable name, bundle identifier, keychain
 services, target-specific entitlements policy, nested code objects that must be
-signed, and updater metadata.
+signed, nested code objects that must keep upstream signatures, and updater
+metadata.
 
 ## Runtime Model
 
@@ -283,24 +284,26 @@ updates state, and verifies the result.
    `Contents/Resources/plugins/openai-bundled/plugins/computer-use/Codex Computer Use.app`
    helper before sealing the outer app, so the installed helper receives the
    local signing and entitlement policy.
-9. Re-sign target-specific nested code objects, the `.real` binary, the shim,
+9. Restore target-specific nested code objects that must keep upstream
+   signatures.
+10. Re-sign target-specific nested code objects, the `.real` binary, the shim,
    and the outer `.app` bundle, using the target entitlement file for the
    `.real` binary, shim, and outer bundle seal.
-10. Remove `com.apple.quarantine` from the bundle on a best-effort basis.
-11. For Codex only, repair and locally re-sign the installed
+11. Remove `com.apple.quarantine` from the bundle on a best-effort basis.
+12. For Codex only, repair and locally re-sign the installed
     `$HOME/.codex/computer-use/Codex Computer Use.app` helper so its native
     trusted-sender policy accepts the locally signed Codex app. The helper patch
     strips Team-bound application-group entitlements, preserves Apple Events,
     and verifies the helper bundle signature.
-12. For Codex only, repair and locally re-sign every cached helper matching
+13. For Codex only, repair and locally re-sign every cached helper matching
     `$HOME/.codex/plugins/cache/openai-bundled/computer-use/*/Codex Computer Use.app`
     so plugin updates keep the same helper policy.
-13. Re-grant keychain ACLs on captured items so the re-signed app can keep using
+14. Re-grant keychain ACLs on captured items so the re-signed app can keep using
     its existing secrets.
-14. Write or update `state.json`.
-15. Verify signatures with `codesign --verify --verbose=2` and verify required
+15. Write or update `state.json`.
+16. Verify signatures with `codesign --verify --verbose=2` and verify required
     entitlement keys on the effective main executable.
-16. Run `<ExecName> --clyde-dry-run` and print the resulting launch policy.
+17. Run `<ExecName> --clyde-dry-run` and print the resulting launch policy.
 
 ## Keychain Access
 

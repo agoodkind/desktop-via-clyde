@@ -135,10 +135,7 @@ func TestNestedSignPathsPerTarget(t *testing.T) {
 			"Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
 			"Contents/Frameworks/Sparkle.framework",
 		},
-		"claude": {
-			"Contents/Frameworks/Squirrel.framework/Versions/A/Resources/ShipIt",
-			"Contents/Frameworks/Squirrel.framework",
-		},
+		"claude": nil,
 	}
 	for _, tg := range Registry {
 		exp, ok := want[tg.ID]
@@ -148,6 +145,26 @@ func TestNestedSignPathsPerTarget(t *testing.T) {
 		}
 		if !stringSlicesEqual(tg.NestedSignPaths, exp) {
 			t.Errorf("target %s NestedSignPaths mismatch: got %v want %v", tg.ID, tg.NestedSignPaths, exp)
+		}
+	}
+}
+
+func TestPreservedNestedCodePathsPerTarget(t *testing.T) {
+	want := map[string][]string{
+		"cursor": nil,
+		"codex":  nil,
+		"claude": {
+			"Contents/Frameworks/Squirrel.framework",
+		},
+	}
+	for _, tg := range Registry {
+		exp, ok := want[tg.ID]
+		if !ok {
+			t.Errorf("unexpected target id %q in registry", tg.ID)
+			continue
+		}
+		if !stringSlicesEqual(tg.PreservedNestedCodePaths, exp) {
+			t.Errorf("target %s PreservedNestedCodePaths mismatch: got %v want %v", tg.ID, tg.PreservedNestedCodePaths, exp)
 		}
 	}
 }

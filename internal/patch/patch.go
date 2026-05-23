@@ -96,7 +96,7 @@ func Patch(t targets.Target, opts Options) error {
 	// install, re-sign, strip quarantine). Shared with the
 	// mitm-hook re-patch flow so initial-install and update-time
 	// patches always run the same bundle-mutation logic.
-	if err := patchBundleSteps(r, t); err != nil {
+	if err := patchBundleSteps(r, t, true); err != nil {
 		return err
 	}
 
@@ -157,7 +157,7 @@ func PatchExtractedBundle(t targets.Target, opts BundleOptions) error {
 			return fmt.Errorf("bundle not found at %s: %w", t.AppPath, err)
 		}
 	}
-	return patchBundleSteps(r, t)
+	return patchBundleSteps(r, t, false)
 }
 
 // patchBundleSteps runs the bundle-mutation steps (2 through 7) on
@@ -165,7 +165,7 @@ func PatchExtractedBundle(t targets.Target, opts BundleOptions) error {
 // the install-time Patch flow and the update-time
 // PatchExtractedBundle flow so both paths always run the same
 // signing logic.
-func patchBundleSteps(r *Runner, t targets.Target) error {
+func patchBundleSteps(r *Runner, t targets.Target, restorePreservedNestedCode bool) error {
 	if t.Entitlements == nil {
 		return fmt.Errorf("target %s has no entitlement policy", t.ID)
 	}
@@ -183,6 +183,11 @@ func patchBundleSteps(r *Runner, t targets.Target) error {
 	}
 	if err := stepPatchBundledComputerUse(r, t); err != nil {
 		return fmt.Errorf("patch bundled computer use helper: %w", err)
+	}
+	if restorePreservedNestedCode {
+		if err := stepRestorePreservedNestedCode(r, t); err != nil {
+			return fmt.Errorf("restore preserved nested code: %w", err)
+		}
 	}
 	if err := stepResign(r, t, entFile); err != nil {
 		return fmt.Errorf("re-sign: %w", err)
@@ -289,6 +294,37 @@ func stepInstallShim(r *Runner, t targets.Target) error {
 		return err
 	}
 	return os.Chmod(main, 0o755)
+}
+
+func stepRestorePreservedNestedCode(r *Runner, t targets.Target) error {
+	for _, relPath := range t.PreservedNestedCodePaths {
+		source := filepath.Join(paths.BackupBundle(t), filepath.FromSlash(relPath))
+		destination := filepath.Join(t.AppPath, filepath.FromSlash(relPath))
+		r.Note("target=%s step 5c: restore preserved nested code %s -> %s", t.ID, source, destination)
+		if r.DryRun {
+			continue
+		}
+		info, err := os.Stat(source)
+		if err != nil {
+			return fmt.Errorf("stat preserved nested code source %s: %w", source, err)
+		}
+		if info.IsDir() {
+			if err := os.RemoveAll(destination); err != nil {
+				return fmt.Errorf("remove preserved nested code destination %s: %w", destination, err)
+			}
+			if err := r.Run("/usr/bin/rsync", "-a", source+"/", destination+"/"); err != nil {
+				return fmt.Errorf("restore preserved nested code directory %s: %w", relPath, err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+			return fmt.Errorf("create preserved nested code parent %s: %w", filepath.Dir(destination), err)
+		}
+		if err := r.Run("/bin/cp", "-p", source, destination); err != nil {
+			return fmt.Errorf("restore preserved nested code file %s: %w", relPath, err)
+		}
+	}
+	return nil
 }
 
 func stepResign(r *Runner, t targets.Target, entFile string) error {

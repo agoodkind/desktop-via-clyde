@@ -88,6 +88,31 @@ func TestPatchDryRunScansComputerUseCacheHelpers(t *testing.T) {
 	}
 }
 
+func TestClaudePatchRestoresSquirrelInsteadOfResigningIt(t *testing.T) {
+	tg, err := targets.Lookup("claude")
+	if err != nil {
+		t.Fatalf("Lookup(claude): %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := Patch(tg, Options{
+		DryRun:            true,
+		NoMigrateKeychain: true,
+		Out:               &out,
+	}); err != nil {
+		t.Fatalf("Patch dry-run: %v", err)
+	}
+
+	log := out.String()
+	restorePath := filepath.Join(tg.AppPath, "Contents", "Frameworks", "Squirrel.framework")
+	if !strings.Contains(log, "target=claude step 5c: restore preserved nested code") {
+		t.Fatalf("Patch dry-run log missing Squirrel restore step\nlog:\n%s", log)
+	}
+	if strings.Contains(log, "target=claude step 6: re-sign nested code object "+restorePath) {
+		t.Fatalf("Patch dry-run log re-signs preserved Squirrel framework\nlog:\n%s", log)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

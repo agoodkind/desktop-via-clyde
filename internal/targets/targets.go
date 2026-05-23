@@ -79,6 +79,10 @@ type Target struct {
 	// NestedSignPaths lists app-relative code objects that must be re-signed
 	// before the outer .app bundle is sealed.
 	NestedSignPaths []string
+	// PreservedNestedCodePaths lists app-relative code objects that must keep
+	// their upstream signature and can be restored from the backup before the
+	// outer .app bundle is sealed.
+	PreservedNestedCodePaths []string
 	// ComputerUse declares a Codex-only companion helper bundle that must be
 	// repaired after Codex is locally re-signed.
 	ComputerUse *ComputerUsePolicy
@@ -221,8 +225,7 @@ var Registry = []Target{
 			},
 		},
 		KeychainServices: []string{"Claude Safe Storage"},
-		NestedSignPaths: []string{
-			"Contents/Frameworks/Squirrel.framework/Versions/A/Resources/ShipIt",
+		PreservedNestedCodePaths: []string{
 			"Contents/Frameworks/Squirrel.framework",
 		},
 		Updater: Updater{
