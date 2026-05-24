@@ -14,7 +14,7 @@ state for status checks and upgrade verification.
 | --- | --- | --- | --- | --- |
 | `cursor` | `/Applications/Cursor.app` | `Cursor` | Cursor JSON manifest | `Cursor Safe Storage` |
 | `codex` | `/Applications/Codex.app` | `Codex` | Sparkle appcast at `https://persistent.oaistatic.com/codex-app-prod/appcast.xml` | `Codex Safe Storage`, `Codex Auth`, `Codex MCP Credentials` |
-| `claude` | `/Applications/Claude.app` | `Claude` | Anthropic Squirrel JSON endpoint used by `desktop-via-clyde upgrade claude` | `Claude Safe Storage` |
+| `claude` | `/Applications/Claude.app` | `Claude` | Anthropic Squirrel JSON endpoint used by `desktop-via-clyde claude upgrade` | `Claude Safe Storage` |
 
 The canonical target registry lives in `internal/targets/targets.go`. Each
 target defines the bundle path, executable name, bundle identifier, keychain
@@ -150,7 +150,7 @@ The Codex plugin cache stores update candidates matching:
 $HOME/.codex/plugins/cache/openai-bundled/computer-use/*/Codex Computer Use.app
 ```
 
-`desktop-via-clyde patch codex` repairs the bundled helper, the active helper,
+`desktop-via-clyde codex patch` repairs the bundled helper, the active helper,
 and every cached helper matching the plugin-cache path. This keeps Codex startup,
 Codex plugin updates, and Codex app updates on the same signing and entitlement
 policy.
@@ -335,21 +335,21 @@ desktop-via-clyde codex-cli status
 Patch one app:
 
 ```bash
-desktop-via-clyde patch cursor
-desktop-via-clyde patch codex
-desktop-via-clyde patch claude
+desktop-via-clyde cursor patch
+desktop-via-clyde codex patch
+desktop-via-clyde claude patch
 ```
 
 Print the planned patch steps without changing the bundle:
 
 ```bash
-desktop-via-clyde patch codex --dry-run
+desktop-via-clyde codex patch --dry-run
 ```
 
 Skip keychain ACL re-granting when a smoke test should avoid keychain prompts:
 
 ```bash
-desktop-via-clyde patch codex --no-migrate-keychain
+desktop-via-clyde codex patch --no-migrate-keychain
 ```
 
 The patch command is idempotent. Re-running it against an already-patched bundle
@@ -358,7 +358,7 @@ updates state, and verifies the result.
 
 ### Patch Flow
 
-`patch <target>` runs these steps:
+`desktop-via-clyde <target> patch` runs these steps:
 
 1. Read `Contents/Info.plist` to capture bundle version, bundle identifier, and
    executable name.
@@ -409,9 +409,9 @@ re-grants access to the patched app afterward.
 Run only the keychain capture and re-grant steps on an already-patched app:
 
 ```bash
-desktop-via-clyde keychain-migrate cursor
-desktop-via-clyde keychain-migrate codex
-desktop-via-clyde keychain-migrate claude
+desktop-via-clyde cursor keychain-migrate
+desktop-via-clyde codex keychain-migrate
+desktop-via-clyde claude keychain-migrate
 ```
 
 The first patch or keychain re-grant for a target can still show macOS keychain
@@ -424,6 +424,14 @@ Print the state of every registered target:
 
 ```bash
 desktop-via-clyde status
+```
+
+Print the state of one registered target:
+
+```bash
+desktop-via-clyde cursor status
+desktop-via-clyde codex status
+desktop-via-clyde claude status
 ```
 
 The status command reads `state.json`, checks whether each bundle exists,
@@ -443,15 +451,15 @@ prints one of these labels:
 Upgrade one app by fetching the upstream update feed directly:
 
 ```bash
-desktop-via-clyde upgrade cursor
-desktop-via-clyde upgrade codex
-desktop-via-clyde upgrade claude
+desktop-via-clyde cursor upgrade
+desktop-via-clyde codex upgrade
+desktop-via-clyde claude upgrade
 ```
 
-`upgrade <target>` fetches the target's upstream manifest, downloads the full
+`desktop-via-clyde <target> upgrade` fetches the target's upstream manifest, downloads the full
 `.app` update archive, verifies the extracted app against the original upstream
 DesignatedRequirement recorded in `state.json`, swaps the verified bundle into
-the app path, and then runs `patch <target>`.
+the app path, and then runs `desktop-via-clyde <target> patch`.
 
 Target-specific upgrade behavior:
 
@@ -464,14 +472,14 @@ Target-specific upgrade behavior:
 Print upgrade actions without replacing the app:
 
 ```bash
-desktop-via-clyde upgrade codex --dry-run
+desktop-via-clyde codex upgrade --dry-run
 ```
 
 Run an isolated upgrade smoke against a copied bundle and throwaway state root:
 
 ```bash
 DESKTOP_VIA_CLYDE_STATE_ROOT=/tmp/dvc-state \
-  desktop-via-clyde upgrade codex \
+  desktop-via-clyde codex upgrade \
   --app-path /tmp/dvc-apps/Codex.app \
   --no-migrate-keychain
 ```
@@ -484,39 +492,19 @@ DESKTOP_VIA_CLYDE_CA_CERT=/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm
   /tmp/dvc-apps/Codex.app/Contents/MacOS/Codex --clyde-dry-run
 ```
 
-## MITM Hook
-
-The hidden command:
-
-```bash
-desktop-via-clyde mitm-hook patch-bundle <target>
-```
-
-is for Clyde MITM hook subprocesses. Clyde writes a JSON envelope on stdin for a
-`transform_response` hook. The hook command reads the upstream response zip,
-extracts the `.app` with `ditto`, verifies the upstream signature against the
-recorded DesignatedRequirement, runs the shared bundle-mutation patch steps in a
-temporary staging directory, re-zips the patched `.app`, and writes a JSON
-response envelope telling Clyde to return the patched zip.
-
-This path is used for update downloads that are intercepted by Clyde before the
-app's own updater installs them. It shares the same bundle mutation code as
-`patch`, but it does not write `state.json`, re-grant keychain items, or run the
-final installed-app verification.
-
-Claude Desktop updates use `desktop-via-clyde upgrade claude`.
+Claude Desktop updates use `desktop-via-clyde claude upgrade`.
 
 ## Unpatch
 
 Restore a target from its backup:
 
 ```bash
-desktop-via-clyde unpatch cursor
-desktop-via-clyde unpatch codex
-desktop-via-clyde unpatch claude
+desktop-via-clyde cursor unpatch
+desktop-via-clyde codex unpatch
+desktop-via-clyde claude unpatch
 ```
 
-`unpatch <target>` restores the saved bundle from:
+`desktop-via-clyde <target> unpatch` restores the saved bundle from:
 
 ```text
 $HOME/Library/Application Support/desktop-via-clyde/backup/<target>/
@@ -585,7 +573,7 @@ make clean
 
 | Path | Purpose |
 | --- | --- |
-| `cmd/desktop-via-clyde/` | Cobra CLI commands for patching, unpatching, status, keychain access re-granting, upgrade, and MITM hook execution. |
+| `cmd/desktop-via-clyde/` | Cobra CLI commands for target operations, aggregate status, and Codex CLI packaging. |
 | `internal/codexcli/` | Codex CLI source checkout, upstream package build, local signing, standalone install, and status logic. |
 | `internal/targets/` | Target registry and updater metadata. |
 | `internal/patch/` | Patch, unpatch, keychain access re-granting, signing, state writing, and verification logic. |

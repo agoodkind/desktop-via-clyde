@@ -1,14 +1,14 @@
 // Command desktop-via-clyde patches macOS Electron apps (Cursor, Codex, Claude)
 // to route every launch through the clyde MITM proxy on [::1]:48723.
 //
-//	desktop-via-clyde patch <app>              install shim and re-sign
-//	desktop-via-clyde unpatch <app>            restore one target's backup
+//	desktop-via-clyde cursor patch             install shim and re-sign Cursor
+//	desktop-via-clyde codex upgrade            fetch the latest Codex build and re-patch
+//	desktop-via-clyde claude unpatch           restore Claude from its backup
 //	desktop-via-clyde status                   per-target state summary
-//	desktop-via-clyde keychain-migrate <app>   re-grant keychain ACLs on an already-patched app
 //	desktop-via-clyde codex-cli install        build and install locally signed Codex CLI
 //
-// All subcommands support --dry-run. patch and keychain-migrate support
-// --no-migrate-keychain.
+// App operation subcommands support --dry-run. patch and keychain-migrate
+// support --no-migrate-keychain.
 package main
 
 import (
@@ -16,7 +16,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -46,44 +45,44 @@ func newRootCmd(out io.Writer) *cobra.Command {
 	root.SetOut(out)
 	root.SetErr(out)
 
-	root.AddCommand(newPatchCmd(out))
-	root.AddCommand(newUnpatchCmd(out))
+	for _, target := range targets.Registry {
+		root.AddCommand(newTargetCmd(out, target))
+	}
 	root.AddCommand(newStatusCmd(out))
-	root.AddCommand(newKeychainMigrateCmd(out))
-	root.AddCommand(newMITMHookCmd())
-	root.AddCommand(newUpgradeCmd(out))
 	root.AddCommand(newCodexCLICmd(out))
 	return root
 }
 
-func appArg() string {
-	return "app to act on (one of: " + strings.Join(targets.IDs(), ", ") + ")"
-}
-
-func lookupTarget(arg, appPath string) (targets.Target, error) {
-	t, err := targets.Lookup(arg)
-	if err != nil {
-		return targets.Target{}, err
-	}
+func targetWithAppPath(t targets.Target, appPath string) targets.Target {
 	if appPath != "" {
 		t.AppPath = appPath
 	}
-	return t, nil
+	return t
 }
 
-func newPatchCmd(out io.Writer) *cobra.Command {
+func newTargetCmd(out io.Writer, target targets.Target) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   target.ID,
+		Short: fmt.Sprintf("Operate on %s", target.AppPath),
+	}
+	cmd.AddCommand(newPatchCmd(out, target))
+	cmd.AddCommand(newUnpatchCmd(out, target))
+	cmd.AddCommand(newUpgradeCmd(out, target))
+	cmd.AddCommand(newKeychainMigrateCmd(out, target))
+	cmd.AddCommand(newTargetStatusCmd(out, target))
+	return cmd
+}
+
+func newPatchCmd(out io.Writer, target targets.Target) *cobra.Command {
 	var dryRun bool
 	var noMigrate bool
 	var appPath string
 	cmd := &cobra.Command{
-		Use:   "patch <app>",
+		Use:   "patch",
 		Short: "Install the shim into one app bundle and re-sign it",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			t, err := lookupTarget(args[0], appPath)
-			if err != nil {
-				return err
-			}
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			t := targetWithAppPath(target, appPath)
 			return patch.Patch(t, patch.Options{
 				DryRun:            dryRun,
 				NoMigrateKeychain: noMigrate,
@@ -91,48 +90,42 @@ func newPatchCmd(out io.Writer) *cobra.Command {
 			})
 		},
 	}
-	cmd.Long = "patch <app>: " + appArg()
+	cmd.Long = fmt.Sprintf("Patch %s by installing the shim and re-signing the bundle.", target.AppPath)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the bundle")
 	cmd.Flags().BoolVar(&noMigrate, "no-migrate-keychain", false, "skip steps 1b and 7a (keychain ACL re-grant)")
 	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
 	return cmd
 }
 
-func newUnpatchCmd(out io.Writer) *cobra.Command {
+func newUnpatchCmd(out io.Writer, target targets.Target) *cobra.Command {
 	var dryRun bool
 	var appPath string
 	cmd := &cobra.Command{
-		Use:   "unpatch <app>",
+		Use:   "unpatch",
 		Short: "Restore one app's bundle from its backup",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			t, err := lookupTarget(args[0], appPath)
-			if err != nil {
-				return err
-			}
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			t := targetWithAppPath(target, appPath)
 			return patch.Unpatch(t, patch.Options{DryRun: dryRun, Out: out})
 		},
 	}
-	cmd.Long = "unpatch <app>: " + appArg()
+	cmd.Long = fmt.Sprintf("Restore %s from its backup.", target.AppPath)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the bundle")
 	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
 	return cmd
 }
 
-func newUpgradeCmd(out io.Writer) *cobra.Command {
+func newUpgradeCmd(out io.Writer, target targets.Target) *cobra.Command {
 	var channel string
 	var dryRun bool
 	var noMigrate bool
 	var appPath string
 	cmd := &cobra.Command{
-		Use:   "upgrade <app>",
+		Use:   "upgrade",
 		Short: "Fetch the latest build from the upstream update manifest, verify, swap into the app path, and re-patch",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			t, err := lookupTarget(args[0], appPath)
-			if err != nil {
-				return err
-			}
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			t := targetWithAppPath(target, appPath)
 			return upgrade.Run(t, upgrade.Options{
 				Channel:           channel,
 				DryRun:            dryRun,
@@ -141,7 +134,10 @@ func newUpgradeCmd(out io.Writer) *cobra.Command {
 			})
 		},
 	}
-	cmd.Long = "upgrade <app>: " + appArg() + ". Bypasses the in-app updater; fetches the latest upstream manifest directly, verifies the downloaded bundle against the recorded upstream DesignatedRequirement, swaps it into the target app path, and re-runs the patch flow."
+	cmd.Long = fmt.Sprintf(
+		"Upgrade %s by fetching the latest upstream manifest, verifying the downloaded bundle against the recorded upstream DesignatedRequirement, swapping it into place, and re-running the patch flow.",
+		target.AppPath,
+	)
 	cmd.Flags().StringVar(&channel, "channel", "stable", "upstream release channel (stable, dev, etc.)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the bundle")
 	cmd.Flags().BoolVar(&noMigrate, "no-migrate-keychain", false, "skip keychain ACL re-grant during the post-swap patch")
@@ -149,22 +145,19 @@ func newUpgradeCmd(out io.Writer) *cobra.Command {
 	return cmd
 }
 
-func newKeychainMigrateCmd(out io.Writer) *cobra.Command {
+func newKeychainMigrateCmd(out io.Writer, target targets.Target) *cobra.Command {
 	var dryRun bool
 	var appPath string
 	cmd := &cobra.Command{
-		Use:   "keychain-migrate <app>",
+		Use:   "keychain-migrate",
 		Short: "Re-grant keychain ACLs on an already-patched app (steps 1b + 7a only)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			t, err := lookupTarget(args[0], appPath)
-			if err != nil {
-				return err
-			}
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			t := targetWithAppPath(target, appPath)
 			return patch.KeychainMigrate(t, patch.Options{DryRun: dryRun, Out: out})
 		},
 	}
-	cmd.Long = "keychain-migrate <app>: " + appArg()
+	cmd.Long = fmt.Sprintf("Re-grant keychain ACLs on the patched %s bundle.", target.AppPath)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without touching keychain items")
 	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
 	return cmd
@@ -253,6 +246,23 @@ func newStatusCmd(out io.Writer) *cobra.Command {
 			for _, t := range targets.Registry {
 				printTargetStatus(out, t, ms)
 			}
+			return nil
+		},
+	}
+}
+
+func newTargetStatusCmd(out io.Writer, target targets.Target) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Print state for this target",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			ms, err := state.Load(paths.StateFile())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "state file: %s\n", paths.StateFile())
+			fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", "TARGET", "STATE", "VERSION", "NOTES")
+			printTargetStatus(out, target, ms)
 			return nil
 		},
 	}

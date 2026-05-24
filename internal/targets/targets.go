@@ -86,7 +86,7 @@ type Target struct {
 	// ComputerUse declares a Codex-only companion helper bundle that must be
 	// repaired after Codex is locally re-signed.
 	ComputerUse *ComputerUsePolicy
-	// Updater selects the upstream update protocol for `upgrade <app>`.
+	// Updater selects the upstream update protocol for `<target> upgrade`.
 	Updater Updater
 }
 

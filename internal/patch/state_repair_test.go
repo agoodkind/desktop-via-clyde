@@ -17,7 +17,7 @@ func TestEnsureOriginalDesignatedRequirementRequiresStateEntry(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing state entry error")
 	}
-	if !strings.Contains(err.Error(), "run `desktop-via-clyde patch codex` first") {
+	if !strings.Contains(err.Error(), "run `desktop-via-clyde codex patch` first") {
 		t.Fatalf("error = %q, want patch hint", err.Error())
 	}
 }

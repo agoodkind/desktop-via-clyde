@@ -10,7 +10,7 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
 
-func TestPatchExtractedBundleRepairsBundledComputerUseBeforeResign(t *testing.T) {
+func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
 	tg, err := targets.Lookup("codex")
 	if err != nil {
 		t.Fatalf("Lookup(codex): %v", err)
@@ -18,8 +18,12 @@ func TestPatchExtractedBundleRepairsBundledComputerUseBeforeResign(t *testing.T)
 	tg.AppPath = filepath.Join(t.TempDir(), "Codex.app")
 
 	var out bytes.Buffer
-	if err := PatchExtractedBundle(tg, BundleOptions{DryRun: true, Out: &out}); err != nil {
-		t.Fatalf("PatchExtractedBundle dry-run: %v", err)
+	if err := Patch(tg, Options{
+		DryRun:            true,
+		NoMigrateKeychain: true,
+		Out:               &out,
+	}); err != nil {
+		t.Fatalf("Patch dry-run: %v", err)
 	}
 	log := out.String()
 	bundledHelperPath := filepath.Join(tg.AppPath, filepath.FromSlash(tg.ComputerUse.BundledAppPath))
@@ -32,7 +36,7 @@ func TestPatchExtractedBundleRepairsBundledComputerUseBeforeResign(t *testing.T)
 	}
 	for _, want := range required {
 		if !strings.Contains(log, want) {
-			t.Fatalf("PatchExtractedBundle log missing %q\nlog:\n%s", want, log)
+			t.Fatalf("Patch dry-run log missing %q\nlog:\n%s", want, log)
 		}
 	}
 

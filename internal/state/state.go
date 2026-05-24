@@ -18,14 +18,12 @@ type TargetState struct {
 	// OriginalDesignatedRequirement captures the DesignatedRequirement
 	// string from the un-patched upstream-signed bundle, read once at
 	// initial patch time via `codesign --display --requirements -`.
-	// The mitm-hook subcommand uses this string to verify that a
-	// freshly downloaded update payload still carries an upstream
-	// signature that satisfies the recorded DR before clyde re-patches
-	// and re-signs it; without this check, a hijacked downloader
-	// endpoint could feed an arbitrary bundle through the hook and
-	// have it Goodkind-signed into /Applications. Empty when the
-	// state entry predates the field, which is the cue to capture it
-	// opportunistically on the next patch run.
+	// The upgrade flow uses this string to verify that a freshly
+	// downloaded update payload still carries an upstream signature
+	// that satisfies the recorded DR before desktop-via-clyde
+	// re-signs it locally. Empty when the state entry predates the
+	// field, which is the cue to capture it opportunistically on the
+	// next patch run.
 	OriginalDesignatedRequirement string `json:"original_designated_requirement,omitempty"`
 }
 

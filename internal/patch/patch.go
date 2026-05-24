@@ -26,7 +26,7 @@ type MissingStateEntryError struct {
 }
 
 func (e MissingStateEntryError) Error() string {
-	return fmt.Sprintf("no state entry for target %s; run `desktop-via-clyde patch %s` first", e.TargetID, e.TargetID)
+	return fmt.Sprintf("no state entry for target %s; run `desktop-via-clyde %s patch` first", e.TargetID, e.TargetID)
 }
 
 func (e MissingStateEntryError) Is(target error) bool {
@@ -38,17 +38,6 @@ type Options struct {
 	DryRun            bool
 	NoMigrateKeychain bool
 	Out               io.Writer
-}
-
-// BundleOptions controls a PatchExtractedBundle invocation. Unlike
-// Options on the full Patch flow, BundleOptions never touches the
-// keychain, never writes state.json, and never runs the post-patch verify. The
-// clyde MITM hook subprocess uses it to re-patch a freshly downloaded update
-// bundle inside a staging directory before clyde streams the bytes back to
-// Squirrel.Mac for installation.
-type BundleOptions struct {
-	DryRun bool
-	Out    io.Writer
 }
 
 // Patch performs the full patch flow for one target. Steps are numbered to
@@ -92,10 +81,8 @@ func Patch(t targets.Target, opts Options) error {
 	}
 
 	// Steps 2-7: bundle mutation (entitlements, exec rename, shim
-	// install, re-sign, strip quarantine). Shared with the
-	// mitm-hook re-patch flow so initial-install and update-time
-	// patches always run the same bundle-mutation logic.
-	if err := patchBundleSteps(r, t, true); err != nil {
+	// install, re-sign, strip quarantine).
+	if err := patchBundleSteps(r, t); err != nil {
 		return err
 	}
 
@@ -132,39 +119,9 @@ func Patch(t targets.Target, opts Options) error {
 	return nil
 }
 
-// PatchExtractedBundle runs the bundle-mutation steps against the
-// .app at t.AppPath: extract entitlements from the existing main
-// binary, augment them, rename the main executable to .real, install
-// the embedded shim in the original slot, re-sign all three layers
-// (.real, shim, outer bundle) with the user's Developer ID, and strip
-// the quarantine xattr. The function skips backup, keychain migration,
-// state.json updates, and the post-patch verify, since the clyde MITM hook
-// subprocess that calls this entry point patches a freshly downloaded update
-// bundle inside a staging directory rather than /Applications.
-//
-// Idempotent: re-running against an already-patched bundle preserves
-// <ExecName>.real and just refreshes the embedded shim plus
-// signatures.
-func PatchExtractedBundle(t targets.Target, opts BundleOptions) error {
-	if opts.Out == nil {
-		opts.Out = os.Stdout
-	}
-	r := NewRunner(opts.DryRun, opts.Out)
-
-	if !opts.DryRun {
-		if _, err := os.Stat(t.AppPath); err != nil {
-			return fmt.Errorf("bundle not found at %s: %w", t.AppPath, err)
-		}
-	}
-	return patchBundleSteps(r, t, false)
-}
-
 // patchBundleSteps runs the bundle-mutation steps (2 through 7) on
-// the bundle at t.AppPath using the supplied Runner. Shared between
-// the install-time Patch flow and the update-time
-// PatchExtractedBundle flow so both paths always run the same
-// signing logic.
-func patchBundleSteps(r *Runner, t targets.Target, restorePreservedNestedCode bool) error {
+// the bundle at t.AppPath using the supplied Runner.
+func patchBundleSteps(r *Runner, t targets.Target) error {
 	if t.Entitlements == nil {
 		return fmt.Errorf("target %s has no entitlement policy", t.ID)
 	}
@@ -183,10 +140,8 @@ func patchBundleSteps(r *Runner, t targets.Target, restorePreservedNestedCode bo
 	if err := stepPatchBundledComputerUse(r, t); err != nil {
 		return fmt.Errorf("patch bundled computer use helper: %w", err)
 	}
-	if restorePreservedNestedCode {
-		if err := stepRestorePreservedNestedCode(r, t); err != nil {
-			return fmt.Errorf("restore preserved nested code: %w", err)
-		}
+	if err := stepRestorePreservedNestedCode(r, t); err != nil {
+		return fmt.Errorf("restore preserved nested code: %w", err)
 	}
 	if err := stepResign(r, t, entFile); err != nil {
 		return fmt.Errorf("re-sign: %w", err)
