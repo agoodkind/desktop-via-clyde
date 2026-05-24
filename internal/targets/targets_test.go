@@ -204,12 +204,6 @@ func TestComputerUsePolicyPerTarget(t *testing.T) {
 		if !stringSlicesEqual(policy.TeamPatchBinaries, wantPatch) {
 			t.Errorf("Codex Computer Use patch binaries mismatch: got %v want %v", policy.TeamPatchBinaries, wantPatch)
 		}
-		wantRequirements := []string{
-			"Contents/SharedSupport/SkyComputerUseClient.app/Contents/Resources/SkyComputerUseClient_Parent.coderequirement",
-		}
-		if !stringSlicesEqual(policy.TeamRequirementPlists, wantRequirements) {
-			t.Errorf("Codex Computer Use requirement plists mismatch: got %v want %v", policy.TeamRequirementPlists, wantRequirements)
-		}
 		wantSign := []string{
 			"Contents/SharedSupport/Codex Computer Use Installer.app",
 			"Contents/SharedSupport/SkyComputerUseClient.app",
@@ -238,6 +232,23 @@ func TestComputerUsePolicyPerTarget(t *testing.T) {
 				wantMainRequired,
 			)
 		}
+	}
+}
+
+func TestCodexComputerUseTeamRequirementPlists(t *testing.T) {
+	tg, err := Lookup("codex")
+	if err != nil {
+		t.Fatalf("Lookup(%q) returned error: %v", "codex", err)
+	}
+	if tg.ComputerUse == nil {
+		t.Fatal("codex must declare a Computer Use policy")
+	}
+	want := []string{
+		"Contents/SharedSupport/SkyComputerUseClient.app/Contents/Resources/SkyComputerUseClient_Parent.coderequirement",
+		"Contents/SharedSupport/CUALockScreenGuardian.app/Contents/Resources/CUALockScreenGuardian_Parent.coderequirement",
+	}
+	if !stringSlicesEqual(tg.ComputerUse.TeamRequirementPlists, want) {
+		t.Errorf("Codex Computer Use requirement plists mismatch: got %v want %v", tg.ComputerUse.TeamRequirementPlists, want)
 	}
 }
 

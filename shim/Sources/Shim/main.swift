@@ -5,12 +5,14 @@ import Foundation
 // <App>.app/Contents/MacOS/<ExecName> for any registered target. Resolves its
 // own path with _NSGetExecutablePath, derives the sibling .real binary,
 // preflights the clyde MITM proxy, applies the target-specific environment
-// policy, and execv's the real binary with proxy switches prepended.
+// policy, and execv's the real binary with launch-mode-appropriate proxy
+// settings.
 
 let proxyHost = "::1"
 let proxyPort: UInt16 = 48723
 let proxyURL = "http://[\(proxyHost)]:\(proxyPort)"
 let caCertificateEnv = "DESKTOP_VIA_CLYDE_CA_CERT"
+let noProxyValue = "localhost,127.0.0.1,::1,[::1]"
 
 enum TargetPolicy: String {
     case codex
@@ -162,6 +164,8 @@ func envActions(policy: TargetPolicy, ca: String) -> [EnvAction] {
             EnvAction(key: "HTTPS_PROXY", value: proxyURL),
             EnvAction(key: "HTTP_PROXY", value: proxyURL),
             EnvAction(key: "ALL_PROXY", value: proxyURL),
+            EnvAction(key: "NO_PROXY", value: noProxyValue),
+            EnvAction(key: "no_proxy", value: noProxyValue),
             EnvAction(key: "SSL_CERT_FILE", value: nil),
         ]
     case .default:
@@ -173,6 +177,8 @@ func envActions(policy: TargetPolicy, ca: String) -> [EnvAction] {
             EnvAction(key: "HTTPS_PROXY", value: proxyURL),
             EnvAction(key: "HTTP_PROXY", value: proxyURL),
             EnvAction(key: "ALL_PROXY", value: proxyURL),
+            EnvAction(key: "NO_PROXY", value: noProxyValue),
+            EnvAction(key: "no_proxy", value: noProxyValue),
         ]
     }
 }
@@ -188,6 +194,17 @@ func setEnvVars(policy: TargetPolicy) {
     }
 }
 
+func isElectronRunAsNode() -> Bool {
+    ProcessInfo.processInfo.environment["ELECTRON_RUN_AS_NODE"] == "1"
+}
+
+func proxyArguments(electronRunAsNode: Bool) -> [String] {
+    if electronRunAsNode {
+        return []
+    }
+    return ["--proxy-server=\(proxyURL)", "--ignore-certificate-errors"]
+}
+
 func main() {
     guard let selfPath = resolveSelfPath() else {
         showAlertAndExit("Could not resolve own executable path", 14)
@@ -198,10 +215,11 @@ func main() {
 
     let args = CommandLine.arguments
     let forwarded = Array(args.dropFirst())
+    let electronRunAsNode = isElectronRunAsNode()
 
     if forwarded.contains("--clyde-dry-run") {
         setEnvVars(policy: policy)
-        let injected = ["--proxy-server=\(proxyURL)", "--ignore-certificate-errors"]
+        let injected = proxyArguments(electronRunAsNode: electronRunAsNode)
         let passThrough = forwarded.filter { $0 != "--clyde-dry-run" }
         let newArgv = [argv0] + injected + passThrough
         print("would exec \(argv0).real")
@@ -209,6 +227,7 @@ func main() {
         print("target: \(target)")
         print("argv0: \(argv0)")
         print("target-policy: \(policy.rawValue)")
+        print("electron-run-as-node: \(electronRunAsNode)")
         print("argv: \(newArgv)")
         for action in envActions(policy: policy, ca: caCertificatePath()) {
             if let value = action.value {
@@ -223,7 +242,7 @@ func main() {
     runPreflight()
     setEnvVars(policy: policy)
 
-    let injected = ["--proxy-server=\(proxyURL)", "--ignore-certificate-errors"]
+    let injected = proxyArguments(electronRunAsNode: electronRunAsNode)
     let newArgv = [argv0] + injected + forwarded
 
     // Build argv as null-terminated C array for execv.

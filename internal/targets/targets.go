@@ -165,6 +165,7 @@ var Registry = []Target{
 			},
 			TeamRequirementPlists: []string{
 				"Contents/SharedSupport/SkyComputerUseClient.app/Contents/Resources/SkyComputerUseClient_Parent.coderequirement",
+				"Contents/SharedSupport/CUALockScreenGuardian.app/Contents/Resources/CUALockScreenGuardian_Parent.coderequirement",
 			},
 			SignTargets: []ComputerUseSignTarget{
 				{

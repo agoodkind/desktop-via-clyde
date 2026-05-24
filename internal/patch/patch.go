@@ -2,20 +2,19 @@
 package patch
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 	"time"
 
 	shimembed "goodkind.io/desktop-via-clyde/internal/embed"
 	"goodkind.io/desktop-via-clyde/internal/paths"
+	"goodkind.io/desktop-via-clyde/internal/signing"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
@@ -349,27 +348,11 @@ func stepResign(r *Runner, t targets.Target, entFile string) error {
 }
 
 func codesignRuntimeEntitlementsArgs(id string, entFile string, codePath string) []string {
-	return []string{
-		"--force",
-		"--sign",
-		id,
-		"--options",
-		"runtime",
-		"--entitlements",
-		entFile,
-		codePath,
-	}
+	return signing.RuntimeEntitlementsArgs(id, entFile, codePath)
 }
 
 func codesignRuntimeArgs(id string, codePath string) []string {
-	return []string{
-		"--force",
-		"--sign",
-		id,
-		"--options",
-		"runtime",
-		codePath,
-	}
+	return signing.RuntimeArgs(id, codePath)
 }
 
 func stepResignNestedCode(r *Runner, t targets.Target, id string) error {
@@ -401,33 +384,8 @@ func stepResignNestedCode(r *Runner, t targets.Target, id string) error {
 	return nil
 }
 
-var identityLineRE = regexp.MustCompile(`^\s*\d+\)\s+([0-9A-F]{40})\s+"([^"]+)"\s*$`)
-
-// resolveSignIdentity returns the SHA-1 hash of the first codesigning identity
-// whose common name matches paths.SignIdentity. The keychain may hold multiple
-// certs with the same CN (the user's keychain has duplicates for this CN);
-// codesign rejects an ambiguous CN, so we resolve to the first matching hash
-// up front.
 func resolveSignIdentity(dryRun bool) (string, error) {
-	if dryRun {
-		return paths.SignIdentity, nil
-	}
-	cmd := exec.Command("/usr/bin/security", "find-identity", "-v", "-p", "codesigning")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("security find-identity: %w", err)
-	}
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	for scanner.Scan() {
-		m := identityLineRE.FindStringSubmatch(scanner.Text())
-		if m == nil {
-			continue
-		}
-		if m[2] == paths.SignIdentity {
-			return m[1], nil
-		}
-	}
-	return "", fmt.Errorf("no codesigning identity matches %q", paths.SignIdentity)
+	return signing.ResolveIdentity(dryRun)
 }
 
 func stepStripQuarantine(r *Runner, t targets.Target) {

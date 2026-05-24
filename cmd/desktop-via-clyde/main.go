@@ -5,6 +5,7 @@
 //	desktop-via-clyde unpatch <app>            restore one target's backup
 //	desktop-via-clyde status                   per-target state summary
 //	desktop-via-clyde keychain-migrate <app>   re-grant keychain ACLs on an already-patched app
+//	desktop-via-clyde codex-cli install        build and install locally signed Codex CLI
 //
 // All subcommands support --dry-run. patch and keychain-migrate support
 // --no-migrate-keychain.
@@ -19,6 +20,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"goodkind.io/desktop-via-clyde/internal/codexcli"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/state"
@@ -50,6 +52,7 @@ func newRootCmd(out io.Writer) *cobra.Command {
 	root.AddCommand(newKeychainMigrateCmd(out))
 	root.AddCommand(newMITMHookCmd())
 	root.AddCommand(newUpgradeCmd(out))
+	root.AddCommand(newCodexCLICmd(out))
 	return root
 }
 
@@ -164,6 +167,75 @@ func newKeychainMigrateCmd(out io.Writer) *cobra.Command {
 	cmd.Long = "keychain-migrate <app>: " + appArg()
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without touching keychain items")
 	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
+	return cmd
+}
+
+func newCodexCLICmd(out io.Writer) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "codex-cli",
+		Short: "Build, sign, install, and inspect the local Codex CLI",
+	}
+	cmd.AddCommand(newCodexCLIInstallCmd(out))
+	cmd.AddCommand(newCodexCLIStatusCmd(out))
+	return cmd
+}
+
+func newCodexCLIInstallCmd(out io.Writer) *cobra.Command {
+	var dryRun bool
+	var sourceDir string
+	var ref string
+	var installDir string
+	var codexHome string
+	var buildMode string
+	var noSccache bool
+	var forceRebuild bool
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Clone or update Codex source, build the CLI, sign it locally, and install it",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return codexcli.Install(codexcli.InstallOptions{
+				DryRun:       dryRun,
+				SourceDir:    sourceDir,
+				Ref:          ref,
+				InstallDir:   installDir,
+				CodexHome:    codexHome,
+				BuildMode:    buildMode,
+				NoSccache:    noSccache,
+				ForceRebuild: forceRebuild,
+				Out:          out,
+			})
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the filesystem")
+	cmd.Flags().StringVar(&sourceDir, "source-dir", "", "Codex source checkout path (default XDG cache)")
+	cmd.Flags().StringVar(&ref, "ref", codexcli.DefaultRef(), "upstream Codex ref to fetch and build")
+	cmd.Flags().StringVar(&installDir, "install-dir", "", "directory for the visible codex command")
+	cmd.Flags().StringVar(&codexHome, "codex-home", "", "Codex home for standalone package releases")
+	cmd.Flags().StringVar(&buildMode, "build-mode", codexcli.DefaultBuildMode(), "entrypoint build mode (release or local-fast)")
+	cmd.Flags().BoolVar(&noSccache, "no-sccache", false, "disable automatic sccache wrapper detection for the Cargo build")
+	cmd.Flags().BoolVar(&forceRebuild, "force-rebuild", false, "skip same-head installed release reuse and rebuild the entrypoint")
+	return cmd
+}
+
+func newCodexCLIStatusCmd(out io.Writer) *cobra.Command {
+	var sourceDir string
+	var installDir string
+	var codexHome string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Print local Codex CLI source, install, and signing state",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return codexcli.Status(codexcli.StatusOptions{
+				SourceDir:  sourceDir,
+				InstallDir: installDir,
+				CodexHome:  codexHome,
+				Out:        out,
+			})
+		},
+	}
+	cmd.Flags().StringVar(&sourceDir, "source-dir", "", "Codex source checkout path (default XDG cache)")
+	cmd.Flags().StringVar(&installDir, "install-dir", "", "directory for the visible codex command")
+	cmd.Flags().StringVar(&codexHome, "codex-home", "", "Codex home for standalone package releases")
 	return cmd
 }
 

@@ -55,13 +55,18 @@ Every launch uses this proxy URL:
 http://[::1]:48723
 ```
 
-Every launch prepends these Electron arguments before forwarding user-supplied
-arguments:
+Normal Electron app launches prepend these Electron arguments before forwarding
+user-supplied arguments:
 
 ```text
 --proxy-server=http://[::1]:48723
 --ignore-certificate-errors
 ```
+
+Electron Node mode launches keep the original argument order and do not receive
+the Electron proxy arguments. Electron Node mode is identified by
+`ELECTRON_RUN_AS_NODE=1`, and Electron Node mode is used by editor command-line
+entrypoints such as Cursor's `Contents/Resources/app/out/cli.js`.
 
 The shim expects Clyde's MITM CA at:
 
@@ -92,6 +97,8 @@ NODE_TLS_REJECT_UNAUTHORIZED=0
 HTTPS_PROXY=http://[::1]:48723
 HTTP_PROXY=http://[::1]:48723
 ALL_PROXY=http://[::1]:48723
+NO_PROXY=localhost,127.0.0.1,::1,[::1]
+no_proxy=localhost,127.0.0.1,::1,[::1]
 ```
 
 ### Codex Environment Policy
@@ -106,12 +113,18 @@ NODE_TLS_REJECT_UNAUTHORIZED=0
 HTTPS_PROXY=http://[::1]:48723
 HTTP_PROXY=http://[::1]:48723
 ALL_PROXY=http://[::1]:48723
+NO_PROXY=localhost,127.0.0.1,::1,[::1]
+no_proxy=localhost,127.0.0.1,::1,[::1]
 SSL_CERT_FILE=<unset>
 ```
 
 Codex has native custom CA support keyed by `CODEX_CA_CERTIFICATE`, so the shim
 uses that Codex-specific variable and clears inherited `SSL_CERT_FILE` for the
 Codex target.
+
+`NO_PROXY` and `no_proxy` bypass the Clyde proxy only for loopback hosts. Local
+probes such as `http://[::1]:5400` reach the local service directly, while
+ordinary remote HTTP and HTTPS requests still use the Clyde MITM proxy.
 
 ## Codex Computer Use
 
@@ -146,10 +159,13 @@ The helper binary `Contents/MacOS/SkyComputerUseService` must trust the local
 Developer ID team identifier `H3BMXM4W7H`, because the patched Codex app is
 signed by `Developer ID Application: Alex Goodkind (H3BMXM4W7H)`.
 
-The helper requirement file
+The helper requirement files
 `Contents/SharedSupport/SkyComputerUseClient.app/Contents/Resources/SkyComputerUseClient_Parent.coderequirement`
+and
+`Contents/SharedSupport/CUALockScreenGuardian.app/Contents/Resources/CUALockScreenGuardian_Parent.coderequirement`
 must trust the same local Developer ID team identifier, because the nested
-client verifies its parent process before accepting requests.
+client and lock-screen guardian verify their parent process before accepting
+requests.
 
 The helper app entitlement `com.apple.security.automation.apple-events` permits
 Apple Events, which are macOS messages used to control other applications.
@@ -234,6 +250,85 @@ Developer ID Application: Alex Goodkind (H3BMXM4W7H)
 At sign time the tool resolves that common name to a SHA-1 identity hash with
 `security find-identity -v -p codesigning`, because the local keychain can hold
 multiple certificates with the same common name.
+
+## Codex CLI
+
+Build and install a locally signed Codex CLI from upstream source:
+
+```bash
+desktop-via-clyde codex-cli install
+```
+
+The command clones `openai/codex` with this command when the managed cache is
+missing:
+
+```bash
+gh repo clone openai/codex <cache> -- --depth 1
+```
+
+Existing caches are updated with `git fetch --depth 1 --prune origin main`,
+and the checkout is detached at `FETCH_HEAD`.
+
+The default source cache is:
+
+```text
+${XDG_CACHE_HOME:-$HOME/.cache}/desktop-via-clyde/codex/source
+```
+
+The build first resolves the upstream Rusty V8 artifact overrides, then runs
+`cargo build --release --timings --bin codex` against the upstream workspace
+for the host Darwin target. The installer signs that built `codex` binary with
+the upstream Codex CLI entitlement file at
+`.github/actions/macos-code-sign/codex.entitlements.plist` and the local
+Developer ID identity from `internal/paths/paths.go`, then calls upstream
+`scripts/build_codex_package.py` with `--entrypoint-bin` so the package staging
+step reuses the already built and signed binary instead of rebuilding it.
+
+When `sccache` is available and `RUSTC_WRAPPER` is not already set, the
+installer enables it automatically for the Cargo build and prints the resulting
+cache stats after the build.
+
+When the same verified release for the current upstream HEAD and target is
+already installed, the installer reuses that release and refreshes the visible
+symlinks instead of rebuilding. Pass `--force-rebuild` to bypass that reuse.
+
+Pass `--build-mode local-fast` to keep the same package and signing flow while
+relaxing the entrypoint build to `lto=false` and a per-CPU `codegen-units`
+override. `local-fast` installs use a distinct release suffix so they do not
+overwrite or masquerade as exact release builds for the same HEAD.
+
+The installer prints each major phase and streams subprocess output from clone,
+fetch, Cargo build, package build, signing, install, and verification commands.
+
+The installed package uses the upstream standalone layout under:
+
+```text
+$CODEX_HOME/packages/standalone/releases/
+```
+
+The visible command is:
+
+```text
+$HOME/.local/bin/codex
+```
+
+Print the planned work without changing files:
+
+```bash
+desktop-via-clyde codex-cli install --dry-run
+```
+
+Build a faster local-only variant instead of the exact upstream release profile:
+
+```bash
+desktop-via-clyde codex-cli install --build-mode local-fast
+```
+
+Inspect the local Codex CLI source, symlinks, signing, and PATH state:
+
+```bash
+desktop-via-clyde codex-cli status
+```
 
 ## Patch
 
@@ -491,8 +586,10 @@ make clean
 | Path | Purpose |
 | --- | --- |
 | `cmd/desktop-via-clyde/` | Cobra CLI commands for patching, unpatching, status, keychain access re-granting, upgrade, and MITM hook execution. |
+| `internal/codexcli/` | Codex CLI source checkout, upstream package build, local signing, standalone install, and status logic. |
 | `internal/targets/` | Target registry and updater metadata. |
 | `internal/patch/` | Patch, unpatch, keychain access re-granting, signing, state writing, and verification logic. |
+| `internal/signing/` | Shared local Developer ID identity resolution and codesign argument helpers. |
 | `internal/state/` | `state.json` load and save code. |
 | `internal/paths/` | Shared filesystem paths and signing identity. |
 | `internal/upgrade/` | Upstream manifest fetch, archive verification, bundle swap, and post-upgrade patch flow. |
