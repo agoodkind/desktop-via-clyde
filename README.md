@@ -230,7 +230,7 @@ real app:
 Build and install the CLI:
 
 ```bash
-cd /Users/agoodkind/Sites/clyde-dev/desktop-via-clyde
+cd path/to/desktop-via-clyde
 make install
 ```
 
@@ -518,7 +518,7 @@ When launching a copied app with an isolated `HOME`, pass the real Clyde CA path
 so the shim does not look for the CA under the temporary home directory:
 
 ```bash
-DESKTOP_VIA_CLYDE_CA_CERT=/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt \
+DESKTOP_VIA_CLYDE_CA_CERT="$HOME/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt" \
   /tmp/dvc-apps/Codex.app/Contents/MacOS/Codex --clyde-dry-run
 ```
 
