@@ -10,16 +10,39 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
 
-// SignIdentity is the user's stable Developer ID. We resolve it to a SHA-1
-// hash at sign time to disambiguate between duplicate keychain entries.
-const SignIdentity = "Developer ID Application: Alex Goodkind (H3BMXM4W7H)"
+// SignIdentityEnv and SignTeamIDEnv let a fork override the hardcoded
+// upstream-author defaults below without editing source. Both are read once at
+// package init; a CLI invocation reflects the values that were set in the
+// shell at launch time.
+const (
+	SignIdentityEnv = "DESKTOP_VIA_CLYDE_SIGN_IDENTITY"
+	SignTeamIDEnv   = "DESKTOP_VIA_CLYDE_SIGN_TEAM_ID"
+)
 
-// SignTeamID is the Apple team identifier for SignIdentity.
-const SignTeamID = "H3BMXM4W7H"
+const (
+	defaultSignIdentity = "Developer ID Application: Alex Goodkind (H3BMXM4W7H)"
+	defaultSignTeamID   = "H3BMXM4W7H"
+)
+
+// SignIdentity is the stable Developer ID used for local re-signing. We
+// resolve it to a SHA-1 hash at sign time to disambiguate between duplicate
+// keychain entries. Override with DESKTOP_VIA_CLYDE_SIGN_IDENTITY.
+var SignIdentity = lookupEnvOrDefault(SignIdentityEnv, defaultSignIdentity)
+
+// SignTeamID is the Apple team identifier for SignIdentity. Override with
+// DESKTOP_VIA_CLYDE_SIGN_TEAM_ID.
+var SignTeamID = lookupEnvOrDefault(SignTeamIDEnv, defaultSignTeamID)
 
 // StateRootEnv overrides the Application Support state root for isolated
 // upgrade smokes against copied app bundles.
 const StateRootEnv = "DESKTOP_VIA_CLYDE_STATE_ROOT"
+
+func lookupEnvOrDefault(key string, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}
 
 // Home returns the user's home directory, or an empty string if unavailable.
 func Home() string {

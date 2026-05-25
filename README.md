@@ -241,15 +241,29 @@ builds `bin/desktop-via-clyde`, and installs the CLI at:
 $HOME/.local/bin/desktop-via-clyde
 ```
 
-The signing identity is fixed in `internal/paths/paths.go`:
+The default signing identity in `internal/paths/paths.go` is:
 
 ```text
 Developer ID Application: Alex Goodkind (H3BMXM4W7H)
 ```
 
-At sign time the tool resolves that common name to a SHA-1 identity hash with
-`security find-identity -v -p codesigning`, because the local keychain can hold
-multiple certificates with the same common name.
+A fork or another user must override that default before patching anything,
+because their local keychain will not hold that exact certificate. Set both
+environment variables before invoking the CLI:
+
+```bash
+export DESKTOP_VIA_CLYDE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID1234)"
+export DESKTOP_VIA_CLYDE_SIGN_TEAM_ID="TEAMID1234"
+```
+
+The team ID is the ten-character Apple Developer Team identifier; it appears
+inside the identity common name and is used by the Codex Computer Use trust
+repair logic. The variables are read once at package init, so set them in the
+shell before running `desktop-via-clyde`.
+
+At sign time the tool resolves the configured common name to a SHA-1 identity
+hash with `security find-identity -v -p codesigning`, because the local
+keychain can hold multiple certificates with the same common name.
 
 ## Codex CLI
 
