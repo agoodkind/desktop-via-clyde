@@ -1,6 +1,7 @@
 package patch
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,8 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
+	"goodkind.io/desktop-via-clyde/internal/clock"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
@@ -26,7 +27,7 @@ func augmentEntitlements(in []byte, policy targets.EntitlementsPolicy) ([]byte, 
 	for _, key := range policy.Strip {
 		stripped, err := stripEntitlementKey(s, key)
 		if err != nil {
-			return nil, fmt.Errorf("strip entitlement %s: %w", key, err)
+			return nil, logPatchErrorNoContext("patch.strip_entitlement_failed", fmt.Errorf("strip entitlement %s: %w", key, err))
 		}
 		s = stripped
 	}
@@ -34,7 +35,7 @@ func augmentEntitlements(in []byte, policy targets.EntitlementsPolicy) ([]byte, 
 	for _, key := range policy.RequiredBooleanEntitlements {
 		updated, err := ensureBooleanEntitlement(s, key)
 		if err != nil {
-			return nil, fmt.Errorf("ensure entitlement %s: %w", key, err)
+			return nil, logPatchErrorNoContext("patch.ensure_entitlement_failed", fmt.Errorf("ensure entitlement %s: %w", key, err))
 		}
 		s = updated
 	}
@@ -70,63 +71,67 @@ func hasEntitlementKey(in []byte, key string) bool {
 }
 
 func writeAugmentedEntitlementsFile(
+	ctx context.Context,
 	r *Runner,
 	label string,
 	source string,
 	policy targets.EntitlementsPolicy,
 ) (string, error) {
-	return writeAugmentedEntitlementsFileWithFallback(r, label, source, policy, false)
+	return writeAugmentedEntitlementsFileWithFallback(ctx, r, label, source, policy, false)
 }
 
 func writeAugmentedEntitlementsFileAllowEmpty(
+	ctx context.Context,
 	r *Runner,
 	label string,
 	source string,
 	policy targets.EntitlementsPolicy,
 ) (string, error) {
-	return writeAugmentedEntitlementsFileWithFallback(r, label, source, policy, true)
+	return writeAugmentedEntitlementsFileWithFallback(ctx, r, label, source, policy, true)
 }
 
 func writeAugmentedEntitlementsFileWithFallback(
+	ctx context.Context,
 	r *Runner,
 	label string,
 	source string,
 	policy targets.EntitlementsPolicy,
 	allowEmpty bool,
 ) (string, error) {
+	patchLog.DebugContext(ctx, "patch.entitlements.boundary", "label", label, "source", source, "allow_empty", allowEmpty)
 	target := filepath.Join(os.TempDir(),
-		"dvc-"+safeTempLabel(label)+"-ent."+strconv.FormatInt(time.Now().UnixNano(), 10)+".plist")
-	r.Note("%s: extract entitlements from %s -> %s", label, source, target)
+		"dvc-"+safeTempLabel(label)+"-ent."+strconv.FormatInt(clock.Now().UnixNano(), 10)+".plist")
+	notef(r, fmt.Sprintf("%s: extract entitlements from %s -> %s", label, source, target))
 	if r.DryRun {
 		return target, nil
 	}
-	cmd := exec.Command("/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", source)
+	cmd := exec.CommandContext(ctx, "/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", source)
 	out, err := cmd.Output()
 	if err != nil {
 		if allowEmpty {
-			r.Note("%s: using empty entitlements fallback after codesign read failed: %v", label, err)
+			notef(r, fmt.Sprintf("%s: using empty entitlements fallback after codesign read failed: %v", label, err))
 			out = []byte(emptyEntitlementsXML)
 		} else {
-			return "", fmt.Errorf("codesign -d --entitlements failed for %s: %w", source, err)
+			return "", logPatchError(ctx, "patch.codesign_entitlements_failed", fmt.Errorf("codesign -d --entitlements failed for %s: %w", source, err))
 		}
 	}
 	if len(out) == 0 {
 		if allowEmpty {
-			r.Note("%s: using empty entitlements fallback", label)
+			notef(r, label+": using empty entitlements fallback")
 			out = []byte(emptyEntitlementsXML)
 		} else {
 			return "", fmt.Errorf("codesign produced empty entitlements blob for %s", source)
 		}
 	}
 	if len(out) == 0 {
-		return "", fmt.Errorf("codesign -d --entitlements failed for %s: %w", source, err)
+		return "", fmt.Errorf("codesign produced empty entitlements blob for %s", source)
 	}
 	augmented, err := augmentEntitlements(out, policy)
 	if err != nil {
-		return "", fmt.Errorf("augment entitlements: %w", err)
+		return "", logPatchError(ctx, "patch.augment_entitlements_failed", fmt.Errorf("augment entitlements: %w", err))
 	}
-	if err := os.WriteFile(target, augmented, 0o644); err != nil {
-		return "", err
+	if err := os.WriteFile(target, augmented, 0o600); err != nil {
+		return "", logPatchError(ctx, "patch.write_augmented_entitlements_failed", fmt.Errorf("write augmented entitlements %s: %w", target, err))
 	}
 	return target, nil
 }
@@ -143,16 +148,16 @@ func safeTempLabel(label string) string {
 	return strings.Trim(b.String(), "-")
 }
 
-func verifyRequiredEntitlements(r *Runner, t targets.Target) error {
+func verifyRequiredEntitlements(ctx context.Context, r *Runner, t targets.Target) error {
 	if t.Entitlements == nil {
-		return fmt.Errorf("target %s has no entitlement policy", t.ID)
+		return logPatchError(ctx, "patch.entitlement_policy_missing", fmt.Errorf("target %s has no entitlement policy", t.ID))
 	}
 	if r.DryRun {
 		return nil
 	}
 	main := paths.MainBinaryPath(t)
-	r.Note("target=%s step 9: verify required entitlements on %s", t.ID, main)
-	if err := verifyEntitlementPolicy(r, main, *t.Entitlements); err != nil {
+	notef(r, fmt.Sprintf("target=%s step 9: verify required entitlements on %s", t.ID, main))
+	if err := verifyEntitlementPolicy(ctx, r, main, *t.Entitlements); err != nil {
 		return err
 	}
 	realPath := paths.RealBinaryPath(t)
@@ -160,26 +165,26 @@ func verifyRequiredEntitlements(r *Runner, t targets.Target) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("stat real binary %s: %w", realPath, err)
+		return logPatchError(ctx, "patch.real_binary_stat_failed", fmt.Errorf("stat real binary %s: %w", realPath, err))
 	}
-	r.Note("target=%s step 9: verify required entitlements on %s", t.ID, realPath)
-	return verifyEntitlementPolicy(r, realPath, *t.Entitlements)
+	notef(r, fmt.Sprintf("target=%s step 9: verify required entitlements on %s", t.ID, realPath))
+	return verifyEntitlementPolicy(ctx, r, realPath, *t.Entitlements)
 }
 
-func verifyEntitlementPolicy(r *Runner, codePath string, policy targets.EntitlementsPolicy) error {
-	if err := verifyBooleanEntitlements(r, codePath, policy.RequiredBooleanEntitlements); err != nil {
+func verifyEntitlementPolicy(ctx context.Context, r *Runner, codePath string, policy targets.EntitlementsPolicy) error {
+	if err := verifyBooleanEntitlements(ctx, r, codePath, policy.RequiredBooleanEntitlements); err != nil {
 		return err
 	}
-	return verifyAbsentEntitlements(r, codePath, policy.Strip)
+	return verifyAbsentEntitlements(ctx, r, codePath, policy.Strip)
 }
 
-func verifyBooleanEntitlements(r *Runner, codePath string, required []string) error {
+func verifyBooleanEntitlements(ctx context.Context, r *Runner, codePath string, required []string) error {
 	if len(required) == 0 || r.DryRun {
 		return nil
 	}
-	out, err := r.RunCaptureStdout("/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", codePath)
+	out, err := r.RunCaptureStdout(ctx, "/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", codePath)
 	if err != nil {
-		return fmt.Errorf("read entitlements from %s: %w", codePath, err)
+		return logPatchError(ctx, "patch.verify_boolean_entitlements_read_failed", fmt.Errorf("read entitlements from %s: %w", codePath, err))
 	}
 	for _, key := range required {
 		if !hasBooleanEntitlement(out, key) {
@@ -189,13 +194,13 @@ func verifyBooleanEntitlements(r *Runner, codePath string, required []string) er
 	return nil
 }
 
-func verifyAbsentEntitlements(r *Runner, codePath string, absent []string) error {
+func verifyAbsentEntitlements(ctx context.Context, r *Runner, codePath string, absent []string) error {
 	if len(absent) == 0 || r.DryRun {
 		return nil
 	}
-	out, err := r.RunCaptureStdout("/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", codePath)
+	out, err := r.RunCaptureStdout(ctx, "/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", codePath)
 	if err != nil {
-		return fmt.Errorf("read entitlements from %s: %w", codePath, err)
+		return logPatchError(ctx, "patch.verify_absent_entitlements_read_failed", fmt.Errorf("read entitlements from %s: %w", codePath, err))
 	}
 	for _, key := range absent {
 		if hasEntitlementKey(out, key) {
@@ -238,7 +243,7 @@ func stripEntitlementKey(s, key string) (string, error) {
 	for _, p := range patterns {
 		re, err := regexp.Compile(p)
 		if err != nil {
-			return s, fmt.Errorf("compile %q: %w", p, err)
+			return s, logPatchErrorNoContext("patch.entitlement_regex_compile_failed", fmt.Errorf("compile %q: %w", p, err))
 		}
 		s = re.ReplaceAllString(s, "")
 	}

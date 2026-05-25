@@ -2,6 +2,7 @@ package codexcli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,7 +22,7 @@ func TestInstallDryRunUsesShallowGhCloneAndOriginMain(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", cacheHome)
 
 	var out bytes.Buffer
-	err := Install(InstallOptions{
+	err := Install(context.Background(), InstallOptions{
 		DryRun:    true,
 		BuildMode: string(BuildModeRelease),
 		Out:       &out,
@@ -71,7 +72,7 @@ func TestInstallDryRunDefaultsToLocalFastWhenBuildModeUnset(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", cacheHome)
 
 	var out bytes.Buffer
-	err := Install(InstallOptions{
+	err := Install(context.Background(), InstallOptions{
 		DryRun: true,
 		Out:    &out,
 	})
@@ -94,7 +95,7 @@ func TestInstallDryRunLocalFastAddsCargoOverrides(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", cacheHome)
 
 	var out bytes.Buffer
-	err := Install(InstallOptions{
+	err := Install(context.Background(), InstallOptions{
 		DryRun:    true,
 		BuildMode: string(BuildModeLocalFast),
 		Out:       &out,
@@ -150,7 +151,7 @@ func TestInstallPackageCreatesStandaloneLinks(t *testing.T) {
 	codexHome := filepath.Join(root, "codex-home")
 	installDir := filepath.Join(root, "bin")
 	releaseDir := filepath.Join(codexHome, "packages", "standalone", "releases", "0.133.0-main-abcdef-aarch64-apple-darwin")
-	if err := installPackage(patch.NewRunner(false, &bytes.Buffer{}), packageDir, releaseDir, codexHome, installDir); err != nil {
+	if err := installPackage(context.Background(), patch.NewRunner(context.Background(), false, &bytes.Buffer{}), packageDir, releaseDir, codexHome, installDir); err != nil {
 		t.Fatalf("installPackage: %v", err)
 	}
 	currentLink := filepath.Join(codexHome, "packages", "standalone", "current")

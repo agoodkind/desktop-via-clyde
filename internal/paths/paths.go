@@ -61,6 +61,19 @@ func StateRoot() string {
 	return filepath.Join(Home(), "Library", "Application Support", "desktop-via-clyde")
 }
 
+// LogDir is the structured process log directory for desktop-via-clyde.
+func LogDir() string {
+	if override := os.Getenv(StateRootEnv); override != "" {
+		return filepath.Join(override, "logs")
+	}
+	return filepath.Join(Home(), ".local", "state", "desktop-via-clyde", "logs")
+}
+
+// ProcessLogPath is the structured JSON log file for the main CLI process.
+func ProcessLogPath() string {
+	return filepath.Join(LogDir(), "desktop-via-clyde.jsonl")
+}
+
 // BackupRoot holds per-target backup bundles.
 func BackupRoot() string {
 	return filepath.Join(StateRoot(), "backup")
@@ -99,9 +112,4 @@ func RealBinaryPath(t targets.Target) string {
 // InfoPlistPath is <App>/Contents/Info.plist.
 func InfoPlistPath(t targets.Target) string {
 	return filepath.Join(t.AppPath, "Contents", "Info.plist")
-}
-
-// ClydeCAPath is the read-only reference to the MITM CA the shim relies on.
-func ClydeCAPath() string {
-	return filepath.Join(Home(), ".local", "state", "clyde", "mitm", "ca", "clyde-mitm-ca.crt")
 }

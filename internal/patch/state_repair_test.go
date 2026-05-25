@@ -1,6 +1,7 @@
 package patch
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ import (
 func TestEnsureOriginalDesignatedRequirementRequiresStateEntry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	target := targets.Target{ID: "codex", AppPath: "/Applications/Codex.app", ExecName: "Codex"}
-	_, err := EnsureOriginalDesignatedRequirement(target)
+	_, err := OriginalDesignatedRequirement(context.Background(), target, true)
 	if err == nil {
 		t.Fatal("expected missing state entry error")
 	}
@@ -37,7 +38,7 @@ func TestEnsureOriginalDesignatedRequirementReportsMissingBackupRepair(t *testin
 	if err := state.Save(paths.StateFile(), multiState); err != nil {
 		t.Fatalf("state.Save: %v", err)
 	}
-	_, err := EnsureOriginalDesignatedRequirement(target)
+	_, err := OriginalDesignatedRequirement(context.Background(), target, true)
 	if err == nil {
 		t.Fatal("expected missing backup repair error")
 	}

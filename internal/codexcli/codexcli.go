@@ -4,11 +4,13 @@ package codexcli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,10 +31,15 @@ const (
 	packageBinaryRel = "bin/codex"
 )
 
+var codexcliLog = slog.With("component", "desktop-via-clyde", "subcomponent", "codex-cli")
+
+// BuildMode selects the Cargo profile tuning used for local Codex CLI builds.
 type BuildMode string
 
 const (
-	BuildModeRelease   BuildMode = "release"
+	// BuildModeRelease matches the upstream release build profile.
+	BuildModeRelease BuildMode = "release"
+	// BuildModeLocalFast keeps upstream release semantics but relaxes the slowest knobs for local iteration.
 	BuildModeLocalFast BuildMode = "local-fast"
 )
 
@@ -98,14 +105,16 @@ func DefaultBuildMode() string {
 
 // Install clones or updates Codex, builds an upstream package layout, signs the
 // entrypoint with the local Developer ID, and installs the package.
-func Install(opts InstallOptions) error {
+func Install(ctx context.Context, opts InstallOptions) error {
+	log := codexcliLog.With("function", "Install")
 	if opts.Out == nil {
 		opts.Out = os.Stdout
 	}
 	opts = withInstallDefaults(opts)
-	r := patch.NewRunner(opts.DryRun, opts.Out)
+	r := patch.NewRunner(ctx, opts.DryRun, opts.Out)
 	buildMode, err := parseBuildMode(opts.BuildMode)
 	if err != nil {
+		log.ErrorContext(ctx, "codexcli.install.parse_build_mode_failed", "err", err)
 		return err
 	}
 
@@ -113,22 +122,23 @@ func Install(opts InstallOptions) error {
 	if err != nil {
 		return err
 	}
-	r.Note("codex-cli: source=%s ref=%s target=%s build-mode=%s", opts.SourceDir, opts.Ref, target, buildMode)
-	r.Note("codex-cli step 1/7: update Codex source checkout")
-	if err := cloneOrUpdateSource(r, opts.SourceDir, opts.Ref); err != nil {
+	notef(r, "codex-cli: source="+opts.SourceDir+" ref="+opts.Ref+" target="+target+" build-mode="+string(buildMode))
+	notef(r, "codex-cli step 1/7: update Codex source checkout")
+	if err := cloneOrUpdateSource(ctx, r, opts.SourceDir, opts.Ref); err != nil {
 		return err
 	}
 	head := "dryrun"
 	if !opts.DryRun {
-		headBytes, err := r.RunCaptureStdout("git", "-C", opts.SourceDir, "rev-parse", "--short=12", "HEAD")
+		headBytes, err := r.RunCaptureStdout(ctx, "git", "-C", opts.SourceDir, "rev-parse", "--short=12", "HEAD")
 		if err != nil {
 			return fmt.Errorf("read Codex source HEAD: %w", err)
 		}
 		head = strings.TrimSpace(string(headBytes))
-		r.Note("codex-cli: source checkout is at HEAD %s", head)
+		notef(r, "codex-cli: source checkout is at HEAD "+head)
 	}
 	if !opts.DryRun {
 		reusedReleaseDir, reused, err := maybeReuseInstalledRelease(
+			ctx,
 			r,
 			opts.CodexHome,
 			opts.InstallDir,
@@ -141,27 +151,27 @@ func Install(opts InstallOptions) error {
 			return err
 		}
 		if reused {
-			r.Note("codex-cli: install complete release=%s", reusedReleaseDir)
+			notef(r, "codex-cli: install complete release="+reusedReleaseDir)
 			return nil
 		}
 	}
 
 	packageDir := filepath.Join(defaultCacheHome(), "desktop-via-clyde", "codex", "package")
-	r.Note("codex-cli step 2/7: build upstream Codex entrypoint")
-	entrypointPath, err := buildEntrypoint(r, opts.SourceDir, target, buildMode, opts.NoSccache)
+	notef(r, "codex-cli step 2/7: build upstream Codex entrypoint")
+	entrypointPath, err := buildEntrypoint(ctx, r, opts.SourceDir, target, buildMode, opts.NoSccache)
 	if err != nil {
 		return err
 	}
-	r.Note("codex-cli step 3/7: sign upstream Codex entrypoint")
-	if err := signBinary(r, opts.SourceDir, entrypointPath); err != nil {
+	notef(r, "codex-cli step 3/7: sign upstream Codex entrypoint")
+	if err := signBinary(ctx, r, opts.SourceDir, entrypointPath); err != nil {
 		return err
 	}
-	r.Note("codex-cli step 4/7: build upstream Codex package")
-	if err := buildPackage(r, opts.SourceDir, packageDir, target, entrypointPath); err != nil {
+	notef(r, "codex-cli step 4/7: build upstream Codex package")
+	if err := buildPackage(ctx, r, opts.SourceDir, packageDir, target, entrypointPath); err != nil {
 		return err
 	}
 
-	r.Note("codex-cli step 5/7: read package metadata")
+	notef(r, "codex-cli step 5/7: read package metadata")
 	metadata := packageMetadata{
 		Version: "dryrun",
 		Target:  target,
@@ -174,22 +184,22 @@ func Install(opts InstallOptions) error {
 		}
 	}
 	releaseDir := releaseDir(opts.CodexHome, metadata.Version, head, metadata.Target, buildMode)
-	r.Note("codex-cli: package version=%s target=%s release=%s", metadata.Version, metadata.Target, releaseDir)
-	r.Note("codex-cli step 6/7: install standalone package")
-	if err := installPackage(r, packageDir, releaseDir, opts.CodexHome, opts.InstallDir); err != nil {
+	notef(r, "codex-cli: package version="+metadata.Version+" target="+metadata.Target+" release="+releaseDir)
+	notef(r, "codex-cli step 6/7: install standalone package")
+	if err := installPackage(ctx, r, packageDir, releaseDir, opts.CodexHome, opts.InstallDir); err != nil {
 		return err
 	}
-	r.Note("codex-cli step 7/7: verify installed command")
-	if err := verifyInstalledCommand(r, opts.InstallDir); err != nil {
+	notef(r, "codex-cli step 7/7: verify installed command")
+	if err := verifyInstalledCommand(ctx, r, opts.InstallDir); err != nil {
 		return err
 	}
-	r.Note("codex-cli: install complete release=%s", releaseDir)
+	notef(r, "codex-cli: install complete release="+releaseDir)
 	return nil
 }
 
 // Status prints the local Codex CLI source, install, and signing state. It is
 // best-effort so one missing surface does not hide the rest.
-func Status(opts StatusOptions) error {
+func Status(ctx context.Context, opts StatusOptions) error {
 	if opts.Out == nil {
 		opts.Out = os.Stdout
 	}
@@ -200,8 +210,8 @@ func Status(opts StatusOptions) error {
 
 	fmt.Fprintf(out, "source dir: %s\n", opts.SourceDir)
 	if isDir(filepath.Join(opts.SourceDir, ".git")) {
-		printCommandValue(out, "source head", "git", "-C", opts.SourceDir, "rev-parse", "--short=12", "HEAD")
-		printCommandValue(out, "source branch", "git", "-C", opts.SourceDir, "branch", "--show-current")
+		printCommandValue(ctx, out, "source head", "git", "-C", opts.SourceDir, "rev-parse", "--short=12", "HEAD")
+		printCommandValue(ctx, out, "source branch", "git", "-C", opts.SourceDir, "branch", "--show-current")
 	} else {
 		fmt.Fprintln(out, "source head: missing")
 	}
@@ -210,13 +220,13 @@ func Status(opts StatusOptions) error {
 	printSymlink(out, "current release", currentLink)
 	printSymlink(out, "visible command", binPath)
 	if _, err := os.Stat(binPath); err == nil {
-		printCommandValue(out, "version", binPath, "--version")
-		printCommandValue(out, "codesign", "/usr/bin/codesign", "--verify", "--strict", "--verbose=2", binPath)
-		printCommandValue(out, "signature", "/usr/bin/codesign", "-dv", binPath)
+		printCommandValue(ctx, out, "version", binPath, "--version")
+		printCommandValue(ctx, out, "codesign", "/usr/bin/codesign", "--verify", "--strict", "--verbose=2", binPath)
+		printCommandValue(ctx, out, "signature", "/usr/bin/codesign", "-dv", binPath)
 	} else {
 		fmt.Fprintf(out, "version: missing at %s\n", binPath)
 	}
-	printCommandValue(out, "which -a codex", "/usr/bin/which", "-a", "codex")
+	printCommandValue(ctx, out, "which -a codex", "/usr/bin/which", "-a", "codex")
 	return nil
 }
 
@@ -259,53 +269,64 @@ func defaultCacheHome() string {
 	return filepath.Join(paths.Home(), ".cache")
 }
 
+func notef(r *patch.Runner, message string) {
+	prefix := "[run]"
+	if r.DryRun {
+		prefix = "[dry-run]"
+	}
+	fmt.Fprintf(r.Out, "%s %s\n", prefix, message)
+}
+
 func hostTargetTriple() (string, error) {
 	if runtime.GOOS != "darwin" {
 		return "", fmt.Errorf("codex-cli install only supports macOS, got %s", runtime.GOOS)
 	}
-	switch runtime.GOARCH {
-	case "arm64":
+	if runtime.GOARCH == "arm64" {
 		return "aarch64-apple-darwin", nil
-	case "amd64":
-		return "x86_64-apple-darwin", nil
-	default:
-		return "", fmt.Errorf("unsupported macOS architecture %s", runtime.GOARCH)
 	}
+	if runtime.GOARCH == "amd64" {
+		return "x86_64-apple-darwin", nil
+	}
+	return "", fmt.Errorf("unsupported macOS architecture %s", runtime.GOARCH)
 }
 
-func cloneOrUpdateSource(r *patch.Runner, sourceDir string, ref string) error {
+func cloneOrUpdateSource(ctx context.Context, r *patch.Runner, sourceDir string, ref string) error {
+	log := codexcliLog.With("function", "cloneOrUpdateSource")
 	if !r.DryRun {
 		if err := os.MkdirAll(filepath.Dir(sourceDir), 0o755); err != nil {
+			log.ErrorContext(ctx, "codexcli.clone_or_update_source.mkdir_failed", "err", err)
 			return fmt.Errorf("create source parent: %w", err)
 		}
 	}
 	if _, err := os.Stat(sourceDir); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
+			log.ErrorContext(ctx, "codexcli.clone_or_update_source.stat_failed", "err", err)
 			return fmt.Errorf("stat source dir: %w", err)
 		}
-		r.Note("codex-cli: source checkout missing, cloning %s with depth 1", codexRepo)
-		if err := r.RunWithHeartbeat("codex-cli: cloning Codex source", 30*time.Second, "gh", "repo", "clone", codexRepo, sourceDir, "--", "--depth", "1"); err != nil {
+		notef(r, "codex-cli: source checkout missing, cloning "+codexRepo+" with depth 1")
+		if err := r.RunWithHeartbeat(ctx, "codex-cli: cloning Codex source", 30*time.Second, "gh", "repo", "clone", codexRepo, sourceDir, "--", "--depth", "1"); err != nil {
 			return fmt.Errorf("clone Codex source: %w", err)
 		}
 	} else if !isDir(filepath.Join(sourceDir, ".git")) && !r.DryRun {
 		return fmt.Errorf("source dir exists but is not a git checkout: %s", sourceDir)
 	} else {
-		r.Note("codex-cli: source checkout exists, updating %s", sourceDir)
+		notef(r, "codex-cli: source checkout exists, updating "+sourceDir)
 	}
-	r.Note("codex-cli: fetching %s from origin with depth 1", ref)
-	if err := r.RunWithHeartbeat("codex-cli: fetching Codex source", 30*time.Second, "git", "-C", sourceDir, "fetch", "--depth", "1", "--prune", "origin", fetchRef(ref)); err != nil {
+	notef(r, "codex-cli: fetching "+ref+" from origin with depth 1")
+	if err := r.RunWithHeartbeat(ctx, "codex-cli: fetching Codex source", 30*time.Second, "git", "-C", sourceDir, "fetch", "--depth", "1", "--prune", "origin", fetchRef(ref)); err != nil {
 		return fmt.Errorf("fetch Codex source: %w", err)
 	}
-	r.Note("codex-cli: checking out fetched commit")
-	if err := r.Run("git", "-C", sourceDir, "checkout", "--detach", "FETCH_HEAD"); err != nil {
+	notef(r, "codex-cli: checking out fetched commit")
+	if err := r.Run(ctx, "git", "-C", sourceDir, "checkout", "--detach", "FETCH_HEAD"); err != nil {
 		return fmt.Errorf("checkout Codex source: %w", err)
 	}
 	return nil
 }
 
 func fetchRef(ref string) string {
-	if strings.HasPrefix(ref, "origin/") {
-		return strings.TrimPrefix(ref, "origin/")
+	trimmedRef, ok := strings.CutPrefix(ref, "origin/")
+	if ok {
+		return trimmedRef
 	}
 	return ref
 }
@@ -322,16 +343,18 @@ func parseBuildMode(value string) (BuildMode, error) {
 }
 
 func buildPackage(
+	ctx context.Context,
 	r *patch.Runner,
 	sourceDir string,
 	packageDir string,
 	target string,
 	entrypointPath string,
 ) error {
+	log := codexcliLog.With("function", "buildPackage")
 	script := filepath.Join(sourceDir, "scripts", "build_codex_package.py")
-	r.Note("codex-cli: build package at %s", packageDir)
-	r.Note("codex-cli: upstream package builder output follows")
-	if err := r.RunWithHeartbeat(
+	notef(r, "codex-cli: build package at "+packageDir)
+	notef(r, "codex-cli: upstream package builder output follows")
+	if err := r.RunWithHeartbeat(ctx,
 		"codex-cli: building Codex package",
 		30*time.Second,
 		"python3",
@@ -348,45 +371,50 @@ func buildPackage(
 		entrypointPath,
 		"--force",
 	); err != nil {
+		log.ErrorContext(ctx, "codexcli.build_package.failed", "err", err)
 		return fmt.Errorf("build Codex package: %w", err)
 	}
 	return nil
 }
 
 func buildEntrypoint(
+	ctx context.Context,
 	r *patch.Runner,
 	sourceDir string,
 	target string,
 	buildMode BuildMode,
 	noSccache bool,
 ) (string, error) {
+	log := codexcliLog.With("function", "buildEntrypoint")
 	manifestPath := filepath.Join(sourceDir, "codex-rs", "Cargo.toml")
 	entrypointPath := filepath.Join(sourceDir, "codex-rs", "target", target, "release", "codex")
-	r.Note("codex-cli: build entrypoint at %s", entrypointPath)
+	notef(r, "codex-cli: build entrypoint at "+entrypointPath)
 	if r.DryRun {
-		r.Note("codex-cli: Cargo build will resolve upstream Rusty V8 artifact overrides when needed")
+		notef(r, "codex-cli: Cargo build will resolve upstream Rusty V8 artifact overrides when needed")
 	} else {
-		r.Note("codex-cli: resolving upstream Rusty V8 artifact overrides")
+		notef(r, "codex-cli: resolving upstream Rusty V8 artifact overrides")
 	}
 	describeBuildMode(r, buildMode)
-	cargoEnv, sccachePath, sccacheUsed, err := cargoBuildEnv(r, sourceDir, target, noSccache)
+	cargoEnv, sccachePath, sccacheUsed, err := cargoBuildEnv(ctx, r, sourceDir, target, noSccache)
 	if err != nil {
+		log.ErrorContext(ctx, "codexcli.build_entrypoint.env_failed", "err", err)
 		return "", err
 	}
 	cargoArgs := cargoBuildArgs(manifestPath, target, buildMode)
-	if err := r.RunEnvWithHeartbeat(
+	if err := r.RunEnvWithHeartbeat(ctx,
 		"codex-cli: building Codex entrypoint",
 		30*time.Second,
 		cargoEnv,
 		"cargo",
 		cargoArgs...,
 	); err != nil {
+		log.ErrorContext(ctx, "codexcli.build_entrypoint.build_failed", "err", err)
 		return "", fmt.Errorf("build Codex entrypoint: %w", err)
 	}
 	if sccacheUsed {
-		r.Note("codex-cli: sccache stats follow")
-		if err := r.Run(sccachePath, "--show-stats"); err != nil {
-			r.Note("codex-cli: could not read sccache stats: %v", err)
+		notef(r, "codex-cli: sccache stats follow")
+		if err := r.Run(ctx, sccachePath, "--show-stats"); err != nil {
+			notef(r, "codex-cli: could not read sccache stats: "+err.Error())
 		}
 	}
 	if !r.DryRun {
@@ -397,7 +425,8 @@ func buildEntrypoint(
 	return entrypointPath, nil
 }
 
-func signBinary(r *patch.Runner, sourceDir string, binaryPath string) error {
+func signBinary(ctx context.Context, r *patch.Runner, sourceDir string, binaryPath string) error {
+	log := codexcliLog.With("function", "signBinary")
 	entitlementsPath := filepath.Join(
 		sourceDir,
 		".github",
@@ -407,56 +436,65 @@ func signBinary(r *patch.Runner, sourceDir string, binaryPath string) error {
 	)
 	if !r.DryRun {
 		if _, err := os.Stat(binaryPath); err != nil {
+			log.ErrorContext(ctx, "codexcli.sign_binary.binary_missing", "err", err)
 			return fmt.Errorf("stat Codex binary: %w", err)
 		}
 		if _, err := os.Stat(entitlementsPath); err != nil {
+			log.ErrorContext(ctx, "codexcli.sign_binary.entitlements_missing", "err", err)
 			return fmt.Errorf("stat upstream Codex entitlements: %w", err)
 		}
 	}
-	r.Note("codex-cli: resolving local signing identity %q", paths.SignIdentity)
-	id, err := signing.ResolveIdentity(r.DryRun)
+	notef(r, "codex-cli: resolving local signing identity "+strconv.Quote(paths.SignIdentity))
+	id, err := signing.ResolveIdentity(ctx, r.DryRun)
 	if err != nil {
-		return err
+		log.ErrorContext(ctx, "codexcli.sign_binary.resolve_identity_failed", "err", err)
+		return fmt.Errorf("resolve local signing identity: %w", err)
 	}
-	r.Note("codex-cli: using upstream entitlements %s", entitlementsPath)
-	r.Note("codex-cli: sign %s with %q (sha1=%s)", binaryPath, paths.SignIdentity, id)
-	if err := r.Run("/usr/bin/codesign", signing.RuntimeTimestampEntitlementsArgs(id, entitlementsPath, binaryPath)...); err != nil {
+	notef(r, "codex-cli: using upstream entitlements "+entitlementsPath)
+	notef(r, "codex-cli: sign "+binaryPath+" with "+strconv.Quote(paths.SignIdentity)+" (sha1="+id+")")
+	if err := r.Run(ctx, "/usr/bin/codesign", signing.RuntimeTimestampEntitlementsArgs(id, entitlementsPath, binaryPath)...); err != nil {
+		log.ErrorContext(ctx, "codexcli.sign_binary.codesign_failed", "err", err)
 		return fmt.Errorf("sign Codex CLI: %w", err)
 	}
 	return nil
 }
 
 func cargoBuildEnv(
+	ctx context.Context,
 	r *patch.Runner,
 	sourceDir string,
 	target string,
 	noSccache bool,
 ) (map[string]string, string, bool, error) {
+	log := codexcliLog.With("function", "cargoBuildEnv")
 	if r.DryRun {
 		return nil, "", false, nil
 	}
 	scriptPath, cleanup, err := writeTempHelperScript("desktop-via-clyde-codex-v8-*.py", resolveCodexV8EnvScript)
 	if err != nil {
+		log.ErrorContext(ctx, "codexcli.cargo_build_env.write_helper_failed", "err", err)
 		return nil, "", false, fmt.Errorf("write Codex V8 helper script: %w", err)
 	}
 	defer cleanup()
 
-	output, err := r.RunCaptureStdout("python3", scriptPath, sourceDir, target)
+	output, err := r.RunCaptureStdout(ctx, "python3", scriptPath, sourceDir, target)
 	if err != nil {
+		log.ErrorContext(ctx, "codexcli.cargo_build_env.resolve_env_failed", "err", err)
 		return nil, "", false, fmt.Errorf("resolve Codex V8 environment: %w", err)
 	}
 	env, err := parseEnvOutput(output)
 	if err != nil {
+		log.ErrorContext(ctx, "codexcli.cargo_build_env.parse_env_failed", "err", err)
 		return nil, "", false, fmt.Errorf("parse Codex V8 environment: %w", err)
 	}
 	if len(env) == 0 {
-		r.Note("codex-cli: upstream Codex did not require additional Rusty V8 env overrides")
+		notef(r, "codex-cli: upstream Codex did not require additional Rusty V8 env overrides")
 		env = nil
 	}
 	for _, key := range []string{"RUSTY_V8_ARCHIVE", "RUSTY_V8_SRC_BINDING_PATH"} {
 		value, ok := env[key]
 		if ok {
-			r.Note("codex-cli: %s=%s", key, value)
+			notef(r, "codex-cli: "+key+"="+value)
 		}
 	}
 	existingWrapper := os.Getenv("RUSTC_WRAPPER")
@@ -464,37 +502,41 @@ func cargoBuildEnv(
 	switch {
 	case existingWrapper != "":
 		if sccacheUsed {
-			r.Note("codex-cli: using existing sccache wrapper %s", existingWrapper)
+			notef(r, "codex-cli: using existing sccache wrapper "+existingWrapper)
 		} else {
-			r.Note("codex-cli: respecting existing RUSTC_WRAPPER=%s", existingWrapper)
+			notef(r, "codex-cli: respecting existing RUSTC_WRAPPER="+existingWrapper)
 		}
 	case noSccache:
-		r.Note("codex-cli: sccache disabled for this run")
+		notef(r, "codex-cli: sccache disabled for this run")
 	case rustcWrapper != "":
-		r.Note("codex-cli: using sccache wrapper %s", rustcWrapper)
+		notef(r, "codex-cli: using sccache wrapper "+rustcWrapper)
 		if env == nil {
 			env = map[string]string{}
 		}
 		env["RUSTC_WRAPPER"] = rustcWrapper
 	default:
-		r.Note("codex-cli: sccache not found, building without compiler cache")
+		notef(r, "codex-cli: sccache not found, building without compiler cache")
 	}
 	return env, rustcWrapper, sccacheUsed, nil
 }
 
 func writeTempHelperScript(pattern string, body string) (string, func(), error) {
+	log := codexcliLog.With("function", "writeTempHelperScript")
 	file, err := os.CreateTemp("", pattern)
 	if err != nil {
-		return "", nil, err
+		log.Error("codexcli.write_temp_helper_script.create_failed", "err", err)
+		return "", nil, fmt.Errorf("create temp helper script: %w", err)
 	}
 	if _, err := file.WriteString(body); err != nil {
+		log.Error("codexcli.write_temp_helper_script.write_failed", "err", err)
 		_ = file.Close()
 		_ = os.Remove(file.Name())
-		return "", nil, err
+		return "", nil, fmt.Errorf("write temp helper script body: %w", err)
 	}
 	if err := file.Close(); err != nil {
+		log.Error("codexcli.write_temp_helper_script.close_failed", "err", err)
 		_ = os.Remove(file.Name())
-		return "", nil, err
+		return "", nil, fmt.Errorf("close temp helper script: %w", err)
 	}
 	cleanup := func() {
 		_ = os.Remove(file.Name())
@@ -503,6 +545,7 @@ func writeTempHelperScript(pattern string, body string) (string, func(), error) 
 }
 
 func parseEnvOutput(output []byte) (map[string]string, error) {
+	log := codexcliLog.With("function", "parseEnvOutput")
 	env := map[string]string{}
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	for scanner.Scan() {
@@ -512,24 +555,29 @@ func parseEnvOutput(output []byte) (map[string]string, error) {
 		}
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
+			log.Error("codexcli.parse_env_output.invalid_line", "err", fmt.Errorf("invalid env line"), "line", line)
 			return nil, fmt.Errorf("invalid env line %q", line)
 		}
 		env[parts[0]] = parts[1]
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		log.Error("codexcli.parse_env_output.scan_failed", "err", err)
+		return nil, fmt.Errorf("scan environment output: %w", err)
 	}
 	return env, nil
 }
 
 func readPackageMetadata(packageDir string) (packageMetadata, error) {
+	log := codexcliLog.With("function", "readPackageMetadata")
 	path := filepath.Join(packageDir, "codex-package.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
+		log.Error("codexcli.read_package_metadata.read_failed", "err", err)
 		return packageMetadata{}, fmt.Errorf("read package metadata: %w", err)
 	}
 	var metadata packageMetadata
 	if err := json.Unmarshal(data, &metadata); err != nil {
+		log.Error("codexcli.read_package_metadata.parse_failed", "err", err)
 		return packageMetadata{}, fmt.Errorf("parse package metadata: %w", err)
 	}
 	if metadata.Version == "" || metadata.Target == "" || metadata.Variant != "codex" {
@@ -560,54 +608,64 @@ func releaseNameSuffix(head string, target string, buildMode BuildMode) string {
 }
 
 func installPackage(
+	ctx context.Context,
 	r *patch.Runner,
 	packageDir string,
 	releaseDir string,
 	codexHome string,
 	installDir string,
 ) error {
+	log := codexcliLog.With("function", "installPackage")
 	standaloneRoot := filepath.Join(codexHome, "packages", "standalone")
 	currentLink := filepath.Join(standaloneRoot, "current")
 	binPath := filepath.Join(installDir, "codex")
 	stageDir := filepath.Join(filepath.Dir(releaseDir), ".staging."+filepath.Base(releaseDir))
-	r.Note("codex-cli: install package %s -> %s", packageDir, releaseDir)
+	notef(r, "codex-cli: install package "+packageDir+" -> "+releaseDir)
 	if r.DryRun {
-		r.Note("codex-cli: would stage package at %s", stageDir)
-		r.Note("codex-cli: update %s -> %s", currentLink, releaseDir)
-		r.Note("codex-cli: update %s -> %s", binPath, filepath.Join(currentLink, packageBinaryRel))
+		notef(r, "codex-cli: would stage package at "+stageDir)
+		notef(r, "codex-cli: update "+currentLink+" -> "+releaseDir)
+		notef(r, "codex-cli: update "+binPath+" -> "+filepath.Join(currentLink, packageBinaryRel))
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(releaseDir), 0o755); err != nil {
+		log.ErrorContext(ctx, "codexcli.install_package.mkdir_release_failed", "err", err)
 		return fmt.Errorf("create releases dir: %w", err)
 	}
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
+		log.ErrorContext(ctx, "codexcli.install_package.mkdir_install_failed", "err", err)
 		return fmt.Errorf("create install dir: %w", err)
 	}
-	r.Note("codex-cli: preparing staging directory %s", stageDir)
+	notef(r, "codex-cli: preparing staging directory "+stageDir)
 	if err := os.RemoveAll(stageDir); err != nil {
+		log.ErrorContext(ctx, "codexcli.install_package.remove_stage_failed", "err", err)
 		return fmt.Errorf("remove stale stage dir: %w", err)
 	}
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		log.ErrorContext(ctx, "codexcli.install_package.mkdir_stage_failed", "err", err)
 		return fmt.Errorf("create stage dir: %w", err)
 	}
-	if err := r.Run("/usr/bin/rsync", "-a", packageDir+"/", stageDir+"/"); err != nil {
+	if err := r.Run(ctx, "/usr/bin/rsync", "-a", packageDir+"/", stageDir+"/"); err != nil {
+		log.ErrorContext(ctx, "codexcli.install_package.rsync_failed", "err", err)
 		return fmt.Errorf("copy package to release stage: %w", err)
 	}
-	r.Note("codex-cli: creating release convenience symlink %s", filepath.Join(stageDir, "codex"))
+	notef(r, "codex-cli: creating release convenience symlink "+filepath.Join(stageDir, "codex"))
 	if err := os.Symlink(packageBinaryRel, filepath.Join(stageDir, "codex")); err != nil && !errors.Is(err, os.ErrExist) {
+		log.ErrorContext(ctx, "codexcli.install_package.symlink_failed", "err", err)
 		return fmt.Errorf("create release convenience symlink: %w", err)
 	}
-	r.Note("codex-cli: promoting staged release to %s", releaseDir)
+	notef(r, "codex-cli: promoting staged release to "+releaseDir)
 	if err := os.RemoveAll(releaseDir); err != nil {
+		log.ErrorContext(ctx, "codexcli.install_package.remove_release_failed", "err", err)
 		return fmt.Errorf("remove old release dir: %w", err)
 	}
 	if err := os.Rename(stageDir, releaseDir); err != nil {
+		log.ErrorContext(ctx, "codexcli.install_package.rename_release_failed", "err", err)
 		return fmt.Errorf("move release into place: %w", err)
 	}
 	if err := replaceSymlink(currentLink, releaseDir); err != nil {
 		return fmt.Errorf("update current release link: %w", err)
 	}
-	r.Note("codex-cli: updating visible command symlink %s", binPath)
+	notef(r, "codex-cli: updating visible command symlink "+binPath)
 	if err := replaceSymlink(binPath, filepath.Join(currentLink, filepath.FromSlash(packageBinaryRel))); err != nil {
 		return fmt.Errorf("update visible command link: %w", err)
 	}
@@ -615,33 +673,43 @@ func installPackage(
 }
 
 func replaceSymlink(linkPath string, target string) error {
+	log := codexcliLog.With("function", "replaceSymlink")
 	tmpLink := linkPath + ".tmp"
 	_ = os.Remove(tmpLink)
 	if err := os.Symlink(target, tmpLink); err != nil {
-		return err
+		log.Error("codexcli.replace_symlink.create_failed", "err", err)
+		return fmt.Errorf("create symlink %s -> %s: %w", tmpLink, target, err)
 	}
 	if err := os.RemoveAll(linkPath); err != nil {
+		log.Error("codexcli.replace_symlink.remove_failed", "err", err)
 		_ = os.Remove(tmpLink)
-		return err
+		return fmt.Errorf("remove existing link path %s: %w", linkPath, err)
 	}
-	return os.Rename(tmpLink, linkPath)
+	if err := os.Rename(tmpLink, linkPath); err != nil {
+		log.Error("codexcli.replace_symlink.rename_failed", "err", err)
+		return fmt.Errorf("promote symlink %s -> %s: %w", tmpLink, linkPath, err)
+	}
+	return nil
 }
 
-func verifyInstalledCommand(r *patch.Runner, installDir string) error {
+func verifyInstalledCommand(ctx context.Context, r *patch.Runner, installDir string) error {
+	log := codexcliLog.With("function", "verifyInstalledCommand")
 	binPath := filepath.Join(installDir, "codex")
-	r.Note("codex-cli: verifying signature for %s", binPath)
-	if err := r.Run("/usr/bin/codesign", "--verify", "--strict", "--verbose=2", binPath); err != nil {
+	notef(r, "codex-cli: verifying signature for "+binPath)
+	if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--strict", "--verbose=2", binPath); err != nil {
+		log.ErrorContext(ctx, "codexcli.verify_installed_command.codesign_failed", "err", err)
 		return fmt.Errorf("verify Codex CLI signature: %w", err)
 	}
-	r.Note("codex-cli: verifying executable by running %s --version", binPath)
-	if err := r.Run(binPath, "--version"); err != nil {
+	notef(r, "codex-cli: verifying executable by running "+binPath+" --version")
+	if err := r.Run(ctx, binPath, "--version"); err != nil {
+		log.ErrorContext(ctx, "codexcli.verify_installed_command.version_failed", "err", err)
 		return fmt.Errorf("verify Codex CLI version: %w", err)
 	}
 	return nil
 }
 
-func printCommandValue(out io.Writer, label string, name string, args ...string) {
-	cmd := exec.Command(name, args...)
+func printCommandValue(ctx context.Context, out io.Writer, label string, name string, args ...string) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	data, err := cmd.CombinedOutput()
 	value := strings.TrimSpace(string(data))
 	if err != nil {
@@ -670,13 +738,10 @@ func isDir(path string) bool {
 
 func describeBuildMode(r *patch.Runner, buildMode BuildMode) {
 	if buildMode == BuildModeLocalFast {
-		r.Note(
-			"codex-cli: local-fast mode overrides release settings with lto=false and codegen-units=%d",
-			localFastCodegenUnits(),
-		)
+		notef(r, "codex-cli: local-fast mode overrides release settings with lto=false and codegen-units="+strconv.Itoa(localFastCodegenUnits()))
 		return
 	}
-	r.Note("codex-cli: release mode preserves the upstream release profile exactly")
+	notef(r, "codex-cli: release mode preserves the upstream release profile exactly")
 }
 
 func cargoBuildArgs(manifestPath string, target string, buildMode BuildMode) []string {
@@ -734,6 +799,7 @@ func isSccachePath(path string) bool {
 }
 
 func maybeReuseInstalledRelease(
+	ctx context.Context,
 	r *patch.Runner,
 	codexHome string,
 	installDir string,
@@ -743,7 +809,7 @@ func maybeReuseInstalledRelease(
 	forceRebuild bool,
 ) (string, bool, error) {
 	if forceRebuild {
-		r.Note("codex-cli: force rebuild requested, skipping installed release reuse")
+		notef(r, "codex-cli: force rebuild requested, skipping installed release reuse")
 		return "", false, nil
 	}
 	releasesRoot := filepath.Join(codexHome, "packages", "standalone", "releases")
@@ -755,31 +821,42 @@ func maybeReuseInstalledRelease(
 		return "", false, nil
 	}
 	if len(matches) > 1 {
-		r.Note("codex-cli: found multiple matching installed releases, rebuilding instead")
+		notef(r, "codex-cli: found multiple matching installed releases, rebuilding instead")
 		return "", false, nil
 	}
 	releasePath := matches[0]
-	r.Note("codex-cli: found matching installed release %s", releasePath)
-	if err := verifyReleaseCandidate(releasePath, target); err != nil {
-		r.Note("codex-cli: installed release reuse rejected: %v", err)
+	notef(r, "codex-cli: found matching installed release "+releasePath)
+	reuseRejected, reuseReason := releaseReuseRejected(ctx, releasePath, target)
+	if reuseRejected {
+		notef(r, "codex-cli: installed release reuse rejected: "+reuseReason)
 		return "", false, nil
 	}
-	r.Note("codex-cli: reusing verified installed release %s", releasePath)
-	if err := relinkInstalledRelease(r, codexHome, installDir, releasePath); err != nil {
+	notef(r, "codex-cli: reusing verified installed release "+releasePath)
+	if err := relinkInstalledRelease(ctx, r, codexHome, installDir, releasePath); err != nil {
 		return "", false, err
 	}
-	if err := verifyInstalledCommand(r, installDir); err != nil {
+	if err := verifyInstalledCommand(ctx, r, installDir); err != nil {
 		return "", false, err
 	}
 	return releasePath, true, nil
 }
 
+func releaseReuseRejected(ctx context.Context, releasePath, target string) (bool, string) {
+	verifyErr := verifyReleaseCandidate(ctx, releasePath, target)
+	if verifyErr == nil {
+		return false, ""
+	}
+	return true, verifyErr.Error()
+}
+
 func findMatchingReleaseDirs(releasesRoot string, suffix string) ([]string, error) {
+	log := codexcliLog.With("function", "findMatchingReleaseDirs")
 	entries, err := os.ReadDir(releasesRoot)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
+		log.Error("codexcli.find_matching_release_dirs.read_failed", "err", err)
 		return nil, fmt.Errorf("list release dir %s: %w", releasesRoot, err)
 	}
 	matches := make([]string, 0, len(entries))
@@ -795,21 +872,26 @@ func findMatchingReleaseDirs(releasesRoot string, suffix string) ([]string, erro
 	return matches, nil
 }
 
-func verifyReleaseCandidate(releasePath string, target string) error {
+func verifyReleaseCandidate(ctx context.Context, releasePath string, target string) error {
+	log := codexcliLog.With("function", "verifyReleaseCandidate")
 	metadata, err := readPackageMetadata(releasePath)
 	if err != nil {
+		log.ErrorContext(ctx, "codexcli.verify_release_candidate.metadata_failed", "err", err)
 		return err
 	}
 	if metadata.Target != target {
+		log.ErrorContext(ctx, "codexcli.verify_release_candidate.target_mismatch", "err", fmt.Errorf("release target mismatch"))
 		return fmt.Errorf("release target mismatch: got %s want %s", metadata.Target, target)
 	}
 	binaryPath := filepath.Join(releasePath, filepath.FromSlash(packageBinaryRel))
 	if _, err := os.Stat(binaryPath); err != nil {
+		log.ErrorContext(ctx, "codexcli.verify_release_candidate.binary_missing", "err", err)
 		return fmt.Errorf("stat release binary: %w", err)
 	}
-	cmd := exec.Command("/usr/bin/codesign", "--verify", "--strict", "--verbose=2", binaryPath)
+	cmd := exec.CommandContext(ctx, "/usr/bin/codesign", "--verify", "--strict", "--verbose=2", binaryPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		log.ErrorContext(ctx, "codexcli.verify_release_candidate.codesign_failed", "err", err)
 		message := strings.TrimSpace(string(output))
 		if message == "" {
 			message = err.Error()
@@ -820,26 +902,33 @@ func verifyReleaseCandidate(releasePath string, target string) error {
 }
 
 func relinkInstalledRelease(
+	ctx context.Context,
 	r *patch.Runner,
 	codexHome string,
 	installDir string,
 	releasePath string,
 ) error {
+	log := codexcliLog.With("function", "relinkInstalledRelease")
+	_ = ctx
 	standaloneRoot := filepath.Join(codexHome, "packages", "standalone")
 	currentLink := filepath.Join(standaloneRoot, "current")
 	binPath := filepath.Join(installDir, "codex")
 	if err := os.MkdirAll(standaloneRoot, 0o755); err != nil {
+		log.ErrorContext(ctx, "codexcli.relink_installed_release.mkdir_standalone_failed", "err", err)
 		return fmt.Errorf("create standalone root: %w", err)
 	}
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
+		log.ErrorContext(ctx, "codexcli.relink_installed_release.mkdir_install_failed", "err", err)
 		return fmt.Errorf("create install dir: %w", err)
 	}
-	r.Note("codex-cli: update %s -> %s", currentLink, releasePath)
+	notef(r, "codex-cli: update "+currentLink+" -> "+releasePath)
 	if err := replaceSymlink(currentLink, releasePath); err != nil {
+		log.ErrorContext(ctx, "codexcli.relink_installed_release.current_link_failed", "err", err)
 		return fmt.Errorf("update current release link: %w", err)
 	}
-	r.Note("codex-cli: update %s -> %s", binPath, filepath.Join(currentLink, packageBinaryRel))
+	notef(r, "codex-cli: update "+binPath+" -> "+filepath.Join(currentLink, packageBinaryRel))
 	if err := replaceSymlink(binPath, filepath.Join(currentLink, filepath.FromSlash(packageBinaryRel))); err != nil {
+		log.ErrorContext(ctx, "codexcli.relink_installed_release.visible_link_failed", "err", err)
 		return fmt.Errorf("update visible command link: %w", err)
 	}
 	return nil

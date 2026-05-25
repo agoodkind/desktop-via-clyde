@@ -1,6 +1,9 @@
 package targets
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestRegistryHasThreeTargets(t *testing.T) {
 	if len(Registry) != 3 {
@@ -10,7 +13,7 @@ func TestRegistryHasThreeTargets(t *testing.T) {
 
 func TestLookupKnown(t *testing.T) {
 	for _, id := range []string{"cursor", "codex", "claude"} {
-		tg, err := Lookup(id)
+		tg, err := lookupTarget(id)
 		if err != nil {
 			t.Errorf("Lookup(%q) returned error: %v", id, err)
 			continue
@@ -25,7 +28,7 @@ func TestLookupKnown(t *testing.T) {
 }
 
 func TestLookupUnknown(t *testing.T) {
-	if _, err := Lookup("nope"); err == nil {
+	if _, err := lookupTarget("nope"); err == nil {
 		t.Fatal("expected error for unknown id")
 	}
 }
@@ -236,7 +239,7 @@ func TestComputerUsePolicyPerTarget(t *testing.T) {
 }
 
 func TestCodexComputerUseTeamRequirementPlists(t *testing.T) {
-	tg, err := Lookup("codex")
+	tg, err := lookupTarget("codex")
 	if err != nil {
 		t.Fatalf("Lookup(%q) returned error: %v", "codex", err)
 	}
@@ -262,4 +265,13 @@ func stringSlicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func lookupTarget(id string) (Target, error) {
+	for _, target := range Registry {
+		if target.ID == id {
+			return target, nil
+		}
+	}
+	return Target{}, fmt.Errorf("unknown target %q", id)
 }

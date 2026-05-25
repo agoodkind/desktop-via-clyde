@@ -1,58 +1,110 @@
 package patch
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sort"
 	"strings"
 	"time"
+
+	"goodkind.io/desktop-via-clyde/internal/clock"
+	"goodkind.io/gklog"
 )
 
 // Runner abstracts process execution so dry-run and real-run share one path.
 type Runner struct {
 	DryRun bool
 	Out    io.Writer
+	Log    *slog.Logger
+	ctxFn  func() context.Context
 }
 
 // NewRunner constructs a Runner that writes progress to out.
-func NewRunner(dryRun bool, out io.Writer) *Runner {
+func NewRunner(ctx context.Context, dryRun bool, out io.Writer) *Runner {
 	if out == nil {
 		out = os.Stdout
 	}
-	return &Runner{DryRun: dryRun, Out: out}
+	return &Runner{
+		DryRun: dryRun,
+		Out:    out,
+		Log:    gklog.LoggerFromContext(ctx),
+		ctxFn: func() context.Context {
+			if ctx == nil {
+				return context.Background()
+			}
+			return ctx
+		},
+	}
 }
 
 // Run executes a command, or prints what would run when DryRun is true.
 // stdout and stderr are forwarded to the runner's Out.
-func (r *Runner) Run(name string, args ...string) error {
+func (r *Runner) Run(ctx context.Context, name string, args ...string) error {
+	ctx = coalesceContext(ctx, r.context())
+	r.Log.DebugContext(ctx, "runner.run.boundary", "command", name, "args", args, "dry_run", r.DryRun)
 	r.logCommand(nil, name, args...)
+	r.logInfo(ctx, "runner.command.start",
+		slog.String("command", name),
+		slog.Any("args", args),
+		slog.Bool("dry_run", r.DryRun))
 	if r.DryRun {
 		return nil
 	}
-	cmd := exec.Command(name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdout = r.Out
 	cmd.Stderr = r.Out
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		r.logError(ctx, "runner.command.failed", err,
+			slog.String("command", name),
+			slog.Any("args", args))
+		r.Log.ErrorContext(ctx, "runner.command.returning_error", "err", err, "command", name, "args", args)
+		return fmt.Errorf("run %s: %w", name, err)
+	}
+	r.logInfo(ctx, "runner.command.succeeded",
+		slog.String("command", name),
+		slog.Any("args", args))
+	return nil
 }
 
 // RunWithHeartbeat executes a command and logs periodic progress while it is
 // still running.
-func (r *Runner) RunWithHeartbeat(label string, interval time.Duration, name string, args ...string) error {
+func (r *Runner) RunWithHeartbeat(ctx context.Context, label string, interval time.Duration, name string, args ...string) error {
+	ctx = coalesceContext(ctx, r.context())
 	r.logCommand(nil, name, args...)
+	r.logInfo(ctx, "runner.command.start",
+		slog.String("label", label),
+		slog.String("command", name),
+		slog.Any("args", args),
+		slog.Bool("dry_run", r.DryRun))
 	if r.DryRun {
 		return nil
 	}
-	cmd := exec.Command(name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdout = r.Out
 	cmd.Stderr = r.Out
 	if err := cmd.Start(); err != nil {
-		return err
+		r.logError(ctx, "runner.command.start_failed", err,
+			slog.String("label", label),
+			slog.String("command", name),
+			slog.Any("args", args))
+		return fmt.Errorf("start %s: %w", name, err)
 	}
 	done := make(chan error, 1)
-	start := time.Now()
+	start := clock.Now()
 	go func() {
+		defer func() {
+			recovered := recover()
+			if recovered == nil {
+				return
+			}
+			r.Log.LogAttrs(ctx, slog.LevelError, "runner.goroutine.panic",
+				slog.String("label", "runner.wait"),
+				slog.String("err", fmt.Sprintf("panic: %v", recovered)))
+		}()
 		done <- cmd.Wait()
 	}()
 	ticker := time.NewTicker(interval)
@@ -60,9 +112,25 @@ func (r *Runner) RunWithHeartbeat(label string, interval time.Duration, name str
 	for {
 		select {
 		case err := <-done:
-			return err
+			if err != nil {
+				r.logError(ctx, "runner.command.failed", err,
+					slog.String("label", label),
+					slog.String("command", name),
+					slog.Any("args", args))
+				return fmt.Errorf("wait %s: %w", name, err)
+			}
+			r.logInfo(ctx, "runner.command.succeeded",
+				slog.String("label", label),
+				slog.String("command", name),
+				slog.Any("args", args))
+			return nil
 		case <-ticker.C:
-			r.Note("%s still running after %s", label, time.Since(start).Round(time.Second))
+			elapsed := clock.Since(start).Round(time.Second)
+			notef(r, fmt.Sprintf("%s still running after %s", label, elapsed))
+			r.logInfo(ctx, "runner.command.heartbeat",
+				slog.String("label", label),
+				slog.String("command", name),
+				slog.String("elapsed", elapsed.String()))
 		}
 	}
 }
@@ -70,26 +138,47 @@ func (r *Runner) RunWithHeartbeat(label string, interval time.Duration, name str
 // RunEnvWithHeartbeat executes a command with environment overrides and logs
 // periodic progress while it is still running.
 func (r *Runner) RunEnvWithHeartbeat(
+	ctx context.Context,
 	label string,
 	interval time.Duration,
 	env map[string]string,
 	name string,
 	args ...string,
 ) error {
+	ctx = coalesceContext(ctx, r.context())
 	r.logCommand(env, name, args...)
+	r.logInfo(ctx, "runner.command.start",
+		slog.String("label", label),
+		slog.String("command", name),
+		slog.Any("args", args),
+		slog.Any("env", env),
+		slog.Bool("dry_run", r.DryRun))
 	if r.DryRun {
 		return nil
 	}
-	cmd := exec.Command(name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = mergedEnv(env)
 	cmd.Stdout = r.Out
 	cmd.Stderr = r.Out
 	if err := cmd.Start(); err != nil {
-		return err
+		r.logError(ctx, "runner.command.start_failed", err,
+			slog.String("label", label),
+			slog.String("command", name),
+			slog.Any("args", args))
+		return fmt.Errorf("start %s: %w", name, err)
 	}
 	done := make(chan error, 1)
-	start := time.Now()
+	start := clock.Now()
 	go func() {
+		defer func() {
+			recovered := recover()
+			if recovered == nil {
+				return
+			}
+			r.Log.LogAttrs(ctx, slog.LevelError, "runner.goroutine.panic",
+				slog.String("label", "runner.wait"),
+				slog.String("err", fmt.Sprintf("panic: %v", recovered)))
+		}()
 		done <- cmd.Wait()
 	}()
 	ticker := time.NewTicker(interval)
@@ -97,27 +186,58 @@ func (r *Runner) RunEnvWithHeartbeat(
 	for {
 		select {
 		case err := <-done:
-			return err
+			if err != nil {
+				r.logError(ctx, "runner.command.failed", err,
+					slog.String("label", label),
+					slog.String("command", name),
+					slog.Any("args", args))
+				return fmt.Errorf("wait %s: %w", name, err)
+			}
+			r.logInfo(ctx, "runner.command.succeeded",
+				slog.String("label", label),
+				slog.String("command", name),
+				slog.Any("args", args))
+			return nil
 		case <-ticker.C:
-			r.Note("%s still running after %s", label, time.Since(start).Round(time.Second))
+			elapsed := clock.Since(start).Round(time.Second)
+			notef(r, fmt.Sprintf("%s still running after %s", label, elapsed))
+			r.logInfo(ctx, "runner.command.heartbeat",
+				slog.String("label", label),
+				slog.String("command", name),
+				slog.String("elapsed", elapsed.String()))
 		}
 	}
 }
 
 // RunCaptureStdout runs a command and returns only its stdout (stderr goes to Out).
-func (r *Runner) RunCaptureStdout(name string, args ...string) ([]byte, error) {
+func (r *Runner) RunCaptureStdout(ctx context.Context, name string, args ...string) ([]byte, error) {
+	ctx = coalesceContext(ctx, r.context())
+	r.Log.DebugContext(ctx, "runner.capture_stdout.boundary", "command", name, "args", args, "dry_run", r.DryRun)
 	r.logCommand(nil, name, args...)
+	r.logInfo(ctx, "runner.command.start",
+		slog.String("command", name),
+		slog.Any("args", args),
+		slog.Bool("capture_stdout", true),
+		slog.Bool("dry_run", r.DryRun))
 	if r.DryRun {
 		return nil, nil
 	}
-	cmd := exec.Command(name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stderr = r.Out
-	return cmd.Output()
-}
-
-// Note logs a non-command step.
-func (r *Runner) Note(format string, args ...any) {
-	fmt.Fprintf(r.Out, "%s "+format+"\n", append([]any{r.prefix()}, args...)...)
+	output, err := cmd.Output()
+	if err != nil {
+		r.logError(ctx, "runner.command.failed", err,
+			slog.String("command", name),
+			slog.Any("args", args),
+			slog.Bool("capture_stdout", true))
+		r.Log.ErrorContext(ctx, "runner.command.returning_error", "err", err, "command", name, "args", args, "capture_stdout", true)
+		return nil, fmt.Errorf("output %s: %w", name, err)
+	}
+	r.logInfo(ctx, "runner.command.succeeded",
+		slog.String("command", name),
+		slog.Any("args", args),
+		slog.Bool("capture_stdout", true))
+	return output, nil
 }
 
 func (r *Runner) prefix() string {
@@ -141,15 +261,44 @@ func (r *Runner) logCommand(env map[string]string, name string, args ...string) 
 	fmt.Fprintf(r.Out, "%s %s %s\n", r.prefix(), name, joinArgs(args))
 }
 
-func joinArgs(args []string) string {
-	out := ""
-	for i, a := range args {
-		if i > 0 {
-			out += " "
-		}
-		out += a
+func (r *Runner) context() context.Context {
+	if r.ctxFn == nil {
+		return context.Background()
 	}
-	return out
+	return r.ctxFn()
+}
+
+func coalesceContext(primary context.Context, fallback context.Context) context.Context {
+	if primary != nil {
+		return primary
+	}
+	if fallback != nil {
+		return fallback
+	}
+	return context.Background()
+}
+
+func (r *Runner) logInfo(ctx context.Context, msg string, attrs ...slog.Attr) {
+	r.Log.LogAttrs(ctx, slog.LevelInfo, msg, attrs...)
+}
+
+func (r *Runner) logError(ctx context.Context, msg string, err error, attrs ...slog.Attr) {
+	r.Log.LogAttrs(ctx, slog.LevelError, msg, append(attrs, slog.Any("err", err))...)
+}
+
+func notef(r *Runner, message string) {
+	fmt.Fprintf(r.Out, "%s %s\n", r.prefix(), message)
+}
+
+func joinArgs(args []string) string {
+	var builder strings.Builder
+	for i := range args {
+		if i > 0 {
+			builder.WriteByte(' ')
+		}
+		builder.WriteString(args[i])
+	}
+	return builder.String()
 }
 
 func mergedEnv(overrides map[string]string) []string {
@@ -161,8 +310,9 @@ func mergedEnv(overrides map[string]string) []string {
 	seen := make(map[string]bool, len(base)+len(overrides))
 	for _, entry := range base {
 		key := entry
-		if cut := strings.IndexByte(entry, '='); cut >= 0 {
-			key = entry[:cut]
+		entryKey, _, ok := strings.Cut(entry, "=")
+		if ok {
+			key = entryKey
 		}
 		if value, ok := overrides[key]; ok {
 			out = append(out, key+"="+value)

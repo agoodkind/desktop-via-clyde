@@ -15,30 +15,65 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
 
+	"goodkind.io/desktop-via-clyde/internal/claudetee"
 	"goodkind.io/desktop-via-clyde/internal/codexcli"
+	"goodkind.io/desktop-via-clyde/internal/logging"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 	"goodkind.io/desktop-via-clyde/internal/upgrade"
+	"goodkind.io/desktop-via-clyde/internal/version"
+	"goodkind.io/gklog"
 )
 
+var bootstrapLog = slog.New(slog.DiscardHandler)
+
 func main() {
-	root := newRootCmd(os.Stdout)
-	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+	bootstrapLog.Info("desktop-via-clyde.main")
+	exitCode := run()
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
 }
 
-func newRootCmd(out io.Writer) *cobra.Command {
+func run() int {
+	logger, closer, loggingErr := logging.Setup()
+	slog.SetDefault(logger)
+
+	baseCtx := context.Background()
+	ctx := gklog.WithLogger(baseCtx, logger)
+	if loggingErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: structured logging disabled: %v\n", loggingErr)
+	}
+
+	logger.InfoContext(ctx, "cli.start",
+		"version", version.String(),
+		"gklog_build", logging.GklogBuild(),
+		"log_path", paths.ProcessLogPath(),
+		"args", os.Args[1:])
+
+	root := newRootCmd(ctx, os.Stdout)
+	if err := root.ExecuteContext(ctx); err != nil {
+		logger.ErrorContext(ctx, "cli.execute.failed", "err", err)
+		fmt.Fprintln(os.Stderr, "error:", err)
+		_ = closer.Close()
+		return 1
+	}
+	logger.InfoContext(ctx, "cli.exit")
+	_ = closer.Close()
+	return 0
+}
+
+func newRootCmd(ctx context.Context, out io.Writer) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "desktop-via-clyde",
 		Short:         "Patch macOS Electron apps (Cursor, Codex, Claude) to route through the clyde MITM proxy",
@@ -47,12 +82,13 @@ func newRootCmd(out io.Writer) *cobra.Command {
 	}
 	root.SetOut(out)
 	root.SetErr(out)
+	root.SetContext(ctx)
 
 	for _, target := range targets.Registry {
-		root.AddCommand(newTargetCmd(out, target))
+		root.AddCommand(newTargetCmd(ctx, out, target))
 	}
-	root.AddCommand(newStatusCmd(out))
-	root.AddCommand(newCodexCLICmd(out))
+	root.AddCommand(newStatusCmd(ctx, out))
+	root.AddCommand(newCodexCLICmd(ctx, out))
 	return root
 }
 
@@ -63,20 +99,124 @@ func targetWithAppPath(t targets.Target, appPath string) targets.Target {
 	return t
 }
 
-func newTargetCmd(out io.Writer, target targets.Target) *cobra.Command {
+func newTargetCmd(ctx context.Context, out io.Writer, target targets.Target) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   target.ID,
-		Short: fmt.Sprintf("Operate on %s", target.AppPath),
+		Short: "Operate on " + target.AppPath,
 	}
-	cmd.AddCommand(newPatchCmd(out, target))
-	cmd.AddCommand(newUnpatchCmd(out, target))
-	cmd.AddCommand(newUpgradeCmd(out, target))
-	cmd.AddCommand(newKeychainMigrateCmd(out, target))
-	cmd.AddCommand(newTargetStatusCmd(out, target))
+	cmd.SetContext(ctx)
+	cmd.AddCommand(newPatchCmd(ctx, out, target))
+	cmd.AddCommand(newUnpatchCmd(ctx, out, target))
+	cmd.AddCommand(newUpgradeCmd(ctx, out, target))
+	cmd.AddCommand(newKeychainMigrateCmd(ctx, out, target))
+	cmd.AddCommand(newTargetStatusCmd(ctx, out, target))
+	if target.ID == "claude" {
+		cmd.AddCommand(newClaudeBundledCLITeeCmd(ctx, out))
+	}
 	return cmd
 }
 
-func newPatchCmd(out io.Writer, target targets.Target) *cobra.Command {
+// newClaudeBundledCLITeeCmd registers `desktop-via-clyde claude bundled-cli-tee`
+// and its install, uninstall, and status subcommands. The bundled CLI lives
+// inside Claude Desktop's Application Support tree, separate from the
+// Electron main bundle that the normal `claude patch` flow operates on, so
+// the tee install is a Claude-only operation distinct from `patch`.
+func newClaudeBundledCLITeeCmd(ctx context.Context, out io.Writer) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "bundled-cli-tee",
+		Short: "Install or remove the stdio-tee shim on Claude Desktop's bundled claude CLI",
+		Long: "Wraps the claude binary that Claude Desktop spawns over stdio for tasks " +
+			"such as the /context slash command, capturing the exact SDK control " +
+			"protocol bytes to time-stamped log files for diagnostic inspection.",
+	}
+	cmd.SetContext(ctx)
+	cmd.AddCommand(newClaudeBundledCLITeeInstallCmd(ctx, out))
+	cmd.AddCommand(newClaudeBundledCLITeeUninstallCmd(ctx, out))
+	cmd.AddCommand(newClaudeBundledCLITeeStatusCmd(ctx, out))
+	return cmd
+}
+
+func newClaudeBundledCLITeeInstallCmd(ctx context.Context, out io.Writer) *cobra.Command {
+	var dryRun bool
+	var versionDir string
+	var bundledCLIPath string
+	var logDir string
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Stop Claude Desktop, rename the bundled CLI to .real, write the tee shim",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return claudetee.Install(ctx, claudetee.Options{
+				DryRun:         dryRun,
+				VersionDir:     versionDir,
+				BundledCLIPath: bundledCLIPath,
+				LogDir:         logDir,
+				HomeDir:        "",
+				Out:            out,
+			})
+		},
+	}
+	cmd.SetContext(ctx)
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the filesystem")
+	cmd.Flags().StringVar(&versionDir, "version-dir", "", "specific claude-code/<version> dir to target (default: greatest by version sort)")
+	cmd.Flags().StringVar(&bundledCLIPath, "bundled-cli-path", "", "override the entire bundled CLI path; takes precedence over --version-dir")
+	cmd.Flags().StringVar(&logDir, "log-dir", "", "override the default log directory shown in the next-steps message")
+	return cmd
+}
+
+func newClaudeBundledCLITeeUninstallCmd(ctx context.Context, out io.Writer) *cobra.Command {
+	var dryRun bool
+	var versionDir string
+	var bundledCLIPath string
+	cmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Restore the renamed .real binary back over the shim",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return claudetee.Uninstall(ctx, claudetee.Options{
+				DryRun:         dryRun,
+				VersionDir:     versionDir,
+				BundledCLIPath: bundledCLIPath,
+				LogDir:         "",
+				HomeDir:        "",
+				Out:            out,
+			})
+		},
+	}
+	cmd.SetContext(ctx)
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the filesystem")
+	cmd.Flags().StringVar(&versionDir, "version-dir", "", "specific claude-code/<version> dir to target (default: greatest by version sort)")
+	cmd.Flags().StringVar(&bundledCLIPath, "bundled-cli-path", "", "override the entire bundled CLI path; takes precedence over --version-dir")
+	return cmd
+}
+
+func newClaudeBundledCLITeeStatusCmd(ctx context.Context, out io.Writer) *cobra.Command {
+	var versionDir string
+	var bundledCLIPath string
+	var logDir string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Print the bundled CLI path, install state, embedded shim size, and log directory",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return claudetee.Status(ctx, claudetee.Options{
+				DryRun:         false,
+				VersionDir:     versionDir,
+				BundledCLIPath: bundledCLIPath,
+				LogDir:         logDir,
+				HomeDir:        "",
+				Out:            out,
+			})
+		},
+	}
+	cmd.SetContext(ctx)
+	cmd.Flags().StringVar(&versionDir, "version-dir", "", "specific claude-code/<version> dir to target (default: greatest by version sort)")
+	cmd.Flags().StringVar(&bundledCLIPath, "bundled-cli-path", "", "override the entire bundled CLI path; takes precedence over --version-dir")
+	cmd.Flags().StringVar(&logDir, "log-dir", "", "override the displayed log directory")
+	return cmd
+}
+
+func newPatchCmd(ctx context.Context, out io.Writer, target targets.Target) *cobra.Command {
 	var dryRun bool
 	var noMigrate bool
 	var appPath string
@@ -86,13 +226,14 @@ func newPatchCmd(out io.Writer, target targets.Target) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			t := targetWithAppPath(target, appPath)
-			return patch.Patch(t, patch.Options{
+			return patch.Patch(ctx, t, patch.Options{
 				DryRun:            dryRun,
 				NoMigrateKeychain: noMigrate,
 				Out:               out,
 			})
 		},
 	}
+	cmd.SetContext(ctx)
 	cmd.Long = fmt.Sprintf("Patch %s by installing the shim and re-signing the bundle.", target.AppPath)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the bundle")
 	cmd.Flags().BoolVar(&noMigrate, "no-migrate-keychain", false, "skip steps 1b and 7a (keychain ACL re-grant)")
@@ -100,7 +241,7 @@ func newPatchCmd(out io.Writer, target targets.Target) *cobra.Command {
 	return cmd
 }
 
-func newUnpatchCmd(out io.Writer, target targets.Target) *cobra.Command {
+func newUnpatchCmd(ctx context.Context, out io.Writer, target targets.Target) *cobra.Command {
 	var dryRun bool
 	var appPath string
 	cmd := &cobra.Command{
@@ -109,16 +250,21 @@ func newUnpatchCmd(out io.Writer, target targets.Target) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			t := targetWithAppPath(target, appPath)
-			return patch.Unpatch(t, patch.Options{DryRun: dryRun, Out: out})
+			return patch.Unpatch(ctx, t, patch.Options{
+				DryRun:            dryRun,
+				NoMigrateKeychain: false,
+				Out:               out,
+			})
 		},
 	}
+	cmd.SetContext(ctx)
 	cmd.Long = fmt.Sprintf("Restore %s from its backup.", target.AppPath)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the bundle")
 	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
 	return cmd
 }
 
-func newUpgradeCmd(out io.Writer, target targets.Target) *cobra.Command {
+func newUpgradeCmd(ctx context.Context, out io.Writer, target targets.Target) *cobra.Command {
 	var channel string
 	var dryRun bool
 	var noMigrate bool
@@ -129,7 +275,7 @@ func newUpgradeCmd(out io.Writer, target targets.Target) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			t := targetWithAppPath(target, appPath)
-			return upgrade.Run(t, upgrade.Options{
+			return upgrade.Run(ctx, t, upgrade.Options{
 				Channel:           channel,
 				DryRun:            dryRun,
 				NoMigrateKeychain: noMigrate,
@@ -137,6 +283,7 @@ func newUpgradeCmd(out io.Writer, target targets.Target) *cobra.Command {
 			})
 		},
 	}
+	cmd.SetContext(ctx)
 	cmd.Long = fmt.Sprintf(
 		"Upgrade %s by fetching the latest upstream manifest, verifying the downloaded bundle against the recorded upstream DesignatedRequirement, swapping it into place, and re-running the patch flow.",
 		target.AppPath,
@@ -148,7 +295,7 @@ func newUpgradeCmd(out io.Writer, target targets.Target) *cobra.Command {
 	return cmd
 }
 
-func newKeychainMigrateCmd(out io.Writer, target targets.Target) *cobra.Command {
+func newKeychainMigrateCmd(ctx context.Context, out io.Writer, target targets.Target) *cobra.Command {
 	var dryRun bool
 	var appPath string
 	cmd := &cobra.Command{
@@ -157,26 +304,32 @@ func newKeychainMigrateCmd(out io.Writer, target targets.Target) *cobra.Command 
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			t := targetWithAppPath(target, appPath)
-			return patch.KeychainMigrate(t, patch.Options{DryRun: dryRun, Out: out})
+			return patch.KeychainMigrate(ctx, t, patch.Options{
+				DryRun:            dryRun,
+				NoMigrateKeychain: false,
+				Out:               out,
+			})
 		},
 	}
+	cmd.SetContext(ctx)
 	cmd.Long = fmt.Sprintf("Re-grant keychain ACLs on the patched %s bundle.", target.AppPath)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without touching keychain items")
 	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
 	return cmd
 }
 
-func newCodexCLICmd(out io.Writer) *cobra.Command {
+func newCodexCLICmd(ctx context.Context, out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "codex-cli",
 		Short: "Build, sign, install, and inspect the local Codex CLI",
 	}
-	cmd.AddCommand(newCodexCLIUpgradeCmd(out))
-	cmd.AddCommand(newCodexCLIStatusCmd(out))
+	cmd.SetContext(ctx)
+	cmd.AddCommand(newCodexCLIUpgradeCmd(ctx, out))
+	cmd.AddCommand(newCodexCLIStatusCmd(ctx, out))
 	return cmd
 }
 
-func newCodexCLIUpgradeCmd(out io.Writer) *cobra.Command {
+func newCodexCLIUpgradeCmd(ctx context.Context, out io.Writer) *cobra.Command {
 	var dryRun bool
 	var sourceDir string
 	var ref string
@@ -190,7 +343,7 @@ func newCodexCLIUpgradeCmd(out io.Writer) *cobra.Command {
 		Aliases: []string{"install"},
 		Short:   "Clone or update Codex source, build the CLI, sign it locally, and install it",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return codexcli.Install(codexcli.InstallOptions{
+			return codexcli.Install(ctx, codexcli.InstallOptions{
 				DryRun:       dryRun,
 				SourceDir:    sourceDir,
 				Ref:          ref,
@@ -203,6 +356,7 @@ func newCodexCLIUpgradeCmd(out io.Writer) *cobra.Command {
 			})
 		},
 	}
+	cmd.SetContext(ctx)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the filesystem")
 	cmd.Flags().StringVar(&sourceDir, "source-dir", "", "Codex source checkout path (default XDG cache)")
 	cmd.Flags().StringVar(&ref, "ref", codexcli.DefaultRef(), "upstream Codex ref to fetch and build")
@@ -214,7 +368,7 @@ func newCodexCLIUpgradeCmd(out io.Writer) *cobra.Command {
 	return cmd
 }
 
-func newCodexCLIStatusCmd(out io.Writer) *cobra.Command {
+func newCodexCLIStatusCmd(ctx context.Context, out io.Writer) *cobra.Command {
 	var sourceDir string
 	var installDir string
 	var codexHome string
@@ -222,7 +376,7 @@ func newCodexCLIStatusCmd(out io.Writer) *cobra.Command {
 		Use:   "status",
 		Short: "Print local Codex CLI source, install, and signing state",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return codexcli.Status(codexcli.StatusOptions{
+			return codexcli.Status(ctx, codexcli.StatusOptions{
 				SourceDir:  sourceDir,
 				InstallDir: installDir,
 				CodexHome:  codexHome,
@@ -230,20 +384,23 @@ func newCodexCLIStatusCmd(out io.Writer) *cobra.Command {
 			})
 		},
 	}
+	cmd.SetContext(ctx)
 	cmd.Flags().StringVar(&sourceDir, "source-dir", "", "Codex source checkout path (default XDG cache)")
 	cmd.Flags().StringVar(&installDir, "install-dir", "", "directory for the visible codex command")
 	cmd.Flags().StringVar(&codexHome, "codex-home", "", "Codex home for standalone package releases")
 	return cmd
 }
 
-func newStatusCmd(out io.Writer) *cobra.Command {
-	return &cobra.Command{
+func newStatusCmd(ctx context.Context, out io.Writer) *cobra.Command {
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Print per-target state (clean/patched/drifted) and bundle metadata",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			log := gklog.LoggerFromContext(ctx)
 			ms, err := state.Load(paths.StateFile())
 			if err != nil {
-				return err
+				log.ErrorContext(ctx, "status.load_state_failed", "err", err)
+				return fmt.Errorf("load state file %s: %w", paths.StateFile(), err)
 			}
 			fmt.Fprintf(out, "state file: %s\n", paths.StateFile())
 			fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", "TARGET", "STATE", "VERSION", "NOTES")
@@ -253,16 +410,20 @@ func newStatusCmd(out io.Writer) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.SetContext(ctx)
+	return cmd
 }
 
-func newTargetStatusCmd(out io.Writer, target targets.Target) *cobra.Command {
-	return &cobra.Command{
+func newTargetStatusCmd(ctx context.Context, out io.Writer, target targets.Target) *cobra.Command {
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Print state for this target",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			log := gklog.LoggerFromContext(ctx)
 			ms, err := state.Load(paths.StateFile())
 			if err != nil {
-				return err
+				log.ErrorContext(ctx, "target_status.load_state_failed", "target", target.ID, "err", err)
+				return fmt.Errorf("load state file %s: %w", paths.StateFile(), err)
 			}
 			fmt.Fprintf(out, "state file: %s\n", paths.StateFile())
 			fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", "TARGET", "STATE", "VERSION", "NOTES")
@@ -270,6 +431,8 @@ func newTargetStatusCmd(out io.Writer, target targets.Target) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.SetContext(ctx)
+	return cmd
 }
 
 func printTargetStatus(out io.Writer, t targets.Target, ms state.MultiState) {
@@ -291,20 +454,15 @@ func printTargetStatus(out io.Writer, t targets.Target, ms state.MultiState) {
 		notes = notes + "; " + t.ExecName + ".real missing"
 	} else if curVer != "" && curVer != entry.PatchedVersion {
 		stateLabel = "drifted"
-		notes = notes + fmt.Sprintf("; current version %s != patched %s", curVer, entry.PatchedVersion)
+		notes += fmt.Sprintf("; current version %s != patched %s", curVer, entry.PatchedVersion)
 	}
 	fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", t.ID, stateLabel, entry.PatchedVersion, notes)
 }
 
 func readBundleVersion(t targets.Target) string {
-	cmd := exec.Command("/usr/bin/defaults", "read", t.AppPath+"/Contents/Info", "CFBundleVersion")
-	out, err := cmd.Output()
+	info, err := patch.ReadInfoPlist(paths.InfoPlistPath(t))
 	if err != nil {
 		return ""
 	}
-	s := string(out)
-	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r' || s[len(s)-1] == ' ') {
-		s = s[:len(s)-1]
-	}
-	return s
+	return info.CFBundleVersion
 }

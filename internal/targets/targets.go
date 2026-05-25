@@ -5,8 +5,6 @@
 // re-signing.
 package targets
 
-import "fmt"
-
 // UpdaterKind identifies the upstream update protocol used by a target.
 type UpdaterKind string
 
@@ -98,6 +96,7 @@ var Registry = []Target{
 		BundleID: "com.todesktop.230313mzl4w4u92",
 		ExecName: "Cursor",
 		Entitlements: &EntitlementsPolicy{
+			Strip: nil,
 			RequiredBooleanEntitlements: []string{
 				"com.apple.security.automation.apple-events",
 				"com.apple.security.cs.disable-library-validation",
@@ -105,10 +104,16 @@ var Registry = []Target{
 		},
 		KeychainServices: []string{"Cursor Safe Storage"},
 		Updater: Updater{
-			Kind:     UpdaterCursorManifest,
-			Platform: "darwin-arm64",
-			Product:  "cursor",
+			Kind:              UpdaterCursorManifest,
+			URL:               "",
+			Platform:          "darwin-arm64",
+			Product:           "cursor",
+			SparklePublicKey:  "",
+			DeviceIDParamName: "",
 		},
+		NestedSignPaths:          nil,
+		PreservedNestedCodePaths: nil,
+		ComputerUse:              nil,
 	},
 	{
 		ID:       "codex",
@@ -169,7 +174,8 @@ var Registry = []Target{
 			},
 			SignTargets: []ComputerUseSignTarget{
 				{
-					Path: "Contents/SharedSupport/Codex Computer Use Installer.app",
+					Path:         "Contents/SharedSupport/Codex Computer Use Installer.app",
+					Entitlements: nil,
 				},
 				{
 					Path: "Contents/SharedSupport/SkyComputerUseClient.app",
@@ -188,6 +194,7 @@ var Registry = []Target{
 						Strip: []string{
 							"com.apple.security.application-groups",
 						},
+						RequiredBooleanEntitlements: nil,
 					},
 				},
 				{
@@ -205,10 +212,14 @@ var Registry = []Target{
 			},
 		},
 		Updater: Updater{
-			Kind:             UpdaterSparkleAppcast,
-			URL:              "https://persistent.oaistatic.com/codex-app-prod/appcast.xml",
-			SparklePublicKey: "rhcBvttuqDFriyNqwTQJR3L4UT1WjIK4QxtwtwusVic=",
+			Kind:              UpdaterSparkleAppcast,
+			URL:               "https://persistent.oaistatic.com/codex-app-prod/appcast.xml",
+			Platform:          "",
+			Product:           "",
+			SparklePublicKey:  "rhcBvttuqDFriyNqwTQJR3L4UT1WjIK4QxtwtwusVic=",
+			DeviceIDParamName: "",
 		},
+		PreservedNestedCodePaths: nil,
 	},
 	{
 		ID:       "claude",
@@ -232,27 +243,12 @@ var Registry = []Target{
 		Updater: Updater{
 			Kind:              UpdaterClaudeSquirrel,
 			URL:               "https://api.anthropic.com/api/desktop/darwin/universal/squirrel/update",
+			Platform:          "",
+			Product:           "",
+			SparklePublicKey:  "",
 			DeviceIDParamName: "device_id",
 		},
+		NestedSignPaths: nil,
+		ComputerUse:     nil,
 	},
-}
-
-// Lookup returns the target with the given ID, or an error if no such target
-// is registered.
-func Lookup(id string) (Target, error) {
-	for _, t := range Registry {
-		if t.ID == id {
-			return t, nil
-		}
-	}
-	return Target{}, fmt.Errorf("unknown target %q (known: cursor, codex, claude)", id)
-}
-
-// IDs returns the slugs of every registered target, in registry order.
-func IDs() []string {
-	ids := make([]string, 0, len(Registry))
-	for _, t := range Registry {
-		ids = append(ids, t.ID)
-	}
-	return ids
 }

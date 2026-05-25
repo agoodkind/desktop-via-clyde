@@ -1,6 +1,7 @@
 package upgrade
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -18,8 +19,10 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
 
-const anthropicRequirement = `identifier "com.anthropic.claudefordesktop" and anchor apple generic and certificate leaf[subject.OU] = Q6L2SF6YDW`
-const goodkindRequirement = `identifier "com.anthropic.claudefordesktop" and anchor apple generic and certificate leaf[subject.OU] = H3BMXM4W7H`
+const (
+	anthropicRequirement = `identifier "com.anthropic.claudefordesktop" and anchor apple generic and certificate leaf[subject.OU] = Q6L2SF6YDW`
+	goodkindRequirement  = `identifier "com.anthropic.claudefordesktop" and anchor apple generic and certificate leaf[subject.OU] = H3BMXM4W7H`
+)
 
 func TestParseCursorManifest(t *testing.T) {
 	body := []byte(`{"url":"https://downloads.cursor.com/production/abc/darwin/arm64/Cursor-darwin-arm64.zip","name":"3.5.30"}`)
@@ -128,7 +131,7 @@ func TestLoadOriginalDRUsesStateEntry(t *testing.T) {
 	if err := state.Save(paths.StateFile(), multiState); err != nil {
 		t.Fatalf("state.Save: %v", err)
 	}
-	got, err := loadOriginalDR(tg, false)
+	got, err := loadOriginalDR(context.Background(), tg, false)
 	if err != nil {
 		t.Fatalf("loadOriginalDR: %v", err)
 	}
@@ -140,14 +143,14 @@ func TestLoadOriginalDRUsesStateEntry(t *testing.T) {
 func TestLoadOriginalDRBootstrapsCleanClaude(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	tg := testClaudeTarget(t)
-	restore := replaceReadDesignatedRequirement(func(path string) (string, error) {
+	restore := replaceReadDesignatedRequirement(func(_ context.Context, path string) (string, error) {
 		if path != paths.MainBinaryPath(tg) {
 			t.Fatalf("readDesignatedRequirement path = %q, want %q", path, paths.MainBinaryPath(tg))
 		}
 		return anthropicRequirement, nil
 	})
 	t.Cleanup(restore)
-	got, err := loadOriginalDR(tg, false)
+	got, err := loadOriginalDR(context.Background(), tg, false)
 	if err != nil {
 		t.Fatalf("loadOriginalDR: %v", err)
 	}
@@ -162,7 +165,7 @@ func TestLoadOriginalDRRejectsMissingStateWithRealBinary(t *testing.T) {
 	if err := os.WriteFile(paths.RealBinaryPath(tg), []byte("patched"), 0o755); err != nil {
 		t.Fatalf("WriteFile real binary: %v", err)
 	}
-	_, err := loadOriginalDR(tg, false)
+	_, err := loadOriginalDR(context.Background(), tg, false)
 	if err == nil {
 		t.Fatal("expected missing state plus real binary error")
 	}
@@ -174,11 +177,11 @@ func TestLoadOriginalDRRejectsMissingStateWithRealBinary(t *testing.T) {
 func TestLoadOriginalDRRejectsLocalRequirementBootstrap(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	tg := testClaudeTarget(t)
-	restore := replaceReadDesignatedRequirement(func(string) (string, error) {
+	restore := replaceReadDesignatedRequirement(func(context.Context, string) (string, error) {
 		return goodkindRequirement, nil
 	})
 	t.Cleanup(restore)
-	_, err := loadOriginalDR(tg, false)
+	_, err := loadOriginalDR(context.Background(), tg, false)
 	if err == nil {
 		t.Fatal("expected local signing requirement error")
 	}
@@ -208,7 +211,7 @@ func TestVerifyDownloadSignature(t *testing.T) {
 	manifest := updateManifest{
 		Signature: base64.StdEncoding.EncodeToString(signature),
 	}
-	ok, err := verifyDownloadSignature(patch.NewRunner(false, io.Discard), tg, manifest, zipPath, false)
+	ok, err := verifyDownloadSignature(patch.NewRunner(context.Background(), false, io.Discard), tg, manifest, zipPath, false)
 	if err != nil {
 		t.Fatalf("verifyDownloadSignature: %v", err)
 	}
@@ -235,7 +238,7 @@ func testClaudeTarget(t *testing.T) targets.Target {
 	return tg
 }
 
-func replaceReadDesignatedRequirement(fn func(string) (string, error)) func() {
+func replaceReadDesignatedRequirement(fn func(context.Context, string) (string, error)) func() {
 	original := readDesignatedRequirement
 	readDesignatedRequirement = fn
 	return func() {
@@ -269,7 +272,7 @@ func TestVerifySparkleSignatureAllowsExtractedBundleKeyRotation(t *testing.T) {
 	manifest := updateManifest{
 		Signature: base64.StdEncoding.EncodeToString(signature),
 	}
-	verified, err := verifyDownloadSignature(patch.NewRunner(false, io.Discard), tg, manifest, zipPath, false)
+	verified, err := verifyDownloadSignature(patch.NewRunner(context.Background(), false, io.Discard), tg, manifest, zipPath, false)
 	if err != nil {
 		t.Fatalf("verifyDownloadSignature: %v", err)
 	}
@@ -295,7 +298,7 @@ func TestVerifySparkleSignatureAllowsExtractedBundleKeyRotation(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(extractedInfoDir, "Info.plist"), []byte(infoPlist), 0o644); err != nil {
 		t.Fatalf("WriteFile Info.plist: %v", err)
 	}
-	if err := verifyExtractedSparkleSignature(patch.NewRunner(false, io.Discard), manifest, zipPath, filepath.Join(tmpDir, "Extracted.app"), verified, false); err != nil {
+	if err := verifyExtractedSparkleSignature(patch.NewRunner(context.Background(), false, io.Discard), manifest, zipPath, filepath.Join(tmpDir, "Extracted.app"), verified, false); err != nil {
 		t.Fatalf("verifyExtractedSparkleSignature: %v", err)
 	}
 }
@@ -319,7 +322,7 @@ func TestExtractZipFindsTargetAppRootInTempDir(t *testing.T) {
 		AppPath:  "/Applications/Fake.app",
 		ExecName: "Fake",
 	}
-	got, err := extractZip(patch.NewRunner(false, io.Discard), zipPath, staging, tg, false)
+	got, err := extractZip(context.Background(), patch.NewRunner(context.Background(), false, io.Discard), zipPath, staging, tg, false)
 	if err != nil {
 		t.Fatalf("extractZip: %v", err)
 	}

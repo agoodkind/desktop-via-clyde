@@ -2,6 +2,7 @@ package patch
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -48,7 +49,7 @@ type KeychainItem struct {
 // stdout) plus a second call without -w to read account from the printed
 // attribute block. If the service has multiple accounts, we capture only
 // the most recently added one — the user is warned via stdout.
-func CaptureItems(t targets.Target) ([]KeychainItem, error) {
+func CaptureItems(ctx context.Context, t targets.Target) ([]KeychainItem, error) {
 	if len(t.KeychainServices) == 0 {
 		return nil, nil
 	}
@@ -56,7 +57,7 @@ func CaptureItems(t targets.Target) ([]KeychainItem, error) {
 	items := make([]KeychainItem, 0, len(t.KeychainServices))
 
 	for _, svc := range t.KeychainServices {
-		attrs, err := runSecurity("find-generic-password", "-s", svc)
+		attrs, err := runSecurity(ctx, "find-generic-password", "-s", svc)
 		if err != nil {
 			// Item does not exist for this service; that is normal for
 			// services the app has not yet populated.
@@ -69,9 +70,9 @@ func CaptureItems(t targets.Target) ([]KeychainItem, error) {
 			account = svc
 		}
 
-		pw, err := runSecurity("find-generic-password", "-s", svc, "-a", account, "-w")
+		pw, err := runSecurity(ctx, "find-generic-password", "-s", svc, "-a", account, "-w")
 		if err != nil {
-			return nil, fmt.Errorf("read password for service=%q account=%q: %w", svc, account, err)
+			return nil, logPatchError(ctx, "patch.keychain_password_read_failed", fmt.Errorf("read password for service=%q account=%q: %w", svc, account, err))
 		}
 		// `-w` prints password followed by newline.
 		value := bytes.TrimRight(pw, "\n")
@@ -89,13 +90,13 @@ func CaptureItems(t targets.Target) ([]KeychainItem, error) {
 // RegrantItems removes each captured item and re-adds it with the patched
 // .app's bundle path on the trusted-applications list (-T) and -A to allow
 // access from that one application without further prompts.
-func RegrantItems(t targets.Target, items []KeychainItem) error {
+func RegrantItems(ctx context.Context, t targets.Target, items []KeychainItem) error {
 	var errs []error
 	for _, item := range items {
 		// `delete-generic-password` removes the item by service+account; if
 		// the keychain has duplicates, it removes the first match. We then
 		// re-add a fresh item with the new ACL.
-		if _, err := runSecurity("delete-generic-password", "-s", item.Service, "-a", item.Account); err != nil {
+		if _, err := runSecurity(ctx, "delete-generic-password", "-s", item.Service, "-a", item.Account); err != nil {
 			// A missing item on delete is acceptable; some captured items
 			// may have been removed between capture and re-grant. Continue.
 			errs = append(errs, fmt.Errorf("delete s=%q a=%q: %w", item.Service, item.Account, err))
@@ -108,23 +109,26 @@ func RegrantItems(t targets.Target, items []KeychainItem) error {
 			"-T", t.AppPath,
 			"-A",
 		}
-		if _, err := runSecurity(args...); err != nil {
+		if _, err := runSecurity(ctx, args...); err != nil {
 			errs = append(errs, fmt.Errorf("add s=%q a=%q: %w", item.Service, item.Account, err))
 		}
 	}
 	if len(errs) > 0 {
-		return errors.Join(errs...)
+		err := errors.Join(errs...)
+		patchLog.ErrorContext(ctx, "patch.keychain_regrant_failed", "err", err)
+		return err
 	}
 	return nil
 }
 
 // runSecurity executes /usr/bin/security and returns combined stdout+stderr.
 // The keychain CLI mixes channels; combining is required to parse attributes.
-func runSecurity(args ...string) ([]byte, error) {
-	cmd := exec.Command("/usr/bin/security", args...)
+func runSecurity(ctx context.Context, args ...string) ([]byte, error) {
+	patchLog.DebugContext(ctx, "patch.security.boundary", "args", args)
+	cmd := exec.CommandContext(ctx, "/usr/bin/security", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("security %s: %w (output: %s)", strings.Join(args, " "), err, string(out))
+		return nil, logPatchError(ctx, "patch.security_failed", fmt.Errorf("security %s: %w (output: %s)", strings.Join(args, " "), err, string(out)))
 	}
 	return out, nil
 }
@@ -132,17 +136,17 @@ func runSecurity(args ...string) ([]byte, error) {
 // parseAccountFromAttrs reads the `"acct"<blob>="..."` line printed by
 // `security find-generic-password`. Returns "" if not found.
 func parseAccountFromAttrs(b []byte) string {
-	for _, line := range strings.Split(string(b), "\n") {
+	for line := range strings.SplitSeq(string(b), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, `"acct"`) {
 			continue
 		}
 		// Format: "acct"<blob>="value"
-		eq := strings.Index(trimmed, "=")
-		if eq < 0 {
+		_, value, ok := strings.Cut(trimmed, "=")
+		if !ok {
 			continue
 		}
-		val := strings.TrimSpace(trimmed[eq+1:])
+		val := strings.TrimSpace(value)
 		val = strings.TrimSuffix(strings.TrimPrefix(val, `"`), `"`)
 		return val
 	}

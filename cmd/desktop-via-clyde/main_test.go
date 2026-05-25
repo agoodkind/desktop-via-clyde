@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 )
@@ -108,7 +109,7 @@ func TestVerbFirstCommandsReturnError(t *testing.T) {
 
 func executeRoot(args ...string) (string, error) {
 	var out bytes.Buffer
-	cmd := newRootCmd(&out)
+	cmd := newRootCmd(context.Background(), &out)
 	cmd.SetArgs(args)
 	err := cmd.Execute()
 	return out.String(), err

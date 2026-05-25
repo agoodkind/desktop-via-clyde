@@ -2,6 +2,8 @@ package patch
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,14 +13,14 @@ import (
 )
 
 func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
-	tg, err := targets.Lookup("codex")
+	tg, err := lookupTarget("codex")
 	if err != nil {
 		t.Fatalf("Lookup(codex): %v", err)
 	}
 	tg.AppPath = filepath.Join(t.TempDir(), "Codex.app")
 
 	var out bytes.Buffer
-	if err := Patch(tg, Options{
+	if err := Patch(context.Background(), tg, Options{
 		DryRun:            true,
 		NoMigrateKeychain: true,
 		Out:               &out,
@@ -51,7 +53,7 @@ func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
 }
 
 func TestCodexNestedSignPathsIncludeTCCActiveResourceExecutables(t *testing.T) {
-	tg, err := targets.Lookup("codex")
+	tg, err := lookupTarget("codex")
 	if err != nil {
 		t.Fatalf("Lookup(codex): %v", err)
 	}
@@ -71,13 +73,13 @@ func TestCodexNestedSignPathsIncludeTCCActiveResourceExecutables(t *testing.T) {
 }
 
 func TestPatchDryRunScansComputerUseCacheHelpers(t *testing.T) {
-	tg, err := targets.Lookup("codex")
+	tg, err := lookupTarget("codex")
 	if err != nil {
 		t.Fatalf("Lookup(codex): %v", err)
 	}
 
 	var out bytes.Buffer
-	if err := Patch(tg, Options{
+	if err := Patch(context.Background(), tg, Options{
 		DryRun:            true,
 		NoMigrateKeychain: true,
 		Out:               &out,
@@ -93,13 +95,13 @@ func TestPatchDryRunScansComputerUseCacheHelpers(t *testing.T) {
 }
 
 func TestClaudePatchRestoresSquirrelInsteadOfResigningIt(t *testing.T) {
-	tg, err := targets.Lookup("claude")
+	tg, err := lookupTarget("claude")
 	if err != nil {
 		t.Fatalf("Lookup(claude): %v", err)
 	}
 
 	var out bytes.Buffer
-	if err := Patch(tg, Options{
+	if err := Patch(context.Background(), tg, Options{
 		DryRun:            true,
 		NoMigrateKeychain: true,
 		Out:               &out,
@@ -124,4 +126,13 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func lookupTarget(id string) (targets.Target, error) {
+	for _, target := range targets.Registry {
+		if target.ID == id {
+			return target, nil
+		}
+	}
+	return targets.Target{}, fmt.Errorf("unknown target %q", id)
 }

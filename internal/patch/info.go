@@ -20,10 +20,10 @@ func ReadInfoPlist(path string) (InfoPlist, error) {
 	var out InfoPlist
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return out, fmt.Errorf("read %s: %w", path, err)
+		return out, logPatchErrorNoContext("patch.info_plist_read_failed", fmt.Errorf("read %s: %w", path, err))
 	}
 	if _, err := plist.Unmarshal(data, &out); err != nil {
-		return out, fmt.Errorf("parse %s: %w", path, err)
+		return out, logPatchErrorNoContext("patch.info_plist_parse_failed", fmt.Errorf("parse %s: %w", path, err))
 	}
 	if out.CFBundleVersion == "" {
 		return out, fmt.Errorf("plist %s missing CFBundleVersion", path)
