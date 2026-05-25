@@ -135,31 +135,6 @@ func TestUninstallRefusesWhenNoRealSibling(t *testing.T) {
 	}
 }
 
-func TestStatusReportsNotWrappedThenWrapped(t *testing.T) {
-	home, bundled := setupFakeBundledCLI(t)
-
-	var out1 bytes.Buffer
-	if err := Status(context.Background(), Options{HomeDir: home, Out: &out1}); err != nil {
-		t.Fatalf("status: %v", err)
-	}
-	if !strings.Contains(out1.String(), "not wrapped") {
-		t.Fatalf("expected 'not wrapped' in status\n%s", out1.String())
-	}
-
-	// Simulate a wrap by adding the .real sibling.
-	if err := os.WriteFile(bundled+".real", []byte("real"), 0o755); err != nil {
-		t.Fatalf("seed .real: %v", err)
-	}
-
-	var out2 bytes.Buffer
-	if err := Status(context.Background(), Options{HomeDir: home, Out: &out2}); err != nil {
-		t.Fatalf("status: %v", err)
-	}
-	if !strings.Contains(out2.String(), "wrapped") {
-		t.Fatalf("expected 'wrapped' in status\n%s", out2.String())
-	}
-}
-
 // setupFakeBundledCLI builds a fake claude-code/<version>/claude.app tree
 // under a temp HOME and returns the home dir plus the bundled CLI path. The
 // fake claude binary is just a few bytes; tests that need a working real

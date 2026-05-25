@@ -8,8 +8,8 @@
 // StdioTeeShim is the stdio-tee shim that replaces a binary spawned over
 // stdio, runs the original as a child, and tees the stdin and stdout streams
 // to log files. It is built by `make stdio-tee-shim` from the Go sources
-// under cmd/dvc-stdio-tee-shim/. The bundled-cli-tee subcommand under the
-// claude target installs this binary against Claude Desktop's bundled CLI.
+// under cmd/dvc-stdio-tee-shim/. The Claude patch flow installs this binary
+// against Claude Desktop's bundled CLI.
 package shimembed
 
 import (

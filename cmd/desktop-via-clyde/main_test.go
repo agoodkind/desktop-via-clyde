@@ -48,6 +48,26 @@ func TestTargetHelpListsOperations(t *testing.T) {
 	}
 }
 
+func TestClaudeHelpDoesNotListBundledCLITeeEntrypoint(t *testing.T) {
+	output, err := executeRoot("claude", "--help")
+	if err != nil {
+		t.Fatalf("executeRoot(claude --help): %v", err)
+	}
+	if strings.Contains(output, "bundled-cli-tee") {
+		t.Fatalf("claude help unexpectedly lists bundled-cli-tee\noutput:\n%s", output)
+	}
+}
+
+func TestClaudeBundledCLITeeEntrypointReturnsError(t *testing.T) {
+	output, err := executeRoot("claude", "bundled-cli-tee")
+	if err == nil {
+		t.Fatalf("executeRoot(claude bundled-cli-tee) unexpectedly succeeded\noutput:\n%s", output)
+	}
+	if !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("executeRoot(claude bundled-cli-tee) error = %q, want unknown command", err.Error())
+	}
+}
+
 func TestOperationHelpCommandsSucceed(t *testing.T) {
 	for _, args := range [][]string{
 		{"codex", "patch", "--help"},

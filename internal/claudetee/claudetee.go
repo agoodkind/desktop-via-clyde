@@ -357,7 +357,7 @@ func printInstallDone(out io.Writer, logDirForDisplay string) {
 	fmt.Fprintln(out, "  2. open the session you want to inspect")
 	fmt.Fprintln(out, "  3. type /context and wait for the result")
 	fmt.Fprintf(out, "  4. read the latest stdio log under %s/\n", logDirForDisplay)
-	fmt.Fprintln(out, "  5. desktop-via-clyde claude bundled-cli-tee uninstall when done")
+	fmt.Fprintln(out, "  5. desktop-via-clyde claude unpatch when done")
 }
 
 // Install wraps the bundled CLI with the tee shim. It is idempotent only
@@ -425,33 +425,6 @@ func Uninstall(ctx context.Context, opts Options) error {
 		return fmt.Errorf("restore original: %w", err)
 	}
 	fmt.Fprintln(out, "done.")
-	return nil
-}
-
-// Status prints which bundled CLI path is targeted, whether the shim is
-// installed, the embedded shim size, and the log directory the shim writes
-// to. It is read-only and safe to run while Desktop is open.
-func Status(ctx context.Context, opts Options) error {
-	_ = ctx
-	out := opts.writer()
-	bundled, err := ResolveBundledCLIPath(opts)
-	if err != nil {
-		return err
-	}
-	realPath := realSiblingPath(bundled)
-	logDir, _ := opts.logDir()
-
-	state := "not wrapped"
-	if _, err := os.Stat(realPath); err == nil {
-		state = "wrapped (sibling .real present)"
-	}
-
-	fmt.Fprintf(out, "bundled cli: %s\n", bundled)
-	fmt.Fprintf(out, "real path:   %s\n", realPath)
-	fmt.Fprintf(out, "state:       %s\n", state)
-	fmt.Fprintf(out, "shim size:   %d bytes (embedded)\n", len(shimembed.StdioTeeShim))
-	fmt.Fprintf(out, "log dir:     %s\n", logDir)
-	fmt.Fprintln(out, "log files per invocation: <stamp>-<pid>.{stdin.jsonl,stdout.jsonl,stderr.log,meta.log}")
 	return nil
 }
 

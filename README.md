@@ -449,6 +449,10 @@ updates state, and verifies the result.
 16. Verify signatures with `codesign --verify --verbose=2` and verify required
     entitlement keys on the effective main executable.
 17. Run `<ExecName> --clyde-dry-run` and print the resulting launch policy.
+18. For Claude only, wrap the bundled `claude-code` CLI with the embedded
+    stdio tee shim unless it is already wrapped. The tee writes SDK control
+    protocol logs under
+    `$HOME/.local/state/desktop-via-clyde/stdio-tee/`.
 
 ## Keychain Access
 
@@ -561,6 +565,8 @@ $HOME/Library/Application Support/desktop-via-clyde/backup/<target>/
 ```
 
 It removes that target from `state.json` and verifies the restored signature.
+For Claude, it also restores the bundled `claude-code` CLI from its `.real`
+sibling before restoring the Electron bundle.
 
 ## Files and State
 
@@ -619,64 +625,16 @@ Remove local build output and the embedded shim:
 make clean
 ```
 
-## Claude Bundled CLI stdio Tee
-
-Claude Desktop spawns a separate bundled `claude` CLI binary over stdio for
-tasks such as the `/context` slash command. That binary lives under Application
-Support, not inside `/Applications/Claude.app`, and the SDK control protocol
-runs over stdin and stdout rather than over HTTPS, so MITM never sees it. The
-`bundled-cli-tee` subcommand wraps that binary with a Go-based stdio-tee shim
-that runs the original as a child and writes every chunk of stdin and stdout
-to time-stamped log files for inspection.
-
-```bash
-desktop-via-clyde claude bundled-cli-tee status
-desktop-via-clyde claude bundled-cli-tee install
-desktop-via-clyde claude bundled-cli-tee install --dry-run
-desktop-via-clyde claude bundled-cli-tee uninstall
-```
-
-The bundled CLI normally lives at:
-
-```text
-$HOME/Library/Application Support/Claude/claude-code/<version>/claude.app/Contents/MacOS/claude
-```
-
-`install` chooses the greatest version by version sort. Pass `--version-dir`
-to target a specific version directory, or `--bundled-cli-path` to override
-the full path. Install stops the running `Claude` app and the bundled CLI
-processes, renames `claude` to `claude.real`, writes the embedded universal
-shim Mach-O over the original path, and ad-hoc codesigns it.
-
-Each shim invocation writes four files under:
-
-```text
-$HOME/.local/state/desktop-via-clyde/stdio-tee/
-```
-
-The files are `<stamp>-<pid>.stdin.jsonl`, `<stamp>-<pid>.stdout.jsonl`,
-`<stamp>-<pid>.stderr.log`, and `<stamp>-<pid>.meta.log`. The
-`DVC_STDIO_TEE_DIR` environment variable overrides the log directory at run
-time. The shim forwards SIGINT, SIGTERM, SIGHUP, SIGUSR1, and SIGUSR2 to the
-child and exits with the child's termination status.
-
-`uninstall` stops the same processes and moves the `.real` sibling back over
-the shim, restoring the original binary in place.
-
-The shim is a separate Go binary at `cmd/dvc-stdio-tee-shim/`, built into a
-universal `arm64+x86_64` Mach-O by `make stdio-tee-shim` and embedded into the
-main `desktop-via-clyde` binary via `internal/embed/dvc-stdio-tee-shim`.
-
 ## Source Layout
 
 | Path | Purpose |
 | --- | --- |
-| `cmd/desktop-via-clyde/` | Cobra CLI commands for target operations, aggregate status, Codex CLI packaging, and Claude bundled-CLI tee. |
+| `cmd/desktop-via-clyde/` | Cobra CLI commands for target operations, aggregate status, and Codex CLI packaging. |
 | `cmd/dvc-stdio-tee-shim/` | Go source for the stdio-tee shim Mach-O. Built into a universal binary by `make stdio-tee-shim` and embedded by the main binary. |
 | `internal/codexcli/` | Codex CLI source checkout, upstream package build, local signing, standalone install, and status logic. |
 | `internal/targets/` | Target registry and updater metadata. |
 | `internal/patch/` | Patch, unpatch, keychain access re-granting, signing, state writing, and verification logic. |
-| `internal/claudetee/` | Install, uninstall, and status logic for the Claude Desktop bundled CLI stdio-tee wrap. |
+| `internal/claudetee/` | Patch and unpatch helper logic for the Claude Desktop bundled CLI stdio-tee wrap. |
 | `internal/signing/` | Shared local Developer ID identity resolution and codesign argument helpers. |
 | `internal/state/` | `state.json` load and save code. |
 | `internal/paths/` | Shared filesystem paths and signing identity. |

@@ -23,7 +23,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"goodkind.io/desktop-via-clyde/internal/claudetee"
 	"goodkind.io/desktop-via-clyde/internal/codexcli"
 	"goodkind.io/desktop-via-clyde/internal/logging"
 	"goodkind.io/desktop-via-clyde/internal/patch"
@@ -103,6 +102,10 @@ func newTargetCmd(ctx context.Context, out io.Writer, target targets.Target) *co
 	cmd := &cobra.Command{
 		Use:   target.ID,
 		Short: "Operate on " + target.AppPath,
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
 	}
 	cmd.SetContext(ctx)
 	cmd.AddCommand(newPatchCmd(ctx, out, target))
@@ -110,109 +113,6 @@ func newTargetCmd(ctx context.Context, out io.Writer, target targets.Target) *co
 	cmd.AddCommand(newUpgradeCmd(ctx, out, target))
 	cmd.AddCommand(newKeychainMigrateCmd(ctx, out, target))
 	cmd.AddCommand(newTargetStatusCmd(ctx, out, target))
-	if target.ID == "claude" {
-		cmd.AddCommand(newClaudeBundledCLITeeCmd(ctx, out))
-	}
-	return cmd
-}
-
-// newClaudeBundledCLITeeCmd registers `desktop-via-clyde claude bundled-cli-tee`
-// and its install, uninstall, and status subcommands. The bundled CLI lives
-// inside Claude Desktop's Application Support tree, separate from the
-// Electron main bundle that the normal `claude patch` flow operates on, so
-// the tee install is a Claude-only operation distinct from `patch`.
-func newClaudeBundledCLITeeCmd(ctx context.Context, out io.Writer) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "bundled-cli-tee",
-		Short: "Install or remove the stdio-tee shim on Claude Desktop's bundled claude CLI",
-		Long: "Wraps the claude binary that Claude Desktop spawns over stdio for tasks " +
-			"such as the /context slash command, capturing the exact SDK control " +
-			"protocol bytes to time-stamped log files for diagnostic inspection.",
-	}
-	cmd.SetContext(ctx)
-	cmd.AddCommand(newClaudeBundledCLITeeInstallCmd(ctx, out))
-	cmd.AddCommand(newClaudeBundledCLITeeUninstallCmd(ctx, out))
-	cmd.AddCommand(newClaudeBundledCLITeeStatusCmd(ctx, out))
-	return cmd
-}
-
-func newClaudeBundledCLITeeInstallCmd(ctx context.Context, out io.Writer) *cobra.Command {
-	var dryRun bool
-	var versionDir string
-	var bundledCLIPath string
-	var logDir string
-	cmd := &cobra.Command{
-		Use:   "install",
-		Short: "Stop Claude Desktop, rename the bundled CLI to .real, write the tee shim",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return claudetee.Install(ctx, claudetee.Options{
-				DryRun:         dryRun,
-				VersionDir:     versionDir,
-				BundledCLIPath: bundledCLIPath,
-				LogDir:         logDir,
-				HomeDir:        "",
-				Out:            out,
-			})
-		},
-	}
-	cmd.SetContext(ctx)
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the filesystem")
-	cmd.Flags().StringVar(&versionDir, "version-dir", "", "specific claude-code/<version> dir to target (default: greatest by version sort)")
-	cmd.Flags().StringVar(&bundledCLIPath, "bundled-cli-path", "", "override the entire bundled CLI path; takes precedence over --version-dir")
-	cmd.Flags().StringVar(&logDir, "log-dir", "", "override the default log directory shown in the next-steps message")
-	return cmd
-}
-
-func newClaudeBundledCLITeeUninstallCmd(ctx context.Context, out io.Writer) *cobra.Command {
-	var dryRun bool
-	var versionDir string
-	var bundledCLIPath string
-	cmd := &cobra.Command{
-		Use:   "uninstall",
-		Short: "Restore the renamed .real binary back over the shim",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return claudetee.Uninstall(ctx, claudetee.Options{
-				DryRun:         dryRun,
-				VersionDir:     versionDir,
-				BundledCLIPath: bundledCLIPath,
-				LogDir:         "",
-				HomeDir:        "",
-				Out:            out,
-			})
-		},
-	}
-	cmd.SetContext(ctx)
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the filesystem")
-	cmd.Flags().StringVar(&versionDir, "version-dir", "", "specific claude-code/<version> dir to target (default: greatest by version sort)")
-	cmd.Flags().StringVar(&bundledCLIPath, "bundled-cli-path", "", "override the entire bundled CLI path; takes precedence over --version-dir")
-	return cmd
-}
-
-func newClaudeBundledCLITeeStatusCmd(ctx context.Context, out io.Writer) *cobra.Command {
-	var versionDir string
-	var bundledCLIPath string
-	var logDir string
-	cmd := &cobra.Command{
-		Use:   "status",
-		Short: "Print the bundled CLI path, install state, embedded shim size, and log directory",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return claudetee.Status(ctx, claudetee.Options{
-				DryRun:         false,
-				VersionDir:     versionDir,
-				BundledCLIPath: bundledCLIPath,
-				LogDir:         logDir,
-				HomeDir:        "",
-				Out:            out,
-			})
-		},
-	}
-	cmd.SetContext(ctx)
-	cmd.Flags().StringVar(&versionDir, "version-dir", "", "specific claude-code/<version> dir to target (default: greatest by version sort)")
-	cmd.Flags().StringVar(&bundledCLIPath, "bundled-cli-path", "", "override the entire bundled CLI path; takes precedence over --version-dir")
-	cmd.Flags().StringVar(&logDir, "log-dir", "", "override the displayed log directory")
 	return cmd
 }
 
