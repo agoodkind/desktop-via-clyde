@@ -53,10 +53,39 @@ func TestOperationHelpCommandsSucceed(t *testing.T) {
 		{"codex", "upgrade", "--help"},
 		{"codex", "keychain-migrate", "--help"},
 		{"codex", "status", "--help"},
+		{"codex-cli", "upgrade", "--help"},
+		{"codex-cli", "install", "--help"},
+		{"codex-cli", "status", "--help"},
 	} {
 		if _, err := executeRoot(args...); err != nil {
 			t.Fatalf("executeRoot(%v): %v", args, err)
 		}
+	}
+}
+
+func TestCodexCLIHelpListsUpgradeWithInstallAlias(t *testing.T) {
+	output, err := executeRoot("codex-cli", "--help")
+	if err != nil {
+		t.Fatalf("executeRoot(codex-cli --help): %v", err)
+	}
+	if !strings.Contains(output, "upgrade") {
+		t.Fatalf("codex-cli help missing upgrade verb\noutput:\n%s", output)
+	}
+	if !strings.Contains(output, "status") {
+		t.Fatalf("codex-cli help missing status verb\noutput:\n%s", output)
+	}
+}
+
+func TestCodexCLIUpgradeHelpAdvertisesLocalFastDefault(t *testing.T) {
+	output, err := executeRoot("codex-cli", "upgrade", "--help")
+	if err != nil {
+		t.Fatalf("executeRoot(codex-cli upgrade --help): %v", err)
+	}
+	if !strings.Contains(output, "--build-mode") {
+		t.Fatalf("codex-cli upgrade help missing --build-mode flag\noutput:\n%s", output)
+	}
+	if !strings.Contains(output, "local-fast") {
+		t.Fatalf("codex-cli upgrade help should advertise local-fast as default\noutput:\n%s", output)
 	}
 }
 

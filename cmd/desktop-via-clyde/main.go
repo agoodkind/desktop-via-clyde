@@ -1,11 +1,14 @@
 // Command desktop-via-clyde patches macOS Electron apps (Cursor, Codex, Claude)
 // to route every launch through the clyde MITM proxy on [::1]:48723.
 //
+// Every program is invoked with the shape `desktop-via-clyde <program> <operation>`:
+//
 //	desktop-via-clyde cursor patch             install shim and re-sign Cursor
 //	desktop-via-clyde codex upgrade            fetch the latest Codex build and re-patch
 //	desktop-via-clyde claude unpatch           restore Claude from its backup
 //	desktop-via-clyde status                   per-target state summary
-//	desktop-via-clyde codex-cli install        build and install locally signed Codex CLI
+//	desktop-via-clyde codex-cli upgrade        build and install locally signed Codex CLI
+//	desktop-via-clyde codex-cli install        alias for `codex-cli upgrade`
 //
 // App operation subcommands support --dry-run. patch and keychain-migrate
 // support --no-migrate-keychain.
@@ -168,12 +171,12 @@ func newCodexCLICmd(out io.Writer) *cobra.Command {
 		Use:   "codex-cli",
 		Short: "Build, sign, install, and inspect the local Codex CLI",
 	}
-	cmd.AddCommand(newCodexCLIInstallCmd(out))
+	cmd.AddCommand(newCodexCLIUpgradeCmd(out))
 	cmd.AddCommand(newCodexCLIStatusCmd(out))
 	return cmd
 }
 
-func newCodexCLIInstallCmd(out io.Writer) *cobra.Command {
+func newCodexCLIUpgradeCmd(out io.Writer) *cobra.Command {
 	var dryRun bool
 	var sourceDir string
 	var ref string
@@ -183,8 +186,9 @@ func newCodexCLIInstallCmd(out io.Writer) *cobra.Command {
 	var noSccache bool
 	var forceRebuild bool
 	cmd := &cobra.Command{
-		Use:   "install",
-		Short: "Clone or update Codex source, build the CLI, sign it locally, and install it",
+		Use:     "upgrade",
+		Aliases: []string{"install"},
+		Short:   "Clone or update Codex source, build the CLI, sign it locally, and install it",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return codexcli.Install(codexcli.InstallOptions{
 				DryRun:       dryRun,
@@ -204,7 +208,7 @@ func newCodexCLIInstallCmd(out io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&ref, "ref", codexcli.DefaultRef(), "upstream Codex ref to fetch and build")
 	cmd.Flags().StringVar(&installDir, "install-dir", "", "directory for the visible codex command")
 	cmd.Flags().StringVar(&codexHome, "codex-home", "", "Codex home for standalone package releases")
-	cmd.Flags().StringVar(&buildMode, "build-mode", codexcli.DefaultBuildMode(), "entrypoint build mode (release or local-fast)")
+	cmd.Flags().StringVar(&buildMode, "build-mode", codexcli.DefaultBuildMode(), "entrypoint build mode (local-fast or release)")
 	cmd.Flags().BoolVar(&noSccache, "no-sccache", false, "disable automatic sccache wrapper detection for the Cargo build")
 	cmd.Flags().BoolVar(&forceRebuild, "force-rebuild", false, "skip same-head installed release reuse and rebuild the entrypoint")
 	return cmd

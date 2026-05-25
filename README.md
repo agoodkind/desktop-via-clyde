@@ -253,11 +253,22 @@ multiple certificates with the same common name.
 
 ## Codex CLI
 
+Every program uses the same shape:
+
+```text
+desktop-via-clyde <program> <operation>
+```
+
+For example, `desktop-via-clyde codex-cli upgrade`, `desktop-via-clyde codex patch`,
+and `desktop-via-clyde cursor upgrade`.
+
 Build and install a locally signed Codex CLI from upstream source:
 
 ```bash
-desktop-via-clyde codex-cli install
+desktop-via-clyde codex-cli upgrade
 ```
+
+`desktop-via-clyde codex-cli install` is preserved as an alias for `upgrade`.
 
 The command clones `openai/codex` with this command when the managed cache is
 missing:
