@@ -45,6 +45,10 @@ func caCertificatePath() -> String {
     return "\(stateBase)/clyde/mitm/ca/clyde-mitm-ca.crt"
 }
 
+func launchWorkingDirectory() -> String {
+    homeDir()
+}
+
 // resolveSelfPath returns the absolute, symlink-resolved path of the running
 // shim binary. _NSGetExecutablePath may return a relative or symlinked path.
 func resolveSelfPath() -> String? {
@@ -228,6 +232,7 @@ func main() {
         print("argv0: \(argv0)")
         print("target-policy: \(policy.rawValue)")
         print("electron-run-as-node: \(electronRunAsNode)")
+        print("launch-cwd: \(launchWorkingDirectory())")
         print("argv: \(newArgv)")
         for action in envActions(policy: policy, ca: caCertificatePath()) {
             if let value = action.value {
@@ -241,6 +246,17 @@ func main() {
 
     runPreflight()
     setEnvVars(policy: policy)
+    let launchCwd = launchWorkingDirectory()
+    if launchCwd.isEmpty {
+        showAlertAndExit("Could not resolve launch working directory", 15)
+    }
+    let chdirResult = launchCwd.withCString { pathPtr in
+        chdir(pathPtr)
+    }
+    if chdirResult != 0 {
+        let err = String(cString: strerror(errno))
+        showAlertAndExit("Could not change working directory to \(launchCwd): \(err)", 16)
+    }
 
     let injected = proxyArguments(electronRunAsNode: electronRunAsNode)
     let newArgv = [argv0] + injected + forwarded

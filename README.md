@@ -47,6 +47,7 @@ Finder, Dock, launchd, or open(1)
        This is the desktop-via-clyde Swift shim.
        It checks the Clyde CA file and proxy socket.
        It sets proxy arguments and target-specific environment variables.
+       It normalizes the launch cwd to HOME.
        It execv(2)s the vendor binary.
   -> /Applications/<App>.app/Contents/MacOS/<ExecName>.real
        This is the original app executable.
@@ -58,6 +59,10 @@ The shim is intentionally self-locating. It resolves its own path with
 `_NSGetExecutablePath`, appends `.real` to find the vendor binary, and then
 execs that sibling binary. This keeps the same shim binary usable for Cursor,
 Codex, Claude, copied app bundles, and isolated smoke tests.
+
+The cwd normalization is deliberate. Patched app launches should not inherit an
+arbitrary shell cwd such as a repo root, because downstream tools can persist
+that cwd into session metadata.
 
 ## Shim Behavior
 
