@@ -90,8 +90,10 @@ func DefaultRef() string {
 }
 
 // DefaultBuildMode returns the default build mode for Codex CLI installs.
+// local-fast is the default because the resulting binary is the everyday local
+// Codex; pass `--build-mode release` to match the upstream release profile.
 func DefaultBuildMode() string {
-	return string(BuildModeRelease)
+	return string(BuildModeLocalFast)
 }
 
 // Install clones or updates Codex, builds an upstream package layout, signs the

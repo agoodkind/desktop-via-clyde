@@ -22,8 +22,9 @@ func TestInstallDryRunUsesShallowGhCloneAndOriginMain(t *testing.T) {
 
 	var out bytes.Buffer
 	err := Install(InstallOptions{
-		DryRun: true,
-		Out:    &out,
+		DryRun:    true,
+		BuildMode: string(BuildModeRelease),
+		Out:       &out,
 	})
 	if err != nil {
 		t.Fatalf("Install dry-run: %v", err)
@@ -52,6 +53,35 @@ func TestInstallDryRunUsesShallowGhCloneAndOriginMain(t *testing.T) {
 	assertContains(t, log, "codex-cli: would stage package at")
 	assertContains(t, log, "codex-cli step 7/7: verify installed command")
 	assertContains(t, log, "codex-cli: verifying executable by running")
+}
+
+func TestDefaultBuildModeIsLocalFast(t *testing.T) {
+	if got := DefaultBuildMode(); got != string(BuildModeLocalFast) {
+		t.Fatalf("DefaultBuildMode = %q, want %q", got, string(BuildModeLocalFast))
+	}
+}
+
+func TestInstallDryRunDefaultsToLocalFastWhenBuildModeUnset(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("codex-cli install is macOS-only")
+	}
+	home := t.TempDir()
+	cacheHome := filepath.Join(home, ".cache")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+
+	var out bytes.Buffer
+	err := Install(InstallOptions{
+		DryRun: true,
+		Out:    &out,
+	})
+	if err != nil {
+		t.Fatalf("Install dry-run with default build mode: %v", err)
+	}
+	log := out.String()
+	assertContains(t, log, "build-mode=local-fast")
+	assertContains(t, log, "codex-cli: local-fast mode overrides release settings with lto=false and codegen-units=")
+	assertContains(t, log, "--config profile.release.lto=false")
 }
 
 func TestInstallDryRunLocalFastAddsCargoOverrides(t *testing.T) {

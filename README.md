@@ -303,10 +303,14 @@ When the same verified release for the current upstream HEAD and target is
 already installed, the installer reuses that release and refreshes the visible
 symlinks instead of rebuilding. Pass `--force-rebuild` to bypass that reuse.
 
-Pass `--build-mode local-fast` to keep the same package and signing flow while
-relaxing the entrypoint build to `lto=false` and a per-CPU `codegen-units`
-override. `local-fast` installs use a distinct release suffix so they do not
-overwrite or masquerade as exact release builds for the same HEAD.
+`--build-mode local-fast` is the default, because the produced binary is the
+everyday local Codex CLI. Local-fast keeps the same package and signing flow
+while relaxing the entrypoint build to `lto=false` and a per-CPU
+`codegen-units` override. Local-fast installs use a distinct release suffix so
+they do not overwrite or masquerade as exact release builds for the same HEAD.
+
+Pass `--build-mode release` to match the upstream release profile exactly; this
+opts back in to the slower link-time-optimized build.
 
 The installer prints each major phase and streams subprocess output from clone,
 fetch, Cargo build, package build, signing, install, and verification commands.
@@ -326,13 +330,14 @@ $HOME/.local/bin/codex
 Print the planned work without changing files:
 
 ```bash
-desktop-via-clyde codex-cli install --dry-run
+desktop-via-clyde codex-cli upgrade --dry-run
 ```
 
-Build a faster local-only variant instead of the exact upstream release profile:
+Match the exact upstream release profile instead of the default local-fast
+build:
 
 ```bash
-desktop-via-clyde codex-cli install --build-mode local-fast
+desktop-via-clyde codex-cli upgrade --build-mode release
 ```
 
 Inspect the local Codex CLI source, symlinks, signing, and PATH state:
