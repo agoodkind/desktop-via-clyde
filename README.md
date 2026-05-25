@@ -1,5 +1,20 @@
 # desktop-via-clyde
 
+> **Research and educational use only.** This tool modifies third-party macOS
+> application bundles (Cursor, Codex, Claude) in place: it moves the vendor
+> executable aside, installs a local Swift shim, strips upstream entitlements
+> that no longer apply after re-signing, and re-signs the bundle with a local
+> Apple Developer ID. It is intended for personal transparency research into
+> network behavior over a MITM proxy that the user themselves controls. It is
+> not affiliated with, endorsed by, or supported by Anysphere (Cursor),
+> OpenAI (Codex), or Anthropic (Claude). Running it may violate the terms of
+> service of those applications and almost certainly voids any vendor support.
+> The software is provided **AS IS** under the MIT License with **no
+> warranty**; see [LICENSE](LICENSE). The author accepts no liability for any
+> damage, lost data, broken installs, account actions, or other consequences
+> of running it. Use it on machines and accounts you control, with backups,
+> and only if you understand and accept the risk.
+
 `desktop-via-clyde` patches installed macOS Electron apps so their normal launches
 route through the local Clyde MITM proxy at `http://[::1]:48723`.
 
