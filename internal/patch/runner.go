@@ -135,28 +135,56 @@ func (r *Runner) RunWithHeartbeat(ctx context.Context, label string, interval ti
 	}
 }
 
-// RunEnvWithHeartbeat executes a command with environment overrides and logs
+// RunInDirWithHeartbeat executes a command from a working directory and logs
 // periodic progress while it is still running.
-func (r *Runner) RunEnvWithHeartbeat(
+func (r *Runner) RunInDirWithHeartbeat(
+	ctx context.Context,
+	label string,
+	interval time.Duration,
+	workDir string,
+	name string,
+	args ...string,
+) error {
+	return r.runEnvInDirWithHeartbeat(ctx, label, interval, nil, workDir, name, args...)
+}
+
+// RunEnvInDirWithHeartbeat executes a command with environment overrides from
+// a working directory and logs periodic progress while it is still running.
+func (r *Runner) RunEnvInDirWithHeartbeat(
 	ctx context.Context,
 	label string,
 	interval time.Duration,
 	env map[string]string,
+	workDir string,
+	name string,
+	args ...string,
+) error {
+	return r.runEnvInDirWithHeartbeat(ctx, label, interval, env, workDir, name, args...)
+}
+
+func (r *Runner) runEnvInDirWithHeartbeat(
+	ctx context.Context,
+	label string,
+	interval time.Duration,
+	env map[string]string,
+	workDir string,
 	name string,
 	args ...string,
 ) error {
 	ctx = coalesceContext(ctx, r.context())
-	r.logCommand(env, name, args...)
+	r.logCommandInDir(env, workDir, name, args...)
 	r.logInfo(ctx, "runner.command.start",
 		slog.String("label", label),
 		slog.String("command", name),
 		slog.Any("args", args),
 		slog.Any("env", env),
+		slog.String("work_dir", workDir),
 		slog.Bool("dry_run", r.DryRun))
 	if r.DryRun {
 		return nil
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = workDir
 	cmd.Env = mergedEnv(env)
 	cmd.Stdout = r.Out
 	cmd.Stderr = r.Out
@@ -196,6 +224,7 @@ func (r *Runner) RunEnvWithHeartbeat(
 			r.logInfo(ctx, "runner.command.succeeded",
 				slog.String("label", label),
 				slog.String("command", name),
+				slog.String("work_dir", workDir),
 				slog.Any("args", args))
 			return nil
 		case <-ticker.C:
@@ -248,6 +277,13 @@ func (r *Runner) prefix() string {
 }
 
 func (r *Runner) logCommand(env map[string]string, name string, args ...string) {
+	r.logCommandInDir(env, "", name, args...)
+}
+
+func (r *Runner) logCommandInDir(env map[string]string, workDir string, name string, args ...string) {
+	if workDir != "" {
+		fmt.Fprintf(r.Out, "%s cd %s\n", r.prefix(), workDir)
+	}
 	if len(env) > 0 {
 		keys := make([]string, 0, len(env))
 		for key := range env {

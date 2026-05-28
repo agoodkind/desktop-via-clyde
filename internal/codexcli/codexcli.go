@@ -386,25 +386,30 @@ func buildEntrypoint(
 	noSccache bool,
 ) (string, error) {
 	log := codexcliLog.With("function", "buildEntrypoint")
-	manifestPath := filepath.Join(sourceDir, "codex-rs", "Cargo.toml")
-	entrypointPath := filepath.Join(sourceDir, "codex-rs", "target", target, "release", "codex")
+	codexRoot := filepath.Join(sourceDir, "codex-rs")
+	entrypointPath := filepath.Join(codexRoot, "target", target, "release", "codex")
 	notef(r, "codex-cli: build entrypoint at "+entrypointPath)
 	if r.DryRun {
-		notef(r, "codex-cli: Cargo build will resolve upstream Rusty V8 artifact overrides when needed")
+		notef(r, "codex-cli: Cargo build will run from "+codexRoot+" so rustup honors upstream rust-toolchain.toml")
 	} else {
 		notef(r, "codex-cli: resolving upstream Rusty V8 artifact overrides")
 	}
 	describeBuildMode(r, buildMode)
+	if err := ensureRustToolchain(ctx, r, codexRoot); err != nil {
+		log.ErrorContext(ctx, "codexcli.build_entrypoint.rust_toolchain_failed", "err", err)
+		return "", err
+	}
 	cargoEnv, sccachePath, sccacheUsed, err := cargoBuildEnv(ctx, r, sourceDir, target, noSccache)
 	if err != nil {
 		log.ErrorContext(ctx, "codexcli.build_entrypoint.env_failed", "err", err)
 		return "", err
 	}
-	cargoArgs := cargoBuildArgs(manifestPath, target, buildMode)
-	if err := r.RunEnvWithHeartbeat(ctx,
+	cargoArgs := cargoBuildArgs(target, buildMode)
+	if err := r.RunEnvInDirWithHeartbeat(ctx,
 		"codex-cli: building Codex entrypoint",
 		30*time.Second,
 		cargoEnv,
+		codexRoot,
 		"cargo",
 		cargoArgs...,
 	); err != nil {
@@ -455,6 +460,34 @@ func signBinary(ctx context.Context, r *patch.Runner, sourceDir string, binaryPa
 	if err := r.Run(ctx, "/usr/bin/codesign", signing.RuntimeTimestampEntitlementsArgs(id, entitlementsPath, binaryPath)...); err != nil {
 		log.ErrorContext(ctx, "codexcli.sign_binary.codesign_failed", "err", err)
 		return fmt.Errorf("sign Codex CLI: %w", err)
+	}
+	return nil
+}
+
+func ensureRustToolchain(
+	ctx context.Context,
+	r *patch.Runner,
+	codexRoot string,
+) error {
+	log := codexcliLog.With("function", "ensureRustToolchain")
+	if !r.DryRun {
+		if _, err := exec.LookPath("rustup"); err != nil {
+			log.ErrorContext(ctx, "codexcli.ensure_rust_toolchain.rustup_missing", "err", err)
+			return fmt.Errorf("find rustup for upstream Rust toolchain: %w", err)
+		}
+	}
+	notef(r, "codex-cli: installing or updating upstream Rust toolchain from "+filepath.Join(codexRoot, "rust-toolchain.toml"))
+	if err := r.RunInDirWithHeartbeat(
+		ctx,
+		"codex-cli: installing upstream Rust toolchain",
+		30*time.Second,
+		codexRoot,
+		"rustup",
+		"toolchain",
+		"install",
+	); err != nil {
+		log.ErrorContext(ctx, "codexcli.ensure_rust_toolchain.install_failed", "err", err)
+		return fmt.Errorf("install upstream Rust toolchain: %w", err)
 	}
 	return nil
 }
@@ -744,11 +777,9 @@ func describeBuildMode(r *patch.Runner, buildMode BuildMode) {
 	notef(r, "codex-cli: release mode preserves the upstream release profile exactly")
 }
 
-func cargoBuildArgs(manifestPath string, target string, buildMode BuildMode) []string {
+func cargoBuildArgs(target string, buildMode BuildMode) []string {
 	args := []string{
 		"build",
-		"--manifest-path",
-		manifestPath,
 		"--target",
 		target,
 		"--release",

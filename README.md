@@ -321,9 +321,10 @@ ${XDG_CACHE_HOME:-$HOME/.cache}/desktop-via-clyde/codex/source
 ```
 
 The build first resolves the upstream Rusty V8 artifact overrides, then runs
-`cargo build --release --timings --bin codex` against the upstream workspace
-for the host Darwin target. The installer signs that built `codex` binary with
-the upstream Codex CLI entitlement file at
+`rustup toolchain install` and `cargo build --release --timings --bin codex`
+from the upstream `codex-rs` directory so rustup honors upstream
+`codex-rs/rust-toolchain.toml`. The installer signs that built `codex` binary
+with the upstream Codex CLI entitlement file at
 `.github/actions/macos-code-sign/codex.entitlements.plist` and the local
 Developer ID identity from `internal/paths/paths.go`, then calls upstream
 `scripts/build_codex_package.py` with `--entrypoint-bin` so the package staging
