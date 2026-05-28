@@ -19,6 +19,7 @@ DIST_DIR   := bin
 
 INSTALL_DIR          := $(HOME)/.local/bin
 CODESIGN_IDENTITY    := -
+GO_BUILD_TAGS        := gklog_stamped
 GO_BUILD_EXTRA_FLAGS := -trimpath
 
 # Pipeline modules.

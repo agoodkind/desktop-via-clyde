@@ -19,8 +19,8 @@ github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD
 go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
 golang.org/x/sys v0.42.0 h1:omrd2nAlyT5ESRdCLYdm3+fMfNFE/+Rf4bDIQImRJeo=
 golang.org/x/sys v0.42.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
-goodkind.io/gklog v0.3.0 h1:CjcXflKrxYmMMhfVPnjdJ1EZBVOdzqvl770mQRbbnww=
-goodkind.io/gklog v0.3.0/go.mod h1:RxCsj/TfxtPcU24NnUWTXOTvruRIYRIOUujnlMjoIHo=
+goodkind.io/gklog v0.4.0 h1:R7vtD1Hog6NEOol14UBzOR7JQCZfhRSoxvbpirxNh68=
+goodkind.io/gklog v0.4.0/go.mod h1:oKFcZWL0Fhk3BE1hlb4JQ25QBpoXlPBvv37ufW6XG6M=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/natefinch/lumberjack.v2 v2.2.1 h1:bBRl1b0OH9s/DuPhuXpNl+VtCaJXFZ5/uEFST95x9zc=
 gopkg.in/natefinch/lumberjack.v2 v2.2.1/go.mod h1:YD8tP3GAjkrDg1eZH7EGmyESg/lsYskCTPBJVb9jqSc=

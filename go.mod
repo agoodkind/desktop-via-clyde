@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sys v0.42.0
-	goodkind.io/gklog v0.3.0
+	goodkind.io/gklog v0.4.0
 	howett.net/plist v1.0.1
 )
 
