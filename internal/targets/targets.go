@@ -51,6 +51,8 @@ type ComputerUsePolicy struct {
 	BundledAppPath        string
 	AppPathFromHome       string
 	CacheAppGlobsFromHome []string
+	AuthPluginPath        string
+	AuthPluginExecutable  string
 	UpstreamTrustedTeamID string
 	TeamPatchBinaries     []string
 	TeamRequirementPlists []string
@@ -163,6 +165,8 @@ var Registry = []Target{
 			BundledAppPath:        "Contents/Resources/plugins/openai-bundled/plugins/computer-use/Codex Computer Use.app",
 			AppPathFromHome:       ".codex/computer-use/Codex Computer Use.app",
 			CacheAppGlobsFromHome: []string{".codex/plugins/cache/openai-bundled/computer-use/*/Codex Computer Use.app"},
+			AuthPluginPath:        "/Library/Security/SecurityAgentPlugins/CodexComputerUseAuthorizationPlugin.bundle",
+			AuthPluginExecutable:  "Contents/MacOS/CodexComputerUseAuthorizationPlugin",
 			UpstreamTrustedTeamID: "2DC432GLL2",
 			TeamPatchBinaries: []string{
 				"Contents/MacOS/SkyComputerUseService",

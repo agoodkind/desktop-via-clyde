@@ -197,6 +197,12 @@ func TestComputerUsePolicyPerTarget(t *testing.T) {
 		if !stringSlicesEqual(policy.CacheAppGlobsFromHome, wantCacheGlobs) {
 			t.Errorf("Codex Computer Use cache globs mismatch: got %v want %v", policy.CacheAppGlobsFromHome, wantCacheGlobs)
 		}
+		if policy.AuthPluginPath != "/Library/Security/SecurityAgentPlugins/CodexComputerUseAuthorizationPlugin.bundle" {
+			t.Errorf("Codex Computer Use authorization plugin path mismatch: got %q", policy.AuthPluginPath)
+		}
+		if policy.AuthPluginExecutable != "Contents/MacOS/CodexComputerUseAuthorizationPlugin" {
+			t.Errorf("Codex Computer Use authorization plugin executable mismatch: got %q", policy.AuthPluginExecutable)
+		}
 		if policy.UpstreamTrustedTeamID != "2DC432GLL2" {
 			t.Errorf("Codex Computer Use upstream team mismatch: got %q", policy.UpstreamTrustedTeamID)
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,6 +92,37 @@ func TestPatchDryRunScansComputerUseCacheHelpers(t *testing.T) {
 	want := "target=codex step 7c: scan Codex Computer Use cache helpers at " + pattern
 	if !strings.Contains(out.String(), want) {
 		t.Fatalf("Patch dry-run log missing %q\nlog:\n%s", want, out.String())
+	}
+}
+
+func TestPatchDryRunRepairsComputerUseAuthPlugin(t *testing.T) {
+	tg, err := lookupTarget("codex")
+	if err != nil {
+		t.Fatalf("Lookup(codex): %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := Patch(context.Background(), tg, Options{
+		DryRun:            true,
+		NoMigrateKeychain: true,
+		Out:               &out,
+	}); err != nil {
+		t.Fatalf("Patch dry-run: %v", err)
+	}
+
+	log := out.String()
+	pluginPath := tg.ComputerUse.AuthPluginPath
+	stagingPath := filepath.Join(os.TempDir(), "desktop-via-clyde-auth-plugin", filepath.Base(pluginPath))
+	executablePath := filepath.Join(pluginPath, filepath.FromSlash(tg.ComputerUse.AuthPluginExecutable))
+	required := []string{
+		"target=codex step 7d: repair Codex Computer Use authorization plugin at " + pluginPath,
+		"computer-use: repair login authorization trusted service team in " + executablePath,
+		"[dry-run] /usr/bin/sudo /usr/bin/rsync -rltp --delete " + stagingPath + "/ " + pluginPath + "/",
+	}
+	for _, want := range required {
+		if !strings.Contains(log, want) {
+			t.Fatalf("Patch dry-run log missing %q\nlog:\n%s", want, log)
+		}
 	}
 }
 

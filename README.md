@@ -170,14 +170,26 @@ The Codex plugin cache stores update candidates matching:
 $HOME/.codex/plugins/cache/openai-bundled/computer-use/*/Codex Computer Use.app
 ```
 
+The Codex lock-screen login authorization plugin is installed under:
+
+```text
+/Library/Security/SecurityAgentPlugins/CodexComputerUseAuthorizationPlugin.bundle
+```
+
 `desktop-via-clyde codex patch` repairs the bundled helper, the active helper,
-and every cached helper matching the plugin-cache path. This keeps Codex startup,
-Codex plugin updates, and Codex app updates on the same signing and entitlement
+every cached helper matching the plugin-cache path, and the root-owned
+authorization plugin. This keeps Codex startup, Codex plugin updates, Codex app
+updates, and lock-screen login authorization on the same signing and entitlement
 policy.
 
 The helper binary `Contents/MacOS/SkyComputerUseService` must trust the local
 Developer ID team identifier `H3BMXM4W7H`, because the patched Codex app is
 signed by `Developer ID Application: Alex Goodkind (H3BMXM4W7H)`.
+
+The authorization plugin executable
+`Contents/MacOS/CodexComputerUseAuthorizationPlugin` must trust the same local
+Developer ID team identifier, because SecurityAgent loads it from `/Library`
+and it verifies the helper service before accepting lock-screen login requests.
 
 The helper requirement files
 `Contents/SharedSupport/SkyComputerUseClient.app/Contents/Resources/SkyComputerUseClient_Parent.coderequirement`

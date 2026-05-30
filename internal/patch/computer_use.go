@@ -21,6 +21,12 @@ type teamRequirementPlist struct {
 	TeamIdentifier string `plist:"team-identifier"`
 }
 
+type computerUseAuthPluginRepair struct {
+	Updated      []byte
+	Permissions  os.FileMode
+	Replacements int
+}
+
 func stepPatchBundledComputerUse(ctx context.Context, r *Runner, t targets.Target) error {
 	if t.ComputerUse == nil {
 		return nil
@@ -59,20 +65,29 @@ func stepPatchComputerUse(ctx context.Context, r *Runner, t targets.Target) erro
 		if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID, true); err != nil {
 			return err
 		}
-		return stepPatchComputerUseCache(ctx, r, t, policy, localTeamID)
+		if err := stepPatchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
+			return err
+		}
+		return stepPatchComputerUseAuthPlugin(ctx, r, t, policy, localTeamID)
 	}
 
 	if err := ensureComputerUseAppPath(appPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			notef(r, fmt.Sprintf("target=%s step 7b: helper bundle not found, skipping", t.ID))
-			return stepPatchComputerUseCache(ctx, r, t, policy, localTeamID)
+			if err := stepPatchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
+				return err
+			}
+			return stepPatchComputerUseAuthPlugin(ctx, r, t, policy, localTeamID)
 		}
 		return err
 	}
 	if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID, true); err != nil {
 		return err
 	}
-	return stepPatchComputerUseCache(ctx, r, t, policy, localTeamID)
+	if err := stepPatchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
+		return err
+	}
+	return stepPatchComputerUseAuthPlugin(ctx, r, t, policy, localTeamID)
 }
 
 func validateComputerUsePolicy(policy targets.ComputerUsePolicy) (string, error) {
@@ -81,6 +96,12 @@ func validateComputerUsePolicy(policy targets.ComputerUsePolicy) (string, error)
 	}
 	if policy.AppPathFromHome == "" {
 		return "", fmt.Errorf("codex computer use policy missing installed app path")
+	}
+	if policy.AuthPluginPath == "" {
+		return "", fmt.Errorf("codex computer use policy missing authorization plugin path")
+	}
+	if policy.AuthPluginExecutable == "" {
+		return "", fmt.Errorf("codex computer use policy missing authorization plugin executable")
 	}
 	localTeamID, err := teamIDFromSignIdentity(paths.SignIdentity)
 	if err != nil {
@@ -135,6 +156,210 @@ func stepPatchComputerUseCache(
 	return nil
 }
 
+func stepPatchComputerUseAuthPlugin(
+	ctx context.Context,
+	r *Runner,
+	t targets.Target,
+	policy targets.ComputerUsePolicy,
+	localTeamID string,
+) error {
+	pluginPath := policy.AuthPluginPath
+	executablePath := filepath.Join(pluginPath, filepath.FromSlash(policy.AuthPluginExecutable))
+	r.Log.InfoContext(ctx, "patch.computer_use_auth_plugin.start",
+		"target", t.ID,
+		"plugin_path", pluginPath,
+		"executable_path", executablePath,
+		"dry_run", r.DryRun)
+	notef(r, fmt.Sprintf("target=%s step 7d: repair Codex Computer Use authorization plugin at %s", t.ID, pluginPath))
+
+	if r.DryRun {
+		return dryRunPatchComputerUseAuthPlugin(ctx, r, t, pluginPath, executablePath, policy, localTeamID)
+	}
+
+	return patchComputerUseAuthPlugin(ctx, r, t, pluginPath, executablePath, policy, localTeamID)
+}
+
+func dryRunPatchComputerUseAuthPlugin(
+	ctx context.Context,
+	r *Runner,
+	t targets.Target,
+	pluginPath string,
+	executablePath string,
+	policy targets.ComputerUsePolicy,
+	localTeamID string,
+) error {
+	notef(r, "computer-use: repair login authorization trusted service team in "+executablePath)
+	if err := backupComputerUseAuthPlugin(ctx, r, t, pluginPath); err != nil {
+		return err
+	}
+	stagingPath := computerUseAuthPluginDryRunStagingPath(pluginPath)
+	if err := r.Run(ctx, "/usr/bin/rsync", "-a", pluginPath+"/", stagingPath+"/"); err != nil {
+		return logPatchError(ctx, "patch.computer_use_auth_plugin_stage_failed", fmt.Errorf("stage authorization plugin: %w", err))
+	}
+	id, err := resolveSignIdentity(ctx, true)
+	if err != nil {
+		return err
+	}
+	if err := signAndVerifyComputerUseAuthPlugin(ctx, r, stagingPath, id); err != nil {
+		return err
+	}
+	if err := installComputerUseAuthPlugin(ctx, r, stagingPath, pluginPath); err != nil {
+		return err
+	}
+	return verifyComputerUseAuthPlugin(ctx, r, pluginPath, policy, localTeamID)
+}
+
+func patchComputerUseAuthPlugin(
+	ctx context.Context,
+	r *Runner,
+	t targets.Target,
+	pluginPath string,
+	executablePath string,
+	policy targets.ComputerUsePolicy,
+	localTeamID string,
+) error {
+	info, err := os.Stat(pluginPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			notef(r, fmt.Sprintf("target=%s step 7d: authorization plugin not found at %s, skipping", t.ID, pluginPath))
+			return nil
+		}
+		return logPatchError(ctx, "patch.computer_use_auth_plugin_stat_failed", fmt.Errorf("stat authorization plugin %s: %w", pluginPath, err))
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("authorization plugin path is not a directory: %s", pluginPath)
+	}
+
+	repair, err := readComputerUseAuthPluginRepair(ctx, executablePath, policy, localTeamID)
+	if err != nil {
+		return err
+	}
+	if err := backupComputerUseAuthPlugin(ctx, r, t, pluginPath); err != nil {
+		return err
+	}
+	if err := stageInstallComputerUseAuthPlugin(ctx, r, pluginPath, executablePath, policy, repair); err != nil {
+		return err
+	}
+	return verifyComputerUseAuthPlugin(ctx, r, pluginPath, policy, localTeamID)
+}
+
+func readComputerUseAuthPluginRepair(
+	ctx context.Context,
+	executablePath string,
+	policy targets.ComputerUsePolicy,
+	localTeamID string,
+) (computerUseAuthPluginRepair, error) {
+	executableInfo, err := os.Stat(executablePath)
+	if err != nil {
+		return computerUseAuthPluginRepair{}, logPatchError(ctx, "patch.computer_use_auth_plugin_executable_stat_failed", fmt.Errorf("stat authorization plugin executable %s: %w", executablePath, err))
+	}
+	data, err := os.ReadFile(executablePath)
+	if err != nil {
+		return computerUseAuthPluginRepair{}, logPatchError(ctx, "patch.computer_use_auth_plugin_executable_read_failed", fmt.Errorf("read authorization plugin executable %s: %w", executablePath, err))
+	}
+	updated, replacements, alreadyPatched, err := replaceStandaloneTeamID(
+		data,
+		policy.UpstreamTrustedTeamID,
+		localTeamID,
+	)
+	if err != nil {
+		return computerUseAuthPluginRepair{}, logPatchError(ctx, "patch.computer_use_auth_plugin_executable_repair_failed", fmt.Errorf("repair authorization plugin executable %s: %w", executablePath, err))
+	}
+	if replacements == 0 && !alreadyPatched {
+		return computerUseAuthPluginRepair{}, fmt.Errorf("authorization plugin executable %s contained neither trusted team %s nor %s",
+			executablePath, policy.UpstreamTrustedTeamID, localTeamID)
+	}
+	return computerUseAuthPluginRepair{
+		Updated:      updated,
+		Permissions:  executableInfo.Mode().Perm(),
+		Replacements: replacements,
+	}, nil
+}
+
+func stageInstallComputerUseAuthPlugin(
+	ctx context.Context,
+	r *Runner,
+	pluginPath string,
+	executablePath string,
+	policy targets.ComputerUsePolicy,
+	repair computerUseAuthPluginRepair,
+) error {
+	r.Log.InfoContext(ctx, "patch.computer_use_auth_plugin.stage_install",
+		"plugin_path", pluginPath,
+		"executable_path", executablePath,
+		"replacements", repair.Replacements)
+	tempDir, err := os.MkdirTemp("", "desktop-via-clyde-auth-plugin-*")
+	if err != nil {
+		return logPatchError(ctx, "patch.computer_use_auth_plugin_temp_dir_failed", fmt.Errorf("create authorization plugin staging dir: %w", err))
+	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	stagingPath := filepath.Join(tempDir, filepath.Base(pluginPath))
+	if err := r.Run(ctx, "/usr/bin/rsync", "-a", pluginPath+"/", stagingPath+"/"); err != nil {
+		return logPatchError(ctx, "patch.computer_use_auth_plugin_stage_failed", fmt.Errorf("stage authorization plugin: %w", err))
+	}
+	stagedExecutablePath := filepath.Join(stagingPath, filepath.FromSlash(policy.AuthPluginExecutable))
+	if err := writeExistingFile(stagedExecutablePath, repair.Permissions, repair.Updated); err != nil {
+		return logPatchError(ctx, "patch.computer_use_auth_plugin_executable_write_failed", fmt.Errorf("write authorization plugin executable %s: %w", stagedExecutablePath, err))
+	}
+	if repair.Replacements > 0 {
+		notef(r, fmt.Sprintf("computer-use: replaced %d login authorization trusted service team occurrence(s) in %s", repair.Replacements, executablePath))
+	} else {
+		notef(r, "computer-use: "+executablePath+" already trusts login authorization service team; refreshing signature")
+	}
+
+	id, err := resolveSignIdentity(ctx, false)
+	if err != nil {
+		return err
+	}
+	if err := signAndVerifyComputerUseAuthPlugin(ctx, r, stagingPath, id); err != nil {
+		return err
+	}
+	return installComputerUseAuthPlugin(ctx, r, stagingPath, pluginPath)
+}
+
+func signAndVerifyComputerUseAuthPlugin(ctx context.Context, r *Runner, stagingPath string, id string) error {
+	notef(r, "computer-use: sign authorization plugin "+stagingPath)
+	if err := r.Run(ctx, "/usr/bin/codesign", codesignRuntimeArgs(id, stagingPath)...); err != nil {
+		return logPatchError(ctx, "patch.computer_use_auth_plugin_sign_failed", fmt.Errorf("sign authorization plugin: %w", err))
+	}
+	if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", stagingPath); err != nil {
+		return logPatchError(ctx, "patch.computer_use_auth_plugin_stage_verify_failed", fmt.Errorf("verify staged authorization plugin: %w", err))
+	}
+	return nil
+}
+
+func installComputerUseAuthPlugin(ctx context.Context, r *Runner, stagingPath string, pluginPath string) error {
+	notef(r, fmt.Sprintf("computer-use: install authorization plugin %s -> %s with sudo", stagingPath, pluginPath))
+	if err := r.Run(ctx, "/usr/bin/sudo", "/usr/bin/rsync", "-rltp", "--delete", stagingPath+"/", pluginPath+"/"); err != nil {
+		return logPatchError(ctx, "patch.computer_use_auth_plugin_install_failed", fmt.Errorf("install authorization plugin: %w", err))
+	}
+	return nil
+}
+
+func backupComputerUseAuthPlugin(ctx context.Context, r *Runner, t targets.Target, pluginPath string) error {
+	backup := computerUseAuthPluginBackupBundle(t, pluginPath)
+	if !r.DryRun {
+		if _, err := os.Stat(backup); err == nil {
+			notef(r, fmt.Sprintf("target=%s step 7d: authorization plugin backup exists at %s, skipping", t.ID, backup))
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(backup), 0o755); err != nil {
+			return logPatchError(ctx, "patch.computer_use_auth_plugin_backup_dir_failed", fmt.Errorf("create authorization plugin backup dir %s: %w", filepath.Dir(backup), err))
+		}
+	}
+	notef(r, fmt.Sprintf("target=%s step 7d: backup authorization plugin %s -> %s", t.ID, pluginPath, backup))
+	return r.Run(ctx, "/usr/bin/rsync", "-a", pluginPath+"/", backup+"/")
+}
+
+func computerUseAuthPluginBackupBundle(t targets.Target, pluginPath string) string {
+	return filepath.Join(paths.BackupDir(t), "computer-use", filepath.Base(pluginPath))
+}
+
+func computerUseAuthPluginDryRunStagingPath(pluginPath string) string {
+	return filepath.Join(os.TempDir(), "desktop-via-clyde-auth-plugin", filepath.Base(pluginPath))
+}
+
 func ensureComputerUseAppPath(appPath string) error {
 	info, err := os.Stat(appPath)
 	if err != nil {
@@ -142,6 +367,34 @@ func ensureComputerUseAppPath(appPath string) error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("helper path is not a directory: %s", appPath)
+	}
+	return nil
+}
+
+func verifyComputerUseAuthPlugin(
+	ctx context.Context,
+	r *Runner,
+	pluginPath string,
+	policy targets.ComputerUsePolicy,
+	localTeamID string,
+) error {
+	if r.DryRun {
+		return nil
+	}
+	notef(r, "computer-use: verify authorization plugin signature")
+	if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", pluginPath); err != nil {
+		return logPatchError(ctx, "patch.computer_use_auth_plugin_verify_failed", fmt.Errorf("verify authorization plugin: %w", err))
+	}
+	executablePath := filepath.Join(pluginPath, filepath.FromSlash(policy.AuthPluginExecutable))
+	data, err := os.ReadFile(executablePath)
+	if err != nil {
+		return logPatchError(ctx, "patch.computer_use_auth_plugin_verify_read_failed", fmt.Errorf("read authorization plugin executable %s: %w", executablePath, err))
+	}
+	if countStandaloneToken(data, policy.UpstreamTrustedTeamID) > 0 {
+		return fmt.Errorf("%s still contains upstream trusted team %s", executablePath, policy.UpstreamTrustedTeamID)
+	}
+	if countStandaloneToken(data, localTeamID) == 0 {
+		return fmt.Errorf("%s does not contain local trusted team %s", executablePath, localTeamID)
 	}
 	return nil
 }
