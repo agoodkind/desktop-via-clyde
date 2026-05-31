@@ -8,7 +8,7 @@ import (
 )
 
 func TestTeamIDFromSignIdentity(t *testing.T) {
-	got, err := teamIDFromSignIdentity(paths.SignIdentity)
+	got, err := teamIDFromSignIdentity(paths.SignIdentity())
 	if err != nil {
 		t.Fatalf("teamIDFromSignIdentity: %v", err)
 	}

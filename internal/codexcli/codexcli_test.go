@@ -31,7 +31,7 @@ func TestInstallDryRunUsesShallowGhCloneAndOriginMain(t *testing.T) {
 		t.Fatalf("Install dry-run: %v", err)
 	}
 	log := out.String()
-	sourceDir := filepath.Join(cacheHome, "desktop-via-clyde", "codex", "source")
+	sourceDir := filepath.Join(cacheHome, "clyde", "desktop-via-clyde", "codex", "source")
 	assertContains(t, log, "codex-cli step 1/7: update Codex source checkout")
 	assertContains(t, log, "codex-cli: source checkout missing, cloning openai/codex with depth 1")
 	assertContains(t, log, "gh repo clone openai/codex "+sourceDir+" -- --depth 1")

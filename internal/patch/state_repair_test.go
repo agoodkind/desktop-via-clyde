@@ -31,7 +31,7 @@ func TestEnsureOriginalDesignatedRequirementReportsMissingBackupRepair(t *testin
 			"codex": {
 				PatchedVersion: "2620",
 				PatchedAt:      time.Unix(0, 0).UTC(),
-				SignIdentity:   paths.SignIdentity,
+				SignIdentity:   paths.SignIdentity(),
 			},
 		},
 	}

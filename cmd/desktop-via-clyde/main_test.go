@@ -13,13 +13,7 @@ func TestRootHelpListsTargetCommands(t *testing.T) {
 		t.Fatalf("executeRoot(--help): %v", err)
 	}
 
-	required := []string{
-		"cursor",
-		"codex",
-		"claude",
-		"codex-cli",
-		"status",
-	}
+	required := []string{"cursor", "codex", "claude", "codex-cli", "status"}
 	for _, want := range required {
 		if !strings.Contains(output, want) {
 			t.Fatalf("root help missing %q\noutput:\n%s", want, output)
@@ -48,6 +42,42 @@ func TestTargetHelpListsOperations(t *testing.T) {
 	}
 }
 
+func TestCursorUpgradeHelpShowsDevChannelDefault(t *testing.T) {
+	output, err := executeRoot("cursor", "upgrade", "--help")
+	if err != nil {
+		t.Fatalf("executeRoot(cursor upgrade --help): %v", err)
+	}
+	if !strings.Contains(output, "--channel string") {
+		t.Fatalf("cursor upgrade help missing --channel\noutput:\n%s", output)
+	}
+	if !strings.Contains(output, `default "dev"`) {
+		t.Fatalf("cursor upgrade help missing dev default\noutput:\n%s", output)
+	}
+}
+
+func TestCodexUpgradeHelpShowsBetaChannelDefault(t *testing.T) {
+	output, err := executeRoot("codex", "upgrade", "--help")
+	if err != nil {
+		t.Fatalf("executeRoot(codex upgrade --help): %v", err)
+	}
+	if !strings.Contains(output, "--channel string") {
+		t.Fatalf("codex upgrade help missing --channel\noutput:\n%s", output)
+	}
+	if !strings.Contains(output, `default "beta"`) {
+		t.Fatalf("codex upgrade help missing beta default\noutput:\n%s", output)
+	}
+}
+
+func TestClaudeUpgradeHelpOmitsChannelFlag(t *testing.T) {
+	output, err := executeRoot("claude", "upgrade", "--help")
+	if err != nil {
+		t.Fatalf("executeRoot(claude upgrade --help): %v", err)
+	}
+	if strings.Contains(output, "--channel") {
+		t.Fatalf("claude upgrade help unexpectedly lists --channel\noutput:\n%s", output)
+	}
+}
+
 func TestClaudeHelpDoesNotListBundledCLITeeEntrypoint(t *testing.T) {
 	output, err := executeRoot("claude", "--help")
 	if err != nil {
@@ -70,10 +100,12 @@ func TestClaudeBundledCLITeeEntrypointReturnsError(t *testing.T) {
 
 func TestOperationHelpCommandsSucceed(t *testing.T) {
 	for _, args := range [][]string{
+		{"cursor", "upgrade", "--help"},
 		{"codex", "patch", "--help"},
 		{"codex", "upgrade", "--help"},
 		{"codex", "keychain-migrate", "--help"},
 		{"codex", "status", "--help"},
+		{"claude", "upgrade", "--help"},
 		{"codex-cli", "upgrade", "--help"},
 		{"codex-cli", "install", "--help"},
 		{"codex-cli", "status", "--help"},
@@ -111,12 +143,7 @@ func TestCodexCLIUpgradeHelpAdvertisesLocalFastDefault(t *testing.T) {
 }
 
 func TestVerbFirstCommandsReturnError(t *testing.T) {
-	for _, args := range [][]string{
-		{"patch", "codex"},
-		{"unpatch", "codex"},
-		{"upgrade", "codex"},
-		{"keychain-migrate", "codex"},
-	} {
+	for _, args := range [][]string{{"patch", "codex"}, {"unpatch", "codex"}, {"upgrade", "codex"}, {"keychain-migrate", "codex"}} {
 		output, err := executeRoot(args...)
 		if err == nil {
 			t.Fatalf("executeRoot(%v) unexpectedly succeeded\noutput:\n%s", args, output)

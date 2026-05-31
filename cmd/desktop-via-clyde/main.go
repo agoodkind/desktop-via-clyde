@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"goodkind.io/desktop-via-clyde/internal/codexcli"
+	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/logging"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
@@ -60,6 +61,15 @@ func run() int {
 		"log_path", paths.ProcessLogPath(),
 		"args", os.Args[1:])
 
+	loadedConfig, err := config.LoadRequired()
+	if err != nil {
+		logger.ErrorContext(ctx, "cli.config_load_failed", "err", err)
+		fmt.Fprintln(os.Stderr, "error:", err)
+		_ = closer.Close()
+		return 1
+	}
+	config.SetCurrent(loadedConfig)
+
 	root := newRootCmd(ctx, os.Stdout)
 	if err := root.ExecuteContext(ctx); err != nil {
 		logger.ErrorContext(ctx, "cli.execute.failed", "err", err)
@@ -83,7 +93,7 @@ func newRootCmd(ctx context.Context, out io.Writer) *cobra.Command {
 	root.SetErr(out)
 	root.SetContext(ctx)
 
-	for _, target := range targets.Registry {
+	for _, target := range targets.All() {
 		root.AddCommand(newTargetCmd(ctx, out, target))
 	}
 	root.AddCommand(newStatusCmd(ctx, out))
@@ -188,7 +198,12 @@ func newUpgradeCmd(ctx context.Context, out io.Writer, target targets.Target) *c
 		"Upgrade %s by fetching the latest upstream manifest, verifying the downloaded bundle against the recorded upstream DesignatedRequirement, swapping it into place, and re-running the patch flow.",
 		target.AppPath,
 	)
-	cmd.Flags().StringVar(&channel, "channel", "stable", "upstream release channel (stable, dev, etc.)")
+	if target.Updater.SupportsChannels() {
+		defaultChannel, err := target.Updater.ResolveChannel("")
+		if err == nil {
+			cmd.Flags().StringVar(&channel, "channel", defaultChannel, "upstream release channel")
+		}
+	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the bundle")
 	cmd.Flags().BoolVar(&noMigrate, "no-migrate-keychain", false, "skip keychain ACL re-grant during the post-swap patch")
 	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
@@ -304,7 +319,7 @@ func newStatusCmd(ctx context.Context, out io.Writer) *cobra.Command {
 			}
 			fmt.Fprintf(out, "state file: %s\n", paths.StateFile())
 			fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", "TARGET", "STATE", "VERSION", "NOTES")
-			for _, t := range targets.Registry {
+			for _, t := range targets.All() {
 				printTargetStatus(out, t, ms)
 			}
 			return nil

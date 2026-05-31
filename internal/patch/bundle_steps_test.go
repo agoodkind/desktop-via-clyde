@@ -161,7 +161,7 @@ func containsString(values []string, want string) bool {
 }
 
 func lookupTarget(id string) (targets.Target, error) {
-	for _, target := range targets.Registry {
+	for _, target := range targets.All() {
 		if target.ID == id {
 			return target, nil
 		}

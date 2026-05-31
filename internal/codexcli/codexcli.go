@@ -20,13 +20,13 @@ import (
 	"strings"
 	"time"
 
+	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/signing"
 )
 
 const (
-	defaultRef       = "origin/main"
 	codexRepo        = "openai/codex"
 	packageBinaryRel = "bin/codex"
 )
@@ -75,32 +75,29 @@ type packageMetadata struct {
 
 // DefaultSourceDir returns the managed shallow Codex source checkout path.
 func DefaultSourceDir() string {
-	return filepath.Join(defaultCacheHome(), "desktop-via-clyde", "codex", "source")
+	return filepath.Join(paths.CacheRoot(), "desktop-via-clyde", "codex", "source")
 }
 
 // DefaultInstallDir returns the visible command directory.
 func DefaultInstallDir() string {
-	return filepath.Join(paths.Home(), ".local", "bin")
+	return config.Current().CLI.Codex.InstallDir
 }
 
 // DefaultCodexHome returns the Codex home used by upstream standalone installs.
 func DefaultCodexHome() string {
-	if codexHome := os.Getenv("CODEX_HOME"); codexHome != "" {
-		return codexHome
-	}
-	return filepath.Join(paths.Home(), ".codex")
+	return config.Current().CLI.Codex.CodexHome
 }
 
 // DefaultRef returns the default upstream source ref.
 func DefaultRef() string {
-	return defaultRef
+	return config.Current().CLI.Codex.SourceRef
 }
 
 // DefaultBuildMode returns the default build mode for Codex CLI installs.
 // local-fast is the default because the resulting binary is the everyday local
 // Codex; pass `--build-mode release` to match the upstream release profile.
 func DefaultBuildMode() string {
-	return string(BuildModeLocalFast)
+	return config.Current().CLI.Codex.BuildMode
 }
 
 // Install clones or updates Codex, builds an upstream package layout, signs the
@@ -156,7 +153,7 @@ func Install(ctx context.Context, opts InstallOptions) error {
 		}
 	}
 
-	packageDir := filepath.Join(defaultCacheHome(), "desktop-via-clyde", "codex", "package")
+	packageDir := filepath.Join(paths.CacheRoot(), "desktop-via-clyde", "codex", "package")
 	notef(r, "codex-cli step 2/7: build upstream Codex entrypoint")
 	entrypointPath, err := buildEntrypoint(ctx, r, opts.SourceDir, target, buildMode, opts.NoSccache)
 	if err != nil {
@@ -246,6 +243,9 @@ func withInstallDefaults(opts InstallOptions) InstallOptions {
 	if opts.BuildMode == "" {
 		opts.BuildMode = DefaultBuildMode()
 	}
+	if !config.Current().CLI.Codex.UseSccache {
+		opts.NoSccache = true
+	}
 	return opts
 }
 
@@ -260,13 +260,6 @@ func withStatusDefaults(opts StatusOptions) StatusOptions {
 		opts.CodexHome = DefaultCodexHome()
 	}
 	return opts
-}
-
-func defaultCacheHome() string {
-	if cacheHome := os.Getenv("XDG_CACHE_HOME"); cacheHome != "" {
-		return cacheHome
-	}
-	return filepath.Join(paths.Home(), ".cache")
 }
 
 func notef(r *patch.Runner, message string) {
@@ -449,14 +442,14 @@ func signBinary(ctx context.Context, r *patch.Runner, sourceDir string, binaryPa
 			return fmt.Errorf("stat upstream Codex entitlements: %w", err)
 		}
 	}
-	notef(r, "codex-cli: resolving local signing identity "+strconv.Quote(paths.SignIdentity))
+	notef(r, "codex-cli: resolving local signing identity "+strconv.Quote(paths.SignIdentity()))
 	id, err := signing.ResolveIdentity(ctx, r.DryRun)
 	if err != nil {
 		log.ErrorContext(ctx, "codexcli.sign_binary.resolve_identity_failed", "err", err)
 		return fmt.Errorf("resolve local signing identity: %w", err)
 	}
 	notef(r, "codex-cli: using upstream entitlements "+entitlementsPath)
-	notef(r, "codex-cli: sign "+binaryPath+" with "+strconv.Quote(paths.SignIdentity)+" (sha1="+id+")")
+	notef(r, "codex-cli: sign "+binaryPath+" with "+strconv.Quote(paths.SignIdentity())+" (sha1="+id+")")
 	if err := r.Run(ctx, "/usr/bin/codesign", signing.RuntimeTimestampEntitlementsArgs(id, entitlementsPath, binaryPath)...); err != nil {
 		log.ErrorContext(ctx, "codexcli.sign_binary.codesign_failed", "err", err)
 		return fmt.Errorf("sign Codex CLI: %w", err)

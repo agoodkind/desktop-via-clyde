@@ -1,6 +1,7 @@
 package shimembed
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -40,7 +41,7 @@ func TestDefaultShimDryRunKeepsSSLCertFile(t *testing.T) {
 }
 
 func TestDefaultShimDryRunDoesNotInjectChromiumFlagsInElectronNodeMode(t *testing.T) {
-	output := runShimDryRunWithEnv(t, "Cursor", map[string]string{
+	output := runShimDryRunWithEnv(t, "Cursor", nil, map[string]string{
 		"ELECTRON_RUN_AS_NODE": "1",
 	})
 
@@ -74,6 +75,8 @@ func TestCodexShimExecUsesHomeAsLaunchCwd(t *testing.T) {
 	if err := os.WriteFile(fakeCA, []byte("fake-ca"), 0o644); err != nil {
 		t.Fatalf("write fake ca: %v", err)
 	}
+	configHome := t.TempDir()
+	writeShimConfig(t, configHome, fakeCA, homeDir)
 	cleanupListener := ensureProxyReachable(t)
 	defer cleanupListener()
 
@@ -81,7 +84,7 @@ func TestCodexShimExecUsesHomeAsLaunchCwd(t *testing.T) {
 	command.Dir = launcherCwd
 	command.Env = envWithOverrides(os.Environ(),
 		"HOME="+homeDir,
-		"DESKTOP_VIA_CLYDE_CA_CERT="+fakeCA,
+		"XDG_CONFIG_HOME="+configHome,
 	)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -115,12 +118,13 @@ func TestCodexShimExecUsesHomeAsLaunchCwd(t *testing.T) {
 func runShimDryRun(t *testing.T, executableName string) string {
 	t.Helper()
 
-	return runShimDryRunWithEnv(t, executableName, nil)
+	return runShimDryRunWithEnv(t, executableName, nil, nil)
 }
 
 func runShimDryRunWithEnv(
 	t *testing.T,
 	executableName string,
+	launchWorkingDirectory *string,
 	extraEnv map[string]string,
 ) string {
 	t.Helper()
@@ -131,8 +135,20 @@ func runShimDryRunWithEnv(
 		t.Fatalf("write shim fixture: %v", err)
 	}
 
+	homeDir := t.TempDir()
+	configHome := t.TempDir()
+	caPath := filepath.Join(t.TempDir(), "clyde-mitm-ca.crt")
+	cwd := homeDir
+	if launchWorkingDirectory != nil {
+		cwd = *launchWorkingDirectory
+	}
+	writeShimConfig(t, configHome, caPath, cwd)
+
 	command := exec.Command(shimPath, "--clyde-dry-run")
-	command.Env = os.Environ()
+	command.Env = envWithOverrides(os.Environ(),
+		"HOME="+homeDir,
+		"XDG_CONFIG_HOME="+configHome,
+	)
 	for key, value := range extraEnv {
 		command.Env = append(command.Env, key+"="+value)
 	}
@@ -143,13 +159,40 @@ func runShimDryRunWithEnv(
 	return string(output)
 }
 
+func writeShimConfig(t *testing.T, xdgConfigHome string, caPath string, launchWorkingDirectory string) {
+	t.Helper()
+
+	configRoot := filepath.Join(xdgConfigHome, "desktop-via-clyde")
+	if err := os.MkdirAll(configRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll config root: %v", err)
+	}
+	contents := fmt.Sprintf(`[proxy]
+host = "::1"
+port = 48723
+ca_certificate = %q
+no_proxy = "localhost,127.0.0.1,::1,[::1]"
+launch_working_directory = %q
+
+[apps.cursor]
+target_policy = "default"
+
+[apps.codex]
+target_policy = "codex"
+
+[apps.claude]
+target_policy = "default"
+`, caPath, launchWorkingDirectory)
+	if err := os.WriteFile(filepath.Join(configRoot, "config.toml"), []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile config.toml: %v", err)
+	}
+}
+
 func envWithOverrides(base []string, overrides ...string) []string {
 	remove := map[string]bool{}
 	for _, override := range overrides {
 		parts := strings.SplitN(override, "=", 2)
 		if len(parts) == 2 && parts[0] != "" {
-			key := parts[0]
-			remove[key] = true
+			remove[parts[0]] = true
 		}
 	}
 	out := make([]string, 0, len(base)+len(overrides))

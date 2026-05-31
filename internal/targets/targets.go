@@ -1,21 +1,30 @@
-// Package targets defines the registry of macOS apps that desktop-via-clyde
-// can patch. Each target carries the absolute bundle path, the canonical
-// executable name (which becomes argv[0] after the shim execv's the .real
-// binary), and the keychain services whose ACLs need to be re-granted after
-// re-signing.
+// Package targets defines the configured macOS apps that desktop-via-clyde can patch.
 package targets
+
+import (
+	"fmt"
+	"strings"
+
+	"goodkind.io/desktop-via-clyde/internal/config"
+)
 
 // UpdaterKind identifies the upstream update protocol used by a target.
 type UpdaterKind string
 
 const (
-	// UpdaterCursorManifest is Cursor's JSON manifest endpoint.
+	// UpdaterCursorManifest selects Cursor's JSON manifest endpoint.
 	UpdaterCursorManifest UpdaterKind = "cursor-manifest"
-	// UpdaterSparkleAppcast is Sparkle's XML appcast format.
+	// UpdaterSparkleAppcast selects Sparkle's XML appcast format.
 	UpdaterSparkleAppcast UpdaterKind = "sparkle-appcast"
-	// UpdaterClaudeSquirrel is Claude's Squirrel-style JSON endpoint.
+	// UpdaterClaudeSquirrel selects Claude's Squirrel-style JSON endpoint.
 	UpdaterClaudeSquirrel UpdaterKind = "claude-squirrel"
 )
+
+// UpdaterChannel declares one named updater channel.
+type UpdaterChannel struct {
+	Name string
+	URL  string
+}
 
 // Updater describes the upstream updater endpoint for one target.
 type Updater struct {
@@ -25,27 +34,71 @@ type Updater struct {
 	Product           string
 	SparklePublicKey  string
 	DeviceIDParamName string
+	DefaultChannel    string
+	Channels          []UpdaterChannel
 }
 
-// EntitlementsPolicy describes how a target's extracted entitlements are
-// normalized before re-signing. Strip removes upstream Team-bound claims that
-// cannot remain valid after local re-signing. RequiredBooleanEntitlements lists
-// boolean entitlements that must be present and true on the patched main
-// executable.
+// SupportsChannels reports whether the updater exposes named channels.
+func (u Updater) SupportsChannels() bool {
+	return len(u.Channels) > 0
+}
+
+// ResolveChannel returns the requested channel or the configured default.
+func (u Updater) ResolveChannel(requested string) (string, error) {
+	channel := strings.TrimSpace(requested)
+	if !u.SupportsChannels() {
+		if channel != "" {
+			return "", fmt.Errorf("updater kind %q does not support channels", u.Kind)
+		}
+		return "", nil
+	}
+	if channel == "" {
+		channel = strings.TrimSpace(u.DefaultChannel)
+	}
+	if channel == "" && len(u.Channels) > 0 {
+		channel = u.Channels[0].Name
+	}
+	for _, candidate := range u.Channels {
+		if candidate.Name == channel {
+			return channel, nil
+		}
+	}
+	return "", fmt.Errorf("unknown channel %q", channel)
+}
+
+// URLWithChannel returns the updater URL for the resolved channel.
+func (u Updater) URLWithChannel(channel string) (string, error) {
+	if !u.SupportsChannels() {
+		return u.URL, nil
+	}
+	resolved, err := u.ResolveChannel(channel)
+	if err != nil {
+		return "", err
+	}
+	for _, candidate := range u.Channels {
+		if candidate.Name == resolved {
+			if candidate.URL == "" {
+				return u.URL, nil
+			}
+			return candidate.URL, nil
+		}
+	}
+	return "", fmt.Errorf("unknown channel %q", resolved)
+}
+
+// EntitlementsPolicy describes how a target's extracted entitlements are normalized before re-signing.
 type EntitlementsPolicy struct {
 	Strip                       []string
 	RequiredBooleanEntitlements []string
 }
 
-// ComputerUseSignTarget describes one app bundle inside Codex Computer Use
-// that must be re-signed after local trust-policy repair.
+// ComputerUseSignTarget describes one app bundle inside Codex Computer Use that must be re-signed after local trust-policy repair.
 type ComputerUseSignTarget struct {
 	Path         string
 	Entitlements *EntitlementsPolicy
 }
 
-// ComputerUsePolicy describes the Codex companion helper bundle whose native
-// IPC trust policy must match the locally re-signed Codex app.
+// ComputerUsePolicy describes the Codex companion helper bundle whose native IPC trust policy must match the locally re-signed Codex app.
 type ComputerUsePolicy struct {
 	HostAppPath           string
 	BundledAppPath        string
@@ -61,198 +114,113 @@ type ComputerUsePolicy struct {
 
 // Target describes one patchable bundle.
 type Target struct {
-	// ID is the short slug used in CLI args, state.json, and backup paths.
-	ID string
-	// AppPath is the absolute path to the .app bundle in /Applications.
-	AppPath string
-	// BundleID is CFBundleIdentifier; informational, used in status output.
-	BundleID string
-	// ExecName is CFBundleExecutable; also argv[0] after the shim execv.
-	ExecName string
-	// Entitlements declares how extracted entitlements are transformed and
-	// which boolean entitlements must survive on the patched main executable.
-	Entitlements *EntitlementsPolicy
-	// KeychainServices lists generic-password service names whose ACLs need
-	// to be re-granted to the patched binary so the user does not see a
-	// macOS keychain prompt on first launch after patching.
-	KeychainServices []string
-	// NestedSignPaths lists app-relative code objects that must be re-signed
-	// before the outer .app bundle is sealed.
-	NestedSignPaths []string
-	// PreservedNestedCodePaths lists app-relative code objects that must keep
-	// their upstream signature and can be restored from the backup before the
-	// outer .app bundle is sealed.
+	ID                       string
+	AppPath                  string
+	BundleID                 string
+	ExecName                 string
+	Entitlements             *EntitlementsPolicy
+	KeychainServices         []string
+	NestedSignPaths          []string
 	PreservedNestedCodePaths []string
-	// ComputerUse declares a Codex-only companion helper bundle that must be
-	// repaired after Codex is locally re-signed.
-	ComputerUse *ComputerUsePolicy
-	// Updater selects the upstream update protocol for `<target> upgrade`.
-	Updater Updater
+	ComputerUse              *ComputerUsePolicy
+	Updater                  Updater
+	BundledCLITee            config.BundledCLITeeConfig
+	TargetPolicy             string
 }
 
-// Registry is the canonical list of targets. Order matches the plan.
-var Registry = []Target{
-	{
-		ID:       "cursor",
-		AppPath:  "/Applications/Cursor.app",
-		BundleID: "com.todesktop.230313mzl4w4u92",
-		ExecName: "Cursor",
-		Entitlements: &EntitlementsPolicy{
-			Strip: nil,
-			RequiredBooleanEntitlements: []string{
-				"com.apple.security.automation.apple-events",
-				"com.apple.security.cs.disable-library-validation",
-			},
-		},
-		KeychainServices: []string{"Cursor Safe Storage"},
-		Updater: Updater{
-			Kind:              UpdaterCursorManifest,
-			URL:               "",
-			Platform:          "darwin-arm64",
-			Product:           "cursor",
-			SparklePublicKey:  "",
-			DeviceIDParamName: "",
-		},
-		NestedSignPaths:          nil,
-		PreservedNestedCodePaths: nil,
+// All returns the configured targets in stable CLI order.
+func All() []Target {
+	cfg := config.Current()
+	return []Target{
+		buildTarget("cursor", cfg.Apps.Cursor),
+		buildTarget("codex", cfg.Apps.Codex),
+		buildTarget("claude", cfg.Apps.Claude),
+	}
+}
+
+func buildTarget(id string, app config.AppConfig) Target {
+	target := Target{
+		ID:                       id,
+		AppPath:                  app.AppPath,
+		BundleID:                 app.BundleID,
+		ExecName:                 app.ExecName,
+		Entitlements:             buildEntitlements(app.Entitlements),
+		KeychainServices:         cloneStrings(app.KeychainServices),
+		NestedSignPaths:          cloneStrings(app.NestedSignPaths),
+		PreservedNestedCodePaths: cloneStrings(app.PreservedNestedCodePaths),
 		ComputerUse:              nil,
-	},
-	{
-		ID:       "codex",
-		AppPath:  "/Applications/Codex.app",
-		BundleID: "com.openai.codex",
-		ExecName: "Codex",
-		// AMFI refuses to load a binary that claims Team-bound entitlements
-		// without a provisioning profile authorizing the claim. The original
-		// Codex shipped with OpenAI's profile; after re-sign with Goodkind
-		// the profile no longer authorizes anything, so the three Team-bound
-		// keys must be stripped. Empirical: leaving them in produced
-		// "AppleMobileFileIntegrityError Code=-413 No matching profile found"
-		// from amfid and Launch Services refused to spawn the process.
-		Entitlements: &EntitlementsPolicy{
-			Strip: []string{
-				"com.apple.application-identifier",
-				"com.apple.developer.team-identifier",
-				"keychain-access-groups",
-			},
-			RequiredBooleanEntitlements: []string{
-				"com.apple.security.automation.apple-events",
-				"com.apple.security.cs.disable-library-validation",
-			},
-		},
-		KeychainServices: []string{"Codex Safe Storage", "Codex Auth", "Codex MCP Credentials"},
-		NestedSignPaths: []string{
-			"Contents/Resources/codex",
-			"Contents/Resources/codex_chronicle",
-			"Contents/Resources/node",
-			"Contents/Resources/node_repl",
-			"Contents/Resources/rg",
-			"Contents/Resources/native/bare-modifier-monitor",
-			"Contents/Resources/native/browser-use-peer-authorization.node",
-			"Contents/Resources/native/devicecheck.node",
-			"Contents/Resources/native/launch-services-helper",
-			"Contents/Resources/native/remote-control-device-key.node",
-			"Contents/Resources/native/sky.node",
-			"Contents/Resources/native/sparkle.node",
-			"Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc",
-			"Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc",
-			"Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app",
-			"Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
-			"Contents/Frameworks/Sparkle.framework",
-		},
-		ComputerUse: &ComputerUsePolicy{
-			HostAppPath:           "/Applications/Codex.app",
-			BundledAppPath:        "Contents/Resources/plugins/openai-bundled/plugins/computer-use/Codex Computer Use.app",
-			AppPathFromHome:       ".codex/computer-use/Codex Computer Use.app",
-			CacheAppGlobsFromHome: []string{".codex/plugins/cache/openai-bundled/computer-use/*/Codex Computer Use.app"},
-			AuthPluginPath:        "/Library/Security/SecurityAgentPlugins/CodexComputerUseAuthorizationPlugin.bundle",
-			AuthPluginExecutable:  "Contents/MacOS/CodexComputerUseAuthorizationPlugin",
-			UpstreamTrustedTeamID: "2DC432GLL2",
-			TeamPatchBinaries: []string{
-				"Contents/MacOS/SkyComputerUseService",
-				"Contents/SharedSupport/CUALockScreenGuardian.app/Contents/MacOS/CUALockScreenGuardian",
-			},
-			TeamRequirementPlists: []string{
-				"Contents/SharedSupport/SkyComputerUseClient.app/Contents/Resources/SkyComputerUseClient_Parent.coderequirement",
-				"Contents/SharedSupport/CUALockScreenGuardian.app/Contents/Resources/CUALockScreenGuardian_Parent.coderequirement",
-			},
-			SignTargets: []ComputerUseSignTarget{
-				{
-					Path:         "Contents/SharedSupport/Codex Computer Use Installer.app",
-					Entitlements: nil,
-				},
-				{
-					Path: "Contents/SharedSupport/SkyComputerUseClient.app",
-					Entitlements: &EntitlementsPolicy{
-						Strip: []string{
-							"com.apple.security.application-groups",
-						},
-						RequiredBooleanEntitlements: []string{
-							"com.apple.security.automation.apple-events",
-						},
-					},
-				},
-				{
-					Path: "Contents/SharedSupport/CUALockScreenGuardian.app",
-					Entitlements: &EntitlementsPolicy{
-						Strip: []string{
-							"com.apple.security.application-groups",
-						},
-						RequiredBooleanEntitlements: nil,
-					},
-				},
-				{
-					Path: ".",
-					Entitlements: &EntitlementsPolicy{
-						Strip: []string{
-							"com.apple.security.application-groups",
-						},
-						RequiredBooleanEntitlements: []string{
-							"com.apple.security.automation.apple-events",
-							"com.apple.security.device.audio-input",
-						},
-					},
-				},
-			},
-		},
-		Updater: Updater{
-			Kind:              UpdaterSparkleAppcast,
-			URL:               "https://persistent.oaistatic.com/codex-app-prod/appcast.xml",
-			Platform:          "",
-			Product:           "",
-			SparklePublicKey:  "rhcBvttuqDFriyNqwTQJR3L4UT1WjIK4QxtwtwusVic=",
-			DeviceIDParamName: "",
-		},
-		PreservedNestedCodePaths: nil,
-	},
-	{
-		ID:       "claude",
-		AppPath:  "/Applications/Claude.app",
-		BundleID: "com.anthropic.claudefordesktop",
-		ExecName: "Claude",
-		Entitlements: &EntitlementsPolicy{
-			Strip: []string{
-				"com.apple.application-identifier",
-				"com.apple.developer.team-identifier",
-				"keychain-access-groups",
-			},
-			RequiredBooleanEntitlements: []string{
-				"com.apple.security.cs.disable-library-validation",
-			},
-		},
-		KeychainServices: []string{"Claude Safe Storage"},
-		PreservedNestedCodePaths: []string{
-			"Contents/Frameworks/Squirrel.framework",
-		},
-		Updater: Updater{
-			Kind:              UpdaterClaudeSquirrel,
-			URL:               "https://api.anthropic.com/api/desktop/darwin/universal/squirrel/update",
-			Platform:          "",
-			Product:           "",
-			SparklePublicKey:  "",
-			DeviceIDParamName: "device_id",
-		},
-		NestedSignPaths: nil,
-		ComputerUse:     nil,
-	},
+		Updater:                  buildUpdater(app.Updater),
+		BundledCLITee:            app.BundledCLITee,
+		TargetPolicy:             string(app.TargetPolicy),
+	}
+	if app.ComputerUse.HostAppPath != "" {
+		target.ComputerUse = buildComputerUse(app.ComputerUse)
+	}
+	return target
+}
+
+func buildUpdater(updater config.UpdaterConfig) Updater {
+	channels := make([]UpdaterChannel, 0, len(updater.Channels))
+	for _, channel := range updater.Channels {
+		channels = append(channels, UpdaterChannel{Name: channel.Name, URL: channel.URL})
+	}
+	return Updater{
+		Kind:              mapUpdaterKind(updater.Kind),
+		URL:               updater.URL,
+		Platform:          updater.Platform,
+		Product:           updater.Product,
+		SparklePublicKey:  updater.SparklePublicKey,
+		DeviceIDParamName: updater.DeviceIDParamName,
+		DefaultChannel:    updater.DefaultChannel,
+		Channels:          channels,
+	}
+}
+
+func mapUpdaterKind(kind config.UpdaterKind) UpdaterKind {
+	switch kind {
+	case config.UpdaterKindCursorManifest:
+		return UpdaterCursorManifest
+	case config.UpdaterKindSparkleAppcast:
+		return UpdaterSparkleAppcast
+	case config.UpdaterKindClaudeSquirrel:
+		return UpdaterClaudeSquirrel
+	default:
+		return UpdaterKind(kind)
+	}
+}
+
+func buildEntitlements(entitlements config.EntitlementsConfig) *EntitlementsPolicy {
+	return &EntitlementsPolicy{
+		Strip:                       cloneStrings(entitlements.Strip),
+		RequiredBooleanEntitlements: cloneStrings(entitlements.RequiredBoolean),
+	}
+}
+
+func buildComputerUse(policy config.ComputerUseConfig) *ComputerUsePolicy {
+	signTargets := make([]ComputerUseSignTarget, 0, len(policy.SignTargets))
+	for _, target := range policy.SignTargets {
+		signTargets = append(signTargets, ComputerUseSignTarget{
+			Path:         target.Path,
+			Entitlements: buildEntitlements(target.Entitlements),
+		})
+	}
+	return &ComputerUsePolicy{
+		HostAppPath:           policy.HostAppPath,
+		BundledAppPath:        policy.BundledAppPath,
+		AppPathFromHome:       policy.AppPathFromHome,
+		CacheAppGlobsFromHome: cloneStrings(policy.CacheAppGlobsFromHome),
+		AuthPluginPath:        policy.AuthPluginPath,
+		AuthPluginExecutable:  policy.AuthPluginExecutable,
+		UpstreamTrustedTeamID: policy.UpstreamTrustedTeamID,
+		TeamPatchBinaries:     cloneStrings(policy.TeamPatchBinaries),
+		TeamRequirementPlists: cloneStrings(policy.TeamRequirementPlists),
+		SignTargets:           signTargets,
+	}
+}
+
+func cloneStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]string(nil), values...)
 }

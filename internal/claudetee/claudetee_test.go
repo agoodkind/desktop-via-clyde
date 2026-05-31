@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"goodkind.io/desktop-via-clyde/internal/config"
 )
 
 func TestCompareVersionsNumericOrdering(t *testing.T) {
@@ -77,6 +79,23 @@ func TestResolveBundledCLIPathHonorsBundledCLIPathOverride(t *testing.T) {
 	}
 	if got != override {
 		t.Fatalf("got %q, want %q", got, override)
+	}
+}
+
+func TestResolveBundledCLIPathUsesConfigVersionDir(t *testing.T) {
+	cfg := config.Default()
+	cfg.Apps.Claude.BundledCLITee.VersionDir = "7.7.7"
+	config.SetCurrent(cfg)
+	defer config.SetCurrent(nil)
+
+	home := t.TempDir()
+	got, err := ResolveBundledCLIPath(Options{HomeDir: home})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	want := filepath.Join(home, AppSupportRel, "7.7.7", BundledCLIRel)
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

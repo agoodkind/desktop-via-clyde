@@ -363,7 +363,7 @@ func stepResign(ctx context.Context, r *Runner, t targets.Target, entFile string
 	if err != nil {
 		return err
 	}
-	notef(r, fmt.Sprintf("target=%s step 6: re-sign with %q (sha1=%s)", t.ID, paths.SignIdentity, id))
+	notef(r, fmt.Sprintf("target=%s step 6: re-sign with %q (sha1=%s)", t.ID, paths.SignIdentity(), id))
 	if err := stepResignNestedCode(ctx, r, t, id); err != nil {
 		return err
 	}
@@ -454,7 +454,7 @@ func stepWriteState(ctx context.Context, r *Runner, t targets.Target, version st
 	ms.Targets[t.ID] = state.TargetState{
 		PatchedVersion:                version,
 		PatchedAt:                     clock.Now().UTC(),
-		SignIdentity:                  paths.SignIdentity,
+		SignIdentity:                  paths.SignIdentity(),
 		OriginalDesignatedRequirement: originalDR,
 	}
 	if err := state.Save(paths.StateFile(), ms); err != nil {

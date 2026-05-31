@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-func TestRegistryHasThreeTargets(t *testing.T) {
-	if len(Registry) != 3 {
-		t.Fatalf("expected 3 targets, got %d", len(Registry))
+func TestAllHasThreeTargets(t *testing.T) {
+	if len(All()) != 3 {
+		t.Fatalf("expected 3 targets, got %d", len(All()))
 	}
 }
 
@@ -33,16 +33,6 @@ func TestLookupUnknown(t *testing.T) {
 	}
 }
 
-// Cursor declares Apple Events because upstream Cursor ships with that
-// entitlement and appshot capture can target Cursor. Claude declares the shared
-// runtime entitlement required by the shim. Codex and Claude both ship
-// Team-bound entitlements that are invalid after local signing. Codex's
-// original signature includes
-// Team-bound keys (application-identifier, developer.team-identifier,
-// keychain-access-groups) that AMFI refuses to honor cross-Team and that block
-// launch entirely (verified empirically: AppleMobileFileIntegrityError
-// Code=-413). Codex must strip exactly those three and must preserve Apple
-// Events for appshot capture.
 func TestEntitlementsPolicyPerTarget(t *testing.T) {
 	wantStrip := map[string][]string{
 		"cursor": {},
@@ -70,49 +60,68 @@ func TestEntitlementsPolicyPerTarget(t *testing.T) {
 			"com.apple.security.cs.disable-library-validation",
 		},
 	}
-	for _, tg := range Registry {
+	for _, tg := range All() {
 		if tg.Entitlements == nil {
 			t.Errorf("target %s must declare an entitlement policy", tg.ID)
 			continue
 		}
-		expStrip, ok := wantStrip[tg.ID]
-		if !ok {
-			t.Errorf("unexpected target id %q in registry", tg.ID)
-			continue
+		if !stringSlicesEqual(tg.Entitlements.Strip, wantStrip[tg.ID]) {
+			t.Errorf("target %s Entitlements.Strip mismatch: got %v want %v", tg.ID, tg.Entitlements.Strip, wantStrip[tg.ID])
 		}
-		if !stringSlicesEqual(tg.Entitlements.Strip, expStrip) {
-			t.Errorf("target %s Entitlements.Strip mismatch: got %v want %v", tg.ID, tg.Entitlements.Strip, expStrip)
-		}
-		expRequired := wantRequired[tg.ID]
-		if !stringSlicesEqual(tg.Entitlements.RequiredBooleanEntitlements, expRequired) {
-			t.Errorf(
-				"target %s Entitlements.RequiredBooleanEntitlements mismatch: got %v want %v",
-				tg.ID,
-				tg.Entitlements.RequiredBooleanEntitlements,
-				expRequired,
-			)
+		if !stringSlicesEqual(tg.Entitlements.RequiredBooleanEntitlements, wantRequired[tg.ID]) {
+			t.Errorf("target %s RequiredBooleanEntitlements mismatch: got %v want %v", tg.ID, tg.Entitlements.RequiredBooleanEntitlements, wantRequired[tg.ID])
 		}
 	}
 }
 
 func TestUpdaterMetadataPerTarget(t *testing.T) {
-	want := map[string]UpdaterKind{
-		"cursor": UpdaterCursorManifest,
-		"codex":  UpdaterSparkleAppcast,
-		"claude": UpdaterClaudeSquirrel,
+	cursor, err := lookupTarget("cursor")
+	if err != nil {
+		t.Fatalf("lookup cursor: %v", err)
 	}
-	for _, tg := range Registry {
-		exp, ok := want[tg.ID]
-		if !ok {
-			t.Errorf("unexpected target id %q in registry", tg.ID)
-			continue
-		}
-		if tg.Updater.Kind != exp {
-			t.Errorf("target %s updater kind mismatch: got %q want %q", tg.ID, tg.Updater.Kind, exp)
-		}
-		if tg.ID != "cursor" && tg.Updater.URL == "" {
-			t.Errorf("target %s updater URL is empty", tg.ID)
-		}
+	if cursor.Updater.Kind != UpdaterCursorManifest {
+		t.Fatalf("cursor updater kind = %q", cursor.Updater.Kind)
+	}
+	if !cursor.Updater.SupportsChannels() {
+		t.Fatal("cursor updater should support channels")
+	}
+	if cursor.Updater.DefaultChannel != "dev" {
+		t.Fatalf("cursor default channel = %q", cursor.Updater.DefaultChannel)
+	}
+
+	codex, err := lookupTarget("codex")
+	if err != nil {
+		t.Fatalf("lookup codex: %v", err)
+	}
+	if codex.Updater.Kind != UpdaterSparkleAppcast {
+		t.Fatalf("codex updater kind = %q", codex.Updater.Kind)
+	}
+	if !codex.Updater.SupportsChannels() {
+		t.Fatal("codex updater should support channels")
+	}
+	if codex.Updater.DefaultChannel != "beta" {
+		t.Fatalf("codex default channel = %q", codex.Updater.DefaultChannel)
+	}
+	stableURL, err := codex.Updater.URLWithChannel("stable")
+	if err != nil {
+		t.Fatalf("codex stable URL: %v", err)
+	}
+	if stableURL == "" {
+		t.Fatal("codex stable URL is empty")
+	}
+
+	claude, err := lookupTarget("claude")
+	if err != nil {
+		t.Fatalf("lookup claude: %v", err)
+	}
+	if claude.Updater.Kind != UpdaterClaudeSquirrel {
+		t.Fatalf("claude updater kind = %q", claude.Updater.Kind)
+	}
+	if claude.Updater.SupportsChannels() {
+		t.Fatal("claude updater should not support channels")
+	}
+	if claude.Updater.URL == "" {
+		t.Fatal("claude updater URL is empty")
 	}
 }
 
@@ -140,14 +149,9 @@ func TestNestedSignPathsPerTarget(t *testing.T) {
 		},
 		"claude": nil,
 	}
-	for _, tg := range Registry {
-		exp, ok := want[tg.ID]
-		if !ok {
-			t.Errorf("unexpected target id %q in registry", tg.ID)
-			continue
-		}
-		if !stringSlicesEqual(tg.NestedSignPaths, exp) {
-			t.Errorf("target %s NestedSignPaths mismatch: got %v want %v", tg.ID, tg.NestedSignPaths, exp)
+	for _, tg := range All() {
+		if !stringSlicesEqual(tg.NestedSignPaths, want[tg.ID]) {
+			t.Errorf("target %s NestedSignPaths mismatch: got %v want %v", tg.ID, tg.NestedSignPaths, want[tg.ID])
 		}
 	}
 }
@@ -156,24 +160,17 @@ func TestPreservedNestedCodePathsPerTarget(t *testing.T) {
 	want := map[string][]string{
 		"cursor": nil,
 		"codex":  nil,
-		"claude": {
-			"Contents/Frameworks/Squirrel.framework",
-		},
+		"claude": {"Contents/Frameworks/Squirrel.framework"},
 	}
-	for _, tg := range Registry {
-		exp, ok := want[tg.ID]
-		if !ok {
-			t.Errorf("unexpected target id %q in registry", tg.ID)
-			continue
-		}
-		if !stringSlicesEqual(tg.PreservedNestedCodePaths, exp) {
-			t.Errorf("target %s PreservedNestedCodePaths mismatch: got %v want %v", tg.ID, tg.PreservedNestedCodePaths, exp)
+	for _, tg := range All() {
+		if !stringSlicesEqual(tg.PreservedNestedCodePaths, want[tg.ID]) {
+			t.Errorf("target %s PreservedNestedCodePaths mismatch: got %v want %v", tg.ID, tg.PreservedNestedCodePaths, want[tg.ID])
 		}
 	}
 }
 
 func TestComputerUsePolicyPerTarget(t *testing.T) {
-	for _, tg := range Registry {
+	for _, tg := range All() {
 		if tg.ID != "codex" {
 			if tg.ComputerUse != nil {
 				t.Errorf("target %s must not declare a Computer Use policy", tg.ID)
@@ -235,11 +232,7 @@ func TestComputerUsePolicyPerTarget(t *testing.T) {
 			t.Fatal("Codex Computer Use main helper must declare entitlements")
 		}
 		if !stringSlicesEqual(mainHelper.Entitlements.RequiredBooleanEntitlements, wantMainRequired) {
-			t.Errorf(
-				"Codex Computer Use main helper required entitlements mismatch: got %v want %v",
-				mainHelper.Entitlements.RequiredBooleanEntitlements,
-				wantMainRequired,
-			)
+			t.Errorf("Codex Computer Use main helper required entitlements mismatch: got %v want %v", mainHelper.Entitlements.RequiredBooleanEntitlements, wantMainRequired)
 		}
 	}
 }
@@ -261,7 +254,7 @@ func TestCodexComputerUseTeamRequirementPlists(t *testing.T) {
 	}
 }
 
-func stringSlicesEqual(a, b []string) bool {
+func stringSlicesEqual(a []string, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -274,7 +267,7 @@ func stringSlicesEqual(a, b []string) bool {
 }
 
 func lookupTarget(id string) (Target, error) {
-	for _, target := range Registry {
+	for _, target := range All() {
 		if target.ID == id {
 			return target, nil
 		}

@@ -1,50 +1,15 @@
 // Package paths centralizes filesystem locations used by desktop-via-clyde.
-// All paths are per-target unless they are global state or CA certificate
-// references.
 package paths
 
 import (
 	"os"
 	"path/filepath"
 
+	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
 
-// SignIdentityEnv and SignTeamIDEnv let a fork override the hardcoded
-// upstream-author defaults below without editing source. Both are read once at
-// package init; a CLI invocation reflects the values that were set in the
-// shell at launch time.
-const (
-	SignIdentityEnv = "DESKTOP_VIA_CLYDE_SIGN_IDENTITY"
-	SignTeamIDEnv   = "DESKTOP_VIA_CLYDE_SIGN_TEAM_ID"
-)
-
-const (
-	defaultSignIdentity = "Developer ID Application: Alex Goodkind (H3BMXM4W7H)"
-	defaultSignTeamID   = "H3BMXM4W7H"
-)
-
-// SignIdentity is the stable Developer ID used for local re-signing. We
-// resolve it to a SHA-1 hash at sign time to disambiguate between duplicate
-// keychain entries. Override with DESKTOP_VIA_CLYDE_SIGN_IDENTITY.
-var SignIdentity = lookupEnvOrDefault(SignIdentityEnv, defaultSignIdentity)
-
-// SignTeamID is the Apple team identifier for SignIdentity. Override with
-// DESKTOP_VIA_CLYDE_SIGN_TEAM_ID.
-var SignTeamID = lookupEnvOrDefault(SignTeamIDEnv, defaultSignTeamID)
-
-// StateRootEnv overrides the Application Support state root for isolated
-// upgrade smokes against copied app bundles.
-const StateRootEnv = "DESKTOP_VIA_CLYDE_STATE_ROOT"
-
-func lookupEnvOrDefault(key string, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
-}
-
-// Home returns the user's home directory, or an empty string if unavailable.
+// Home returns the current user's home directory when it is available.
 func Home() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -53,63 +18,77 @@ func Home() string {
 	return home
 }
 
-// StateRoot is the Application Support directory for the tool.
+// SignIdentity returns the configured local codesigning identity common name.
+func SignIdentity() string {
+	return config.Current().Signing.Identity
+}
+
+// SignTeamID returns the configured local Apple team identifier.
+func SignTeamID() string {
+	return config.Current().Signing.TeamID
+}
+
+// StateRoot returns the XDG-derived Clyde state root used by the harness.
 func StateRoot() string {
-	if override := os.Getenv(StateRootEnv); override != "" {
-		return override
-	}
-	return filepath.Join(Home(), "Library", "Application Support", "desktop-via-clyde")
+	return config.StateRoot()
 }
 
-// LogDir is the structured process log directory for desktop-via-clyde.
+// CacheRoot returns the XDG-derived Clyde cache root used by the harness.
+func CacheRoot() string {
+	return config.CacheRoot()
+}
+
+// LogDir returns the structured log directory for desktop-via-clyde.
 func LogDir() string {
-	if override := os.Getenv(StateRootEnv); override != "" {
-		return filepath.Join(override, "logs")
-	}
-	return filepath.Join(Home(), ".local", "state", "desktop-via-clyde", "logs")
+	return filepath.Join(StateRoot(), "logs")
 }
 
-// ProcessLogPath is the structured JSON log file for the main CLI process.
+// ProcessLogPath returns the main CLI JSONL log path.
 func ProcessLogPath() string {
 	return filepath.Join(LogDir(), "desktop-via-clyde.jsonl")
 }
 
-// BackupRoot holds per-target backup bundles.
-func BackupRoot() string {
-	return filepath.Join(StateRoot(), "backup")
+// StdioTeeLogDir returns the stdio tee log directory under the Clyde state root.
+func StdioTeeLogDir() string {
+	return filepath.Join(LogDir(), "stdio-tee")
 }
 
-// BackupDir returns the per-target directory under backup/.
+// BackupRoot returns the per-target backup root.
+func BackupRoot() string {
+	return filepath.Join(StateRoot(), "desktop-via-clyde-backup")
+}
+
+// BackupDir returns the backup directory for one target ID.
 func BackupDir(t targets.Target) string {
 	return filepath.Join(BackupRoot(), t.ID)
 }
 
-// BackupBundle returns the absolute path of the backed-up .app for target t.
+// BackupBundle returns the backup bundle path for one target.
 func BackupBundle(t targets.Target) string {
 	return filepath.Join(BackupDir(t), filepath.Base(t.AppPath))
 }
 
-// StateFile is the shared state.json that records every patched target.
+// StateFile returns the shared patch state file path.
 func StateFile() string {
-	return filepath.Join(StateRoot(), "state.json")
+	return filepath.Join(StateRoot(), "desktop-via-clyde-state.json")
 }
 
-// MacOSDir is <App>/Contents/MacOS for target t.
+// MacOSDir returns the bundle MacOS directory for one target.
 func MacOSDir(t targets.Target) string {
 	return filepath.Join(t.AppPath, "Contents", "MacOS")
 }
 
-// MainBinaryPath is <App>/Contents/MacOS/<ExecName> (the shim slot).
+// MainBinaryPath returns the primary executable path for one target.
 func MainBinaryPath(t targets.Target) string {
 	return filepath.Join(MacOSDir(t), t.ExecName)
 }
 
-// RealBinaryPath is <App>/Contents/MacOS/<ExecName>.real (the moved original).
+// RealBinaryPath returns the moved original executable path for one target.
 func RealBinaryPath(t targets.Target) string {
 	return filepath.Join(MacOSDir(t), t.ExecName+".real")
 }
 
-// InfoPlistPath is <App>/Contents/Info.plist.
+// InfoPlistPath returns the Info.plist path for one target.
 func InfoPlistPath(t targets.Target) string {
 	return filepath.Join(t.AppPath, "Contents", "Info.plist")
 }

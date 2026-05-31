@@ -8,12 +8,6 @@ import Foundation
 // policy, and execv's the real binary with launch-mode-appropriate proxy
 // settings.
 
-let proxyHost = "::1"
-let proxyPort: UInt16 = 48723
-let proxyURL = "http://[\(proxyHost)]:\(proxyPort)"
-let caCertificateEnv = "DESKTOP_VIA_CLYDE_CA_CERT"
-let noProxyValue = "localhost,127.0.0.1,::1,[::1]"
-
 enum TargetPolicy: String {
     case codex
     case `default`
@@ -24,6 +18,15 @@ struct EnvAction {
     let value: String?
 }
 
+struct ShimConfig {
+    var proxyHost: String
+    var proxyPort: UInt16
+    var caCertificate: String
+    var noProxy: String
+    var launchWorkingDirectory: String
+    var targetPolicies: [String: TargetPolicy]
+}
+
 func homeDir() -> String {
     if let h = ProcessInfo.processInfo.environment["HOME"], !h.isEmpty {
         return h
@@ -31,22 +34,146 @@ func homeDir() -> String {
     return NSHomeDirectory()
 }
 
-func caCertificatePath() -> String {
-    if let override = ProcessInfo.processInfo.environment[caCertificateEnv], !override.isEmpty {
-        return override
-    }
-    let xdg = ProcessInfo.processInfo.environment["XDG_STATE_HOME"] ?? ""
-    let stateBase: String
-    if !xdg.isEmpty {
-        stateBase = xdg
-    } else {
-        stateBase = "\(homeDir())/.local/state"
-    }
-    return "\(stateBase)/clyde/mitm/ca/clyde-mitm-ca.crt"
+func defaultShimConfig() -> ShimConfig {
+    let stateBase = defaultStateRoot()
+    return ShimConfig(
+        proxyHost: "::1",
+        proxyPort: 48723,
+        caCertificate: "\(stateBase)/mitm/ca/clyde-mitm-ca.crt",
+        noProxy: "localhost,127.0.0.1,::1,[::1]",
+        launchWorkingDirectory: homeDir(),
+        targetPolicies: [
+            "cursor": .default,
+            "codex": .codex,
+            "claude": .default,
+        ]
+    )
 }
 
-func launchWorkingDirectory() -> String {
-    homeDir()
+func configPath() -> String {
+    if let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"], !xdg.isEmpty {
+        return "\(xdg)/desktop-via-clyde/config.toml"
+    }
+    return "\(homeDir())/.config/desktop-via-clyde/config.toml"
+}
+
+func defaultStateRoot() -> String {
+    if let xdg = ProcessInfo.processInfo.environment["XDG_STATE_HOME"], !xdg.isEmpty {
+        return "\(xdg)/clyde"
+    }
+    return "\(homeDir())/.local/state/clyde"
+}
+
+func loadShimConfig() throws -> ShimConfig {
+    let path = configPath()
+    guard FileManager.default.fileExists(atPath: path) else {
+        throw NSError(domain: "desktop-via-clyde", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "Config file missing at \(path)",
+        ])
+    }
+    let contents = try String(contentsOfFile: path, encoding: .utf8)
+    var config = defaultShimConfig()
+    var section: [String] = []
+
+    for rawLine in contents.components(separatedBy: .newlines) {
+        let line = stripComments(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+        if line.isEmpty {
+            continue
+        }
+        if line.hasPrefix("[") && line.hasSuffix("]") {
+            let name = String(line.dropFirst().dropLast())
+            section = name.split(separator: ".").map(String.init)
+            continue
+        }
+        guard let separator = line.firstIndex(of: "=") else {
+            continue
+        }
+        let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if section == ["proxy"] {
+            switch key {
+            case "host":
+                config.proxyHost = try parseStringValue(value)
+            case "port":
+                config.proxyPort = try parsePortValue(value)
+            case "ca_certificate":
+                config.caCertificate = try parseStringValue(value)
+            case "no_proxy":
+                config.noProxy = try parseStringValue(value)
+            case "launch_working_directory":
+                config.launchWorkingDirectory = try parseStringValue(value)
+            default:
+                break
+            }
+            continue
+        }
+
+        if section.count == 2, section[0] == "apps", key == "target_policy" {
+            let appID = section[1].lowercased()
+            config.targetPolicies[appID] = parseTargetPolicy(try parseStringValue(value))
+        }
+    }
+
+    return config
+}
+
+func stripComments(_ line: String) -> String {
+    var inQuotes = false
+    var escaped = false
+    var output = ""
+    for character in line {
+        if character == "\\" && inQuotes {
+            escaped.toggle()
+            output.append(character)
+            continue
+        }
+        if character == "\"" && !escaped {
+            inQuotes.toggle()
+            output.append(character)
+            continue
+        }
+        escaped = false
+        if character == "#" && !inQuotes {
+            break
+        }
+        output.append(character)
+    }
+    return output
+}
+
+func parseStringValue(_ value: String) throws -> String {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.count >= 2, trimmed.first == "\"", trimmed.last == "\"" else {
+        throw NSError(domain: "desktop-via-clyde", code: 2, userInfo: [
+            NSLocalizedDescriptionKey: "Expected quoted TOML string, got \(trimmed)",
+        ])
+    }
+    let inner = trimmed.dropFirst().dropLast()
+    return String(inner)
+        .replacingOccurrences(of: "\\\"", with: "\"")
+        .replacingOccurrences(of: "\\\\", with: "\\")
+}
+
+func parsePortValue(_ value: String) throws -> UInt16 {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let parsed = UInt16(trimmed) else {
+        throw NSError(domain: "desktop-via-clyde", code: 3, userInfo: [
+            NSLocalizedDescriptionKey: "Expected TOML port number, got \(trimmed)",
+        ])
+    }
+    return parsed
+}
+
+func parseTargetPolicy(_ value: String) -> TargetPolicy {
+    if value.lowercased() == "codex" {
+        return .codex
+    }
+    return .default
+}
+
+func proxyURL(_ config: ShimConfig) -> String {
+    return "http://[\(config.proxyHost)]:\(config.proxyPort)"
 }
 
 // resolveSelfPath returns the absolute, symlink-resolved path of the running
@@ -60,7 +187,6 @@ func resolveSelfPath() -> String? {
         return nil
     }
     let raw = String(cString: buf)
-    // realpath to collapse any symlink in the bundle path.
     var resolved = [CChar](repeating: 0, count: Int(PATH_MAX))
     if realpath(raw, &resolved) == nil {
         return raw
@@ -71,14 +197,14 @@ func resolveSelfPath() -> String? {
 func showAlertAndExit(_ message: String, _ exitCode: Int32) -> Never {
     let escaped = message.replacingOccurrences(of: "\"", with: "\\\"")
     let script = "display alert \"desktop-via-clyde shim\" message \"\(escaped)\" as critical"
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-    p.arguments = ["-e", script]
-    p.standardOutput = FileHandle.nullDevice
-    p.standardError = FileHandle.nullDevice
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    process.arguments = ["-e", script]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
     do {
-        try p.run()
-        p.waitUntilExit()
+        try process.run()
+        process.waitUntilExit()
     } catch {
         // best-effort dialog; fall through to stderr write and exit
     }
@@ -104,92 +230,101 @@ func tcpReachable(host: String, port: UInt16, timeoutMs: Int) -> Bool {
     }
     defer { freeaddrinfo(result) }
     var info = result
-    while let cur = info {
-        let fd = socket(cur.pointee.ai_family, cur.pointee.ai_socktype, cur.pointee.ai_protocol)
-        if fd >= 0 {
-            var flags = fcntl(fd, F_GETFL, 0)
-            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
-            let connectResult = connect(fd, cur.pointee.ai_addr, cur.pointee.ai_addrlen)
+    while let current = info {
+        let fileDescriptor = socket(current.pointee.ai_family, current.pointee.ai_socktype, current.pointee.ai_protocol)
+        if fileDescriptor >= 0 {
+            var flags = fcntl(fileDescriptor, F_GETFL, 0)
+            _ = fcntl(fileDescriptor, F_SETFL, flags | O_NONBLOCK)
+            let connectResult = connect(fileDescriptor, current.pointee.ai_addr, current.pointee.ai_addrlen)
             if connectResult == 0 {
-                close(fd)
+                close(fileDescriptor)
                 return true
             }
             if errno == EINPROGRESS {
-                var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-                let ready = poll(&pfd, 1, Int32(timeoutMs))
+                var pollDescriptor = pollfd(fd: fileDescriptor, events: Int16(POLLOUT), revents: 0)
+                let ready = poll(&pollDescriptor, 1, Int32(timeoutMs))
                 if ready > 0 {
-                    var soError: Int32 = 0
-                    var len = socklen_t(MemoryLayout<Int32>.size)
-                    getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &len)
-                    close(fd)
-                    if soError == 0 {
+                    var socketError: Int32 = 0
+                    var length = socklen_t(MemoryLayout<Int32>.size)
+                    getsockopt(fileDescriptor, SOL_SOCKET, SO_ERROR, &socketError, &length)
+                    close(fileDescriptor)
+                    if socketError == 0 {
                         return true
                     }
                 } else {
-                    close(fd)
+                    close(fileDescriptor)
                 }
             } else {
-                close(fd)
+                close(fileDescriptor)
             }
             flags = 0
         }
-        info = cur.pointee.ai_next
+        info = current.pointee.ai_next
     }
     return false
 }
 
-func runPreflight() {
-    let ca = caCertificatePath()
-    if !FileManager.default.fileExists(atPath: ca) {
-        showAlertAndExit("CA certificate missing at \(ca). Start clyde first.", 11)
+func runPreflight(_ config: ShimConfig) {
+    if !FileManager.default.fileExists(atPath: config.caCertificate) {
+        showAlertAndExit("CA certificate missing at \(config.caCertificate). Start clyde first.", 11)
     }
-    if !tcpReachable(host: proxyHost, port: proxyPort, timeoutMs: 500) {
-        showAlertAndExit("Cannot reach clyde MITM proxy at [\(proxyHost)]:\(proxyPort). Start clyde first.", 12)
+    if !tcpReachable(host: config.proxyHost, port: config.proxyPort, timeoutMs: 500) {
+        showAlertAndExit("Cannot reach clyde MITM proxy at [\(config.proxyHost)]:\(config.proxyPort). Start clyde first.", 12)
     }
 }
 
-func targetPolicy(argv0: String, selfPath: String) -> TargetPolicy {
+func targetKey(argv0: String, selfPath: String) -> String {
     let executableName = argv0.lowercased()
     let executablePath = selfPath.lowercased()
     if executableName == "codex" || executablePath.contains("/codex.app/") {
-        return .codex
+        return "codex"
     }
-    return .default
+    if executableName == "cursor" || executablePath.contains("/cursor.app/") {
+        return "cursor"
+    }
+    if executableName == "claude" || executablePath.contains("/claude.app/") {
+        return "claude"
+    }
+    return "cursor"
 }
 
-func envActions(policy: TargetPolicy, ca: String) -> [EnvAction] {
+func targetPolicy(argv0: String, selfPath: String, config: ShimConfig) -> TargetPolicy {
+    return config.targetPolicies[targetKey(argv0: argv0, selfPath: selfPath)] ?? .default
+}
+
+func envActions(policy: TargetPolicy, config: ShimConfig) -> [EnvAction] {
+    let proxy = proxyURL(config)
     switch policy {
     case .codex:
         return [
-            EnvAction(key: "CODEX_CA_CERTIFICATE", value: ca),
-            EnvAction(key: "NODE_EXTRA_CA_CERTS", value: ca),
+            EnvAction(key: "CODEX_CA_CERTIFICATE", value: config.caCertificate),
+            EnvAction(key: "NODE_EXTRA_CA_CERTS", value: config.caCertificate),
             EnvAction(key: "NODE_OPTIONS", value: "--use-openssl-ca"),
             EnvAction(key: "NODE_TLS_REJECT_UNAUTHORIZED", value: "0"),
-            EnvAction(key: "HTTPS_PROXY", value: proxyURL),
-            EnvAction(key: "HTTP_PROXY", value: proxyURL),
-            EnvAction(key: "ALL_PROXY", value: proxyURL),
-            EnvAction(key: "NO_PROXY", value: noProxyValue),
-            EnvAction(key: "no_proxy", value: noProxyValue),
+            EnvAction(key: "HTTPS_PROXY", value: proxy),
+            EnvAction(key: "HTTP_PROXY", value: proxy),
+            EnvAction(key: "ALL_PROXY", value: proxy),
+            EnvAction(key: "NO_PROXY", value: config.noProxy),
+            EnvAction(key: "no_proxy", value: config.noProxy),
             EnvAction(key: "SSL_CERT_FILE", value: nil),
         ]
     case .default:
         return [
-            EnvAction(key: "NODE_EXTRA_CA_CERTS", value: ca),
-            EnvAction(key: "SSL_CERT_FILE", value: ca),
+            EnvAction(key: "NODE_EXTRA_CA_CERTS", value: config.caCertificate),
+            EnvAction(key: "SSL_CERT_FILE", value: config.caCertificate),
             EnvAction(key: "NODE_OPTIONS", value: "--use-openssl-ca"),
             EnvAction(key: "NODE_TLS_REJECT_UNAUTHORIZED", value: "0"),
-            EnvAction(key: "HTTPS_PROXY", value: proxyURL),
-            EnvAction(key: "HTTP_PROXY", value: proxyURL),
-            EnvAction(key: "ALL_PROXY", value: proxyURL),
-            EnvAction(key: "NO_PROXY", value: noProxyValue),
-            EnvAction(key: "no_proxy", value: noProxyValue),
+            EnvAction(key: "HTTPS_PROXY", value: proxy),
+            EnvAction(key: "HTTP_PROXY", value: proxy),
+            EnvAction(key: "ALL_PROXY", value: proxy),
+            EnvAction(key: "NO_PROXY", value: config.noProxy),
+            EnvAction(key: "no_proxy", value: config.noProxy),
         ]
     }
 }
 
-func setEnvVars(policy: TargetPolicy) {
-    let ca = caCertificatePath()
-    for action in envActions(policy: policy, ca: ca) {
+func setEnvVars(policy: TargetPolicy, config: ShimConfig) {
+    for action in envActions(policy: policy, config: config) {
         if let value = action.value {
             setenv(action.key, value, 1)
         } else {
@@ -202,11 +337,11 @@ func isElectronRunAsNode() -> Bool {
     ProcessInfo.processInfo.environment["ELECTRON_RUN_AS_NODE"] == "1"
 }
 
-func proxyArguments(electronRunAsNode: Bool) -> [String] {
+func proxyArguments(electronRunAsNode: Bool, config: ShimConfig) -> [String] {
     if electronRunAsNode {
         return []
     }
-    return ["--proxy-server=\(proxyURL)", "--ignore-certificate-errors"]
+    return ["--proxy-server=\(proxyURL(config))", "--ignore-certificate-errors"]
 }
 
 func main() {
@@ -215,15 +350,21 @@ func main() {
     }
     let target = selfPath + ".real"
     let argv0 = (selfPath as NSString).lastPathComponent
-    let policy = targetPolicy(argv0: argv0, selfPath: selfPath)
+    let shimConfig: ShimConfig
+    do {
+        shimConfig = try loadShimConfig()
+    } catch {
+        showAlertAndExit("Could not load config: \(error.localizedDescription)", 10)
+    }
+    let policy = targetPolicy(argv0: argv0, selfPath: selfPath, config: shimConfig)
 
     let args = CommandLine.arguments
     let forwarded = Array(args.dropFirst())
     let electronRunAsNode = isElectronRunAsNode()
 
     if forwarded.contains("--clyde-dry-run") {
-        setEnvVars(policy: policy)
-        let injected = proxyArguments(electronRunAsNode: electronRunAsNode)
+        setEnvVars(policy: policy, config: shimConfig)
+        let injected = proxyArguments(electronRunAsNode: electronRunAsNode, config: shimConfig)
         let passThrough = forwarded.filter { $0 != "--clyde-dry-run" }
         let newArgv = [argv0] + injected + passThrough
         print("would exec \(argv0).real")
@@ -232,9 +373,9 @@ func main() {
         print("argv0: \(argv0)")
         print("target-policy: \(policy.rawValue)")
         print("electron-run-as-node: \(electronRunAsNode)")
-        print("launch-cwd: \(launchWorkingDirectory())")
+        print("launch-cwd: \(shimConfig.launchWorkingDirectory)")
         print("argv: \(newArgv)")
-        for action in envActions(policy: policy, ca: caCertificatePath()) {
+        for action in envActions(policy: policy, config: shimConfig) {
             if let value = action.value {
                 print("env \(action.key)=\(value)")
             } else {
@@ -244,34 +385,32 @@ func main() {
         exit(0)
     }
 
-    runPreflight()
-    setEnvVars(policy: policy)
-    let launchCwd = launchWorkingDirectory()
+    runPreflight(shimConfig)
+    setEnvVars(policy: policy, config: shimConfig)
+    let launchCwd = shimConfig.launchWorkingDirectory
     if launchCwd.isEmpty {
         showAlertAndExit("Could not resolve launch working directory", 15)
     }
-    let chdirResult = launchCwd.withCString { pathPtr in
-        chdir(pathPtr)
+    let chdirResult = launchCwd.withCString { pathPointer in
+        chdir(pathPointer)
     }
     if chdirResult != 0 {
         let err = String(cString: strerror(errno))
         showAlertAndExit("Could not change working directory to \(launchCwd): \(err)", 16)
     }
 
-    let injected = proxyArguments(electronRunAsNode: electronRunAsNode)
+    let injected = proxyArguments(electronRunAsNode: electronRunAsNode, config: shimConfig)
     let newArgv = [argv0] + injected + forwarded
 
-    // Build argv as null-terminated C array for execv.
     let cArgs: [UnsafeMutablePointer<CChar>?] = newArgv.map { strdup($0) }
     var cArgsWithNull = cArgs
     cArgsWithNull.append(nil)
-    let rc = target.withCString { pathPtr in
-        execv(pathPtr, cArgsWithNull)
+    let result = target.withCString { pathPointer in
+        execv(pathPointer, cArgsWithNull)
     }
-    // execv only returns on error.
     let err = String(cString: strerror(errno))
     FileHandle.standardError.write(Data("desktop-via-clyde shim: execv(\(target)) failed: \(err)\n".utf8))
-    exit(rc == 0 ? 13 : 13)
+    exit(result == 0 ? 13 : 13)
 }
 
 main()

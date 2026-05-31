@@ -33,9 +33,8 @@ import (
 
 // Options controls one upgrade invocation.
 type Options struct {
-	// Channel selects the upstream release channel. Empty defaults to "stable".
-	// Cursor uses this value directly. Codex and Claude ignore it because their
-	// endpoints encode channel in the target metadata.
+	// Channel selects the upstream release channel when the target updater
+	// declares channels.
 	Channel string
 	// DryRun prints every step without modifying the bundle or the filesystem.
 	DryRun bool
@@ -104,9 +103,9 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	}
 	upgradeLog.InfoContext(ctx, "upgrade.start", "target", t.ID, "app_path", t.AppPath, "dry_run", opts.DryRun)
 	r := patch.NewRunner(ctx, opts.DryRun, opts.Out)
-	channel := opts.Channel
-	if channel == "" {
-		channel = "stable"
+	channel, err := t.Updater.ResolveChannel(opts.Channel)
+	if err != nil {
+		return logUpgradeError(ctx, "upgrade.resolve_channel_failed", fmt.Errorf("resolve update channel: %w", err))
 	}
 
 	if _, err := os.Stat(t.AppPath); err != nil {
@@ -116,7 +115,11 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	if err != nil {
 		return err
 	}
-	notef(r, fmt.Sprintf("target=%s current version=%s channel=%s updater=%s", t.ID, currentVersion, channel, t.Updater.Kind))
+	if channel == "" {
+		notef(r, fmt.Sprintf("target=%s current version=%s updater=%s", t.ID, currentVersion, t.Updater.Kind))
+	} else {
+		notef(r, fmt.Sprintf("target=%s current version=%s channel=%s updater=%s", t.ID, currentVersion, channel, t.Updater.Kind))
+	}
 
 	m, err := fetchManifest(ctx, t, currentVersion, channel)
 	if err != nil {
@@ -207,7 +210,7 @@ func fetchManifest(ctx context.Context, t targets.Target, currentVersion, channe
 	case targets.UpdaterCursorManifest:
 		return fetchCursorManifest(ctx, t, currentVersion, channel)
 	case targets.UpdaterSparkleAppcast:
-		return fetchSparkleManifest(ctx, t)
+		return fetchSparkleManifest(ctx, t, channel)
 	case targets.UpdaterClaudeSquirrel:
 		return fetchClaudeSquirrelManifest(ctx, t)
 	default:
@@ -238,8 +241,12 @@ func fetchCursorManifest(ctx context.Context, t targets.Target, currentVersion, 
 	return parseCursorManifest(body)
 }
 
-func fetchSparkleManifest(ctx context.Context, t targets.Target) (updateManifest, error) {
-	body, err := fetchURL(ctx, t.Updater.URL, "desktop-via-clyde/upgrade", "application/xml", 2<<20)
+func fetchSparkleManifest(ctx context.Context, t targets.Target, channel string) (updateManifest, error) {
+	endpoint, err := t.Updater.URLWithChannel(channel)
+	if err != nil {
+		return updateManifest{}, logUpgradeError(ctx, "upgrade.sparkle_updater_url_failed", fmt.Errorf("resolve Sparkle updater URL: %w", err))
+	}
+	body, err := fetchURL(ctx, endpoint, "desktop-via-clyde/upgrade", "application/xml", 2<<20)
 	if err != nil {
 		return updateManifest{}, err
 	}
@@ -403,8 +410,8 @@ func bootstrapClaudeOriginalDR(ctx context.Context, t targets.Target) (string, e
 }
 
 func verifyOriginalRequirementIsUpstream(t targets.Target, dr string) (string, error) {
-	if strings.Contains(dr, paths.SignTeamID) {
-		return "", logUpgradeErrorNoContext("upgrade.original_dr_identifies_local_team", fmt.Errorf("target=%s DesignatedRequirement identifies local signing team %s, not upstream", t.ID, paths.SignTeamID))
+	if strings.Contains(dr, paths.SignTeamID()) {
+		return "", logUpgradeErrorNoContext("upgrade.original_dr_identifies_local_team", fmt.Errorf("target=%s DesignatedRequirement identifies local signing team %s, not upstream", t.ID, paths.SignTeamID()))
 	}
 	return dr, nil
 }

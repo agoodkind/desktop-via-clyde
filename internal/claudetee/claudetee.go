@@ -29,7 +29,9 @@ import (
 	"sort"
 	"strings"
 
+	"goodkind.io/desktop-via-clyde/internal/config"
 	shimembed "goodkind.io/desktop-via-clyde/internal/embed"
+	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/signing"
 )
 
@@ -44,10 +46,6 @@ const AppSupportRel = "Library/Application Support/Claude/claude-code"
 // executable. The "claude.app" wrapper is a tiny app bundle that holds the
 // binary so Launch Services can spawn it cleanly.
 const BundledCLIRel = "claude.app/Contents/MacOS/claude"
-
-// DefaultLogDirRel is the default log directory under $HOME. The Go shim
-// reads DVC_STDIO_TEE_DIR first; this is the fallback when it is unset.
-const DefaultLogDirRel = ".local/state/desktop-via-clyde/stdio-tee"
 
 // Options shapes a single tee install, uninstall, or status call.
 type Options struct {
@@ -93,15 +91,11 @@ func (o Options) home() (string, error) {
 	return homeDir, nil
 }
 
-func (o Options) logDir() (string, error) {
+func (o Options) logDir() string {
 	if o.LogDir != "" {
-		return o.LogDir, nil
+		return o.LogDir
 	}
-	home, err := o.home()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, DefaultLogDirRel), nil
+	return paths.StdioTeeLogDir()
 }
 
 // ResolveBundledCLIPath returns the absolute path to the claude CLI inside
@@ -111,6 +105,13 @@ func (o Options) logDir() (string, error) {
 // VersionDir narrows the choice.
 func ResolveBundledCLIPath(opts Options) (string, error) {
 	claudeteeLog.Debug("claudetee.resolve_bundled_cli_path")
+	teeConfig := config.Current().Apps.Claude.BundledCLITee
+	if opts.BundledCLIPath == "" {
+		opts.BundledCLIPath = teeConfig.BundledCLIPath
+	}
+	if opts.VersionDir == "" {
+		opts.VersionDir = teeConfig.VersionDir
+	}
 	if opts.BundledCLIPath != "" {
 		return opts.BundledCLIPath, nil
 	}
@@ -277,11 +278,7 @@ func resolveInstallTarget(ctx context.Context, opts Options, log *slog.Logger) (
 		return "", "", "", fmt.Errorf("stat %s: %w", realPath, err)
 	}
 
-	logDirForDisplay, err := opts.logDir()
-	if err != nil {
-		log.ErrorContext(ctx, "claudetee.install.log_dir_failed", "err", err)
-		return "", "", "", fmt.Errorf("resolve log dir: %w", err)
-	}
+	logDirForDisplay := opts.logDir()
 	return bundled, realPath, logDirForDisplay, nil
 }
 

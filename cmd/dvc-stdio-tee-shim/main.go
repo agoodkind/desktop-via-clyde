@@ -33,11 +33,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"goodkind.io/desktop-via-clyde/internal/paths"
 )
 
 const (
-	logDirEnv      = "DVC_STDIO_TEE_DIR"
-	defaultLogRel  = ".local/state/desktop-via-clyde/stdio-tee"
 	logDirPerms    = 0o700
 	logFilePerms   = 0o600
 	signalForwards = "SIGINT SIGTERM SIGHUP SIGUSR1 SIGUSR2"
@@ -51,14 +51,7 @@ type invocationLogs struct {
 }
 
 func logDirPath() string {
-	if v := os.Getenv(logDirEnv); v != "" {
-		return v
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		home = "/tmp"
-	}
-	return filepath.Join(home, defaultLogRel)
+	return paths.StdioTeeLogDir()
 }
 
 // resolveSelfRealPath returns the absolute, symlink-resolved path of the

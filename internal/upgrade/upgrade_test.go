@@ -111,6 +111,46 @@ func TestArchiveNameFallback(t *testing.T) {
 	}
 }
 
+func TestCursorUpdaterDefaultChannelIsDev(t *testing.T) {
+	tg := lookupConfiguredTarget(t, "cursor")
+	got, err := tg.Updater.ResolveChannel("")
+	if err != nil {
+		t.Fatalf("ResolveChannel: %v", err)
+	}
+	if got != "dev" {
+		t.Fatalf("default cursor channel = %q, want dev", got)
+	}
+}
+
+func TestCodexUpdaterDefaultChannelIsBeta(t *testing.T) {
+	tg := lookupConfiguredTarget(t, "codex")
+	got, err := tg.Updater.ResolveChannel("")
+	if err != nil {
+		t.Fatalf("ResolveChannel: %v", err)
+	}
+	if got != "beta" {
+		t.Fatalf("default codex channel = %q, want beta", got)
+	}
+	url, err := tg.Updater.URLWithChannel(got)
+	if err != nil {
+		t.Fatalf("URLForChannel: %v", err)
+	}
+	if !strings.Contains(url, "codex-app-beta") {
+		t.Fatalf("default codex channel URL = %q, want beta appcast", url)
+	}
+}
+
+func TestClaudeUpdaterDoesNotRequireChannel(t *testing.T) {
+	tg := lookupConfiguredTarget(t, "claude")
+	got, err := tg.Updater.ResolveChannel("")
+	if err != nil {
+		t.Fatalf("ResolveChannel: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("default claude channel = %q, want empty", got)
+	}
+}
+
 func TestLoadOriginalDRUsesStateEntry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	tg := targets.Target{
@@ -123,7 +163,7 @@ func TestLoadOriginalDRUsesStateEntry(t *testing.T) {
 			"claude": {
 				PatchedVersion:                "1.8089.1",
 				PatchedAt:                     time.Unix(0, 0).UTC(),
-				SignIdentity:                  paths.SignIdentity,
+				SignIdentity:                  paths.SignIdentity(),
 				OriginalDesignatedRequirement: anthropicRequirement,
 			},
 		},
@@ -185,7 +225,7 @@ func TestLoadOriginalDRRejectsLocalRequirementBootstrap(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected local signing requirement error")
 	}
-	if !strings.Contains(err.Error(), paths.SignTeamID) {
+	if !strings.Contains(err.Error(), paths.SignTeamID()) {
 		t.Fatalf("error = %q, want local team id", err.Error())
 	}
 }
@@ -244,6 +284,17 @@ func replaceReadDesignatedRequirement(fn func(context.Context, string) (string, 
 	return func() {
 		readDesignatedRequirement = original
 	}
+}
+
+func lookupConfiguredTarget(t *testing.T, id string) targets.Target {
+	t.Helper()
+	for _, target := range targets.All() {
+		if target.ID == id {
+			return target
+		}
+	}
+	t.Fatalf("missing target %q", id)
+	return targets.Target{}
 }
 
 func TestVerifySparkleSignatureAllowsExtractedBundleKeyRotation(t *testing.T) {

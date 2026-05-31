@@ -103,7 +103,7 @@ func validateComputerUsePolicy(policy targets.ComputerUsePolicy) (string, error)
 	if policy.AuthPluginExecutable == "" {
 		return "", fmt.Errorf("codex computer use policy missing authorization plugin executable")
 	}
-	localTeamID, err := teamIDFromSignIdentity(paths.SignIdentity)
+	localTeamID, err := teamIDFromSignIdentity(paths.SignIdentity())
 	if err != nil {
 		return "", err
 	}

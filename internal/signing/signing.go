@@ -20,13 +20,13 @@ var (
 )
 
 // ResolveIdentity returns the SHA-1 hash of the first codesigning identity
-// whose common name matches paths.SignIdentity. The keychain may hold multiple
+// whose common name matches paths.SignIdentity(). The keychain may hold multiple
 // certs with the same CN, and codesign rejects an ambiguous CN, so callers sign
 // with the resolved hash.
 func ResolveIdentity(ctx context.Context, dryRun bool) (string, error) {
 	signingLog.DebugContext(ctx, "signing.resolve_identity", "dry_run", dryRun)
 	if dryRun {
-		return paths.SignIdentity, nil
+		return paths.SignIdentity(), nil
 	}
 	cmd := exec.CommandContext(ctx, "/usr/bin/security", "find-identity", "-v", "-p", "codesigning")
 	out, err := cmd.Output()
@@ -40,7 +40,7 @@ func ResolveIdentity(ctx context.Context, dryRun bool) (string, error) {
 		if m == nil {
 			continue
 		}
-		if m[2] == paths.SignIdentity {
+		if m[2] == paths.SignIdentity() {
 			return m[1], nil
 		}
 	}
@@ -48,8 +48,8 @@ func ResolveIdentity(ctx context.Context, dryRun bool) (string, error) {
 		signingLog.ErrorContext(ctx, "signing.resolve_identity.scan_failed", "err", err)
 		return "", fmt.Errorf("scan security find-identity output: %w", err)
 	}
-	signingLog.ErrorContext(ctx, "signing.resolve_identity.not_found", "identity", paths.SignIdentity, "err", errors.New("codesigning identity not found"))
-	return "", fmt.Errorf("no codesigning identity matches %q", paths.SignIdentity)
+	signingLog.ErrorContext(ctx, "signing.resolve_identity.not_found", "identity", paths.SignIdentity(), "err", errors.New("codesigning identity not found"))
+	return "", fmt.Errorf("no codesigning identity matches %q", paths.SignIdentity())
 }
 
 // RuntimeEntitlementsArgs returns the standard hardened-runtime codesign
