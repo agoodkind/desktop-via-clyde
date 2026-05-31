@@ -78,9 +78,17 @@ func MainBinaryPath(t targets.Target) string {
 	return filepath.Join(MacOSDir(t), t.ExecName)
 }
 
-// LaunchPolicyPath returns the installed launch policy path for one target.
+// ResourcesDir returns the bundle Resources directory for one target.
+func ResourcesDir(t targets.Target) string {
+	return filepath.Join(t.AppPath, "Contents", "Resources")
+}
+
+// LaunchPolicyPath returns the installed launch policy path for one target. The
+// policy lives in Contents/Resources, not Contents/MacOS: codesign seals files
+// in Resources as ordinary resources, while a non-Mach-O file beside the
+// executable in MacOS breaks the bundle signature.
 func LaunchPolicyPath(t targets.Target) string {
-	return MainBinaryPath(t) + ".launch-policy.json"
+	return filepath.Join(ResourcesDir(t), t.ExecName+".launch-policy.json")
 }
 
 // RealBinaryPath returns the moved original executable path for one target.

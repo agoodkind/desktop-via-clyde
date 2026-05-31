@@ -338,6 +338,9 @@ func stepInstallShim(ctx context.Context, r *Runner, t targets.Target) error {
 	if err != nil {
 		return logPatchError(ctx, "patch.launch_policy_encode_failed", fmt.Errorf("encode launch policy for %s: %w", t.ID, err))
 	}
+	if err := os.MkdirAll(filepath.Dir(policyPath), 0o755); err != nil {
+		return logPatchError(ctx, "patch.launch_policy_mkdir_failed", fmt.Errorf("create launch policy dir for %s: %w", t.ID, err))
+	}
 	if err := os.WriteFile(policyPath, policyBytes, 0o600); err != nil {
 		return logPatchError(ctx, "patch.launch_policy_write_failed", fmt.Errorf("write launch policy %s: %w", policyPath, err))
 	}
