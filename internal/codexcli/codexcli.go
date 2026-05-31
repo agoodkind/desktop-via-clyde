@@ -20,15 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/signing"
-)
-
-const (
-	codexRepo        = "openai/codex"
-	packageBinaryRel = "bin/codex"
 )
 
 var codexcliLog = slog.With("component", "desktop-via-clyde", "subcomponent", "codex-cli")
@@ -48,23 +42,31 @@ var resolveCodexV8EnvScript string
 
 // InstallOptions controls one Codex CLI source build and install.
 type InstallOptions struct {
-	DryRun       bool
-	SourceDir    string
-	Ref          string
-	InstallDir   string
-	CodexHome    string
-	BuildMode    string
-	NoSccache    bool
-	ForceRebuild bool
-	Out          io.Writer
+	DryRun            bool
+	Repo              string
+	SourceDir         string
+	Ref               string
+	PackageDir        string
+	PackageVariant    string
+	PackageBinaryPath string
+	CommandName       string
+	InstallDir        string
+	PackageHome       string
+	BuildMode         string
+	NoSccache         bool
+	ForceRebuild      bool
+	Out               io.Writer
+	Trace             *patch.Trace
 }
 
 // StatusOptions controls status output.
 type StatusOptions struct {
-	SourceDir  string
-	InstallDir string
-	CodexHome  string
-	Out        io.Writer
+	SourceDir         string
+	InstallDir        string
+	PackageHome       string
+	CommandName       string
+	PackageBinaryPath string
+	Out               io.Writer
 }
 
 type packageMetadata struct {
@@ -73,31 +75,51 @@ type packageMetadata struct {
 	Variant string `json:"variant"`
 }
 
-// DefaultSourceDir returns the managed shallow Codex source checkout path.
-func DefaultSourceDir() string {
-	return filepath.Join(paths.CacheRoot(), "desktop-via-clyde", "codex", "source")
+func validateInstallOptions(opts InstallOptions) error {
+	missing := requiredOptionName(map[string]string{
+		"repo":                opts.Repo,
+		"source-dir":          opts.SourceDir,
+		"ref":                 opts.Ref,
+		"package-dir":         opts.PackageDir,
+		"package-variant":     opts.PackageVariant,
+		"package-binary-path": opts.PackageBinaryPath,
+		"command-name":        opts.CommandName,
+		"install-dir":         opts.InstallDir,
+		"package-home":        opts.PackageHome,
+		"build-mode":          opts.BuildMode,
+	})
+	if missing != "" {
+		return fmt.Errorf("%s is required", missing)
+	}
+	return nil
 }
 
-// DefaultInstallDir returns the visible command directory.
-func DefaultInstallDir() string {
-	return config.Current().CLI.Codex.InstallDir
+func validateStatusOptions(opts StatusOptions) error {
+	missing := requiredOptionName(map[string]string{
+		"source-dir":          opts.SourceDir,
+		"install-dir":         opts.InstallDir,
+		"package-home":        opts.PackageHome,
+		"command-name":        opts.CommandName,
+		"package-binary-path": opts.PackageBinaryPath,
+	})
+	if missing != "" {
+		return fmt.Errorf("%s is required", missing)
+	}
+	return nil
 }
 
-// DefaultCodexHome returns the Codex home used by upstream standalone installs.
-func DefaultCodexHome() string {
-	return config.Current().CLI.Codex.CodexHome
-}
-
-// DefaultRef returns the default upstream source ref.
-func DefaultRef() string {
-	return config.Current().CLI.Codex.SourceRef
-}
-
-// DefaultBuildMode returns the default build mode for Codex CLI installs.
-// local-fast is the default because the resulting binary is the everyday local
-// Codex; pass `--build-mode release` to match the upstream release profile.
-func DefaultBuildMode() string {
-	return config.Current().CLI.Codex.BuildMode
+func requiredOptionName(values map[string]string) string {
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if strings.TrimSpace(values[name]) == "" {
+			return name
+		}
+	}
+	return ""
 }
 
 // Install clones or updates Codex, builds an upstream package layout, signs the
@@ -107,8 +129,12 @@ func Install(ctx context.Context, opts InstallOptions) error {
 	if opts.Out == nil {
 		opts.Out = os.Stdout
 	}
-	opts = withInstallDefaults(opts)
+	if err := validateInstallOptions(opts); err != nil {
+		log.ErrorContext(ctx, "codexcli.install.invalid_options", "err", err)
+		return err
+	}
 	r := patch.NewRunner(ctx, opts.DryRun, opts.Out)
+	r.Trace = opts.Trace
 	buildMode, err := parseBuildMode(opts.BuildMode)
 	if err != nil {
 		log.ErrorContext(ctx, "codexcli.install.parse_build_mode_failed", "err", err)
@@ -120,8 +146,8 @@ func Install(ctx context.Context, opts InstallOptions) error {
 		return err
 	}
 	notef(r, "codex-cli: source="+opts.SourceDir+" ref="+opts.Ref+" target="+target+" build-mode="+string(buildMode))
-	notef(r, "codex-cli step 1/7: update Codex source checkout")
-	if err := cloneOrUpdateSource(ctx, r, opts.SourceDir, opts.Ref); err != nil {
+	notef(r, "codex-cli: update source checkout")
+	if err := cloneOrUpdateSource(ctx, r, opts.Repo, opts.SourceDir, opts.Ref); err != nil {
 		return err
 	}
 	head := "dryrun"
@@ -137,8 +163,11 @@ func Install(ctx context.Context, opts InstallOptions) error {
 		reusedReleaseDir, reused, err := maybeReuseInstalledRelease(
 			ctx,
 			r,
-			opts.CodexHome,
+			opts.PackageHome,
 			opts.InstallDir,
+			opts.PackageBinaryPath,
+			opts.PackageVariant,
+			opts.CommandName,
 			head,
 			target,
 			buildMode,
@@ -153,41 +182,40 @@ func Install(ctx context.Context, opts InstallOptions) error {
 		}
 	}
 
-	packageDir := filepath.Join(paths.CacheRoot(), "desktop-via-clyde", "codex", "package")
-	notef(r, "codex-cli step 2/7: build upstream Codex entrypoint")
-	entrypointPath, err := buildEntrypoint(ctx, r, opts.SourceDir, target, buildMode, opts.NoSccache)
+	notef(r, "codex-cli: build upstream entrypoint")
+	entrypointPath, err := buildEntrypoint(ctx, r, opts.SourceDir, opts.CommandName, target, buildMode, opts.NoSccache)
 	if err != nil {
 		return err
 	}
-	notef(r, "codex-cli step 3/7: sign upstream Codex entrypoint")
+	notef(r, "codex-cli: sign upstream entrypoint")
 	if err := signBinary(ctx, r, opts.SourceDir, entrypointPath); err != nil {
 		return err
 	}
-	notef(r, "codex-cli step 4/7: build upstream Codex package")
-	if err := buildPackage(ctx, r, opts.SourceDir, packageDir, target, entrypointPath); err != nil {
+	notef(r, "codex-cli: build upstream package")
+	if err := buildPackage(ctx, r, opts.SourceDir, opts.PackageDir, opts.PackageVariant, target, entrypointPath); err != nil {
 		return err
 	}
 
-	notef(r, "codex-cli step 5/7: read package metadata")
+	notef(r, "codex-cli: read package metadata")
 	metadata := packageMetadata{
 		Version: "dryrun",
 		Target:  target,
-		Variant: "codex",
+		Variant: opts.PackageVariant,
 	}
 	if !opts.DryRun {
-		metadata, err = readPackageMetadata(packageDir)
+		metadata, err = readPackageMetadata(opts.PackageDir, opts.PackageVariant)
 		if err != nil {
 			return err
 		}
 	}
-	releaseDir := releaseDir(opts.CodexHome, metadata.Version, head, metadata.Target, buildMode)
+	releaseDir := releaseDir(opts.PackageHome, metadata.Version, head, metadata.Target, buildMode)
 	notef(r, "codex-cli: package version="+metadata.Version+" target="+metadata.Target+" release="+releaseDir)
-	notef(r, "codex-cli step 6/7: install standalone package")
-	if err := installPackage(ctx, r, packageDir, releaseDir, opts.CodexHome, opts.InstallDir); err != nil {
+	notef(r, "codex-cli: install standalone package")
+	if err := installPackage(ctx, r, opts.PackageDir, releaseDir, opts.PackageHome, opts.InstallDir, opts.PackageBinaryPath, opts.CommandName); err != nil {
 		return err
 	}
-	notef(r, "codex-cli step 7/7: verify installed command")
-	if err := verifyInstalledCommand(ctx, r, opts.InstallDir); err != nil {
+	notef(r, "codex-cli: verify installed command")
+	if err := verifyInstalledCommand(ctx, r, opts.InstallDir, opts.CommandName); err != nil {
 		return err
 	}
 	notef(r, "codex-cli: install complete release="+releaseDir)
@@ -197,13 +225,17 @@ func Install(ctx context.Context, opts InstallOptions) error {
 // Status prints the local Codex CLI source, install, and signing state. It is
 // best-effort so one missing surface does not hide the rest.
 func Status(ctx context.Context, opts StatusOptions) error {
+	log := codexcliLog.With("function", "Status")
 	if opts.Out == nil {
 		opts.Out = os.Stdout
 	}
-	opts = withStatusDefaults(opts)
+	if err := validateStatusOptions(opts); err != nil {
+		log.ErrorContext(ctx, "codexcli.status.invalid_options", "err", err)
+		return err
+	}
 	out := opts.Out
-	binPath := filepath.Join(opts.InstallDir, "codex")
-	currentLink := filepath.Join(opts.CodexHome, "packages", "standalone", "current")
+	binPath := filepath.Join(opts.InstallDir, opts.CommandName)
+	currentLink := filepath.Join(opts.PackageHome, "packages", "standalone", "current")
 
 	fmt.Fprintf(out, "source dir: %s\n", opts.SourceDir)
 	if isDir(filepath.Join(opts.SourceDir, ".git")) {
@@ -213,7 +245,7 @@ func Status(ctx context.Context, opts StatusOptions) error {
 		fmt.Fprintln(out, "source head: missing")
 	}
 
-	fmt.Fprintf(out, "codex home: %s\n", opts.CodexHome)
+	fmt.Fprintf(out, "codex home: %s\n", opts.PackageHome)
 	printSymlink(out, "current release", currentLink)
 	printSymlink(out, "visible command", binPath)
 	if _, err := os.Stat(binPath); err == nil {
@@ -223,43 +255,8 @@ func Status(ctx context.Context, opts StatusOptions) error {
 	} else {
 		fmt.Fprintf(out, "version: missing at %s\n", binPath)
 	}
-	printCommandValue(ctx, out, "which -a codex", "/usr/bin/which", "-a", "codex")
+	printCommandValue(ctx, out, "which -a "+opts.CommandName, "/usr/bin/which", "-a", opts.CommandName)
 	return nil
-}
-
-func withInstallDefaults(opts InstallOptions) InstallOptions {
-	if opts.SourceDir == "" {
-		opts.SourceDir = DefaultSourceDir()
-	}
-	if opts.Ref == "" {
-		opts.Ref = DefaultRef()
-	}
-	if opts.InstallDir == "" {
-		opts.InstallDir = DefaultInstallDir()
-	}
-	if opts.CodexHome == "" {
-		opts.CodexHome = DefaultCodexHome()
-	}
-	if opts.BuildMode == "" {
-		opts.BuildMode = DefaultBuildMode()
-	}
-	if !config.Current().CLI.Codex.UseSccache {
-		opts.NoSccache = true
-	}
-	return opts
-}
-
-func withStatusDefaults(opts StatusOptions) StatusOptions {
-	if opts.SourceDir == "" {
-		opts.SourceDir = DefaultSourceDir()
-	}
-	if opts.InstallDir == "" {
-		opts.InstallDir = DefaultInstallDir()
-	}
-	if opts.CodexHome == "" {
-		opts.CodexHome = DefaultCodexHome()
-	}
-	return opts
 }
 
 func notef(r *patch.Runner, message string) {
@@ -283,7 +280,7 @@ func hostTargetTriple() (string, error) {
 	return "", fmt.Errorf("unsupported macOS architecture %s", runtime.GOARCH)
 }
 
-func cloneOrUpdateSource(ctx context.Context, r *patch.Runner, sourceDir string, ref string) error {
+func cloneOrUpdateSource(ctx context.Context, r *patch.Runner, repo string, sourceDir string, ref string) error {
 	log := codexcliLog.With("function", "cloneOrUpdateSource")
 	if !r.DryRun {
 		if err := os.MkdirAll(filepath.Dir(sourceDir), 0o755); err != nil {
@@ -296,8 +293,8 @@ func cloneOrUpdateSource(ctx context.Context, r *patch.Runner, sourceDir string,
 			log.ErrorContext(ctx, "codexcli.clone_or_update_source.stat_failed", "err", err)
 			return fmt.Errorf("stat source dir: %w", err)
 		}
-		notef(r, "codex-cli: source checkout missing, cloning "+codexRepo+" with depth 1")
-		if err := r.RunWithHeartbeat(ctx, "codex-cli: cloning Codex source", 30*time.Second, "gh", "repo", "clone", codexRepo, sourceDir, "--", "--depth", "1"); err != nil {
+		notef(r, "codex-cli: source checkout missing, cloning "+repo+" with depth 1")
+		if err := r.RunWithHeartbeat(ctx, "codex-cli: cloning Codex source", 30*time.Second, "gh", "repo", "clone", repo, sourceDir, "--", "--depth", "1"); err != nil {
 			return fmt.Errorf("clone Codex source: %w", err)
 		}
 	} else if !isDir(filepath.Join(sourceDir, ".git")) && !r.DryRun {
@@ -340,6 +337,7 @@ func buildPackage(
 	r *patch.Runner,
 	sourceDir string,
 	packageDir string,
+	packageVariant string,
 	target string,
 	entrypointPath string,
 ) error {
@@ -355,7 +353,7 @@ func buildPackage(
 		"--target",
 		target,
 		"--variant",
-		"codex",
+		packageVariant,
 		"--package-dir",
 		packageDir,
 		"--cargo-profile",
@@ -374,13 +372,14 @@ func buildEntrypoint(
 	ctx context.Context,
 	r *patch.Runner,
 	sourceDir string,
+	commandName string,
 	target string,
 	buildMode BuildMode,
 	noSccache bool,
 ) (string, error) {
 	log := codexcliLog.With("function", "buildEntrypoint")
 	codexRoot := filepath.Join(sourceDir, "codex-rs")
-	entrypointPath := filepath.Join(codexRoot, "target", target, "release", "codex")
+	entrypointPath := filepath.Join(codexRoot, "target", target, "release", commandName)
 	notef(r, "codex-cli: build entrypoint at "+entrypointPath)
 	if r.DryRun {
 		notef(r, "codex-cli: Cargo build will run from "+codexRoot+" so rustup honors upstream rust-toolchain.toml")
@@ -397,7 +396,7 @@ func buildEntrypoint(
 		log.ErrorContext(ctx, "codexcli.build_entrypoint.env_failed", "err", err)
 		return "", err
 	}
-	cargoArgs := cargoBuildArgs(target, buildMode)
+	cargoArgs := cargoBuildArgs(target, buildMode, commandName)
 	if err := r.RunEnvInDirWithHeartbeat(ctx,
 		"codex-cli: building Codex entrypoint",
 		30*time.Second,
@@ -593,7 +592,7 @@ func parseEnvOutput(output []byte) (map[string]string, error) {
 	return env, nil
 }
 
-func readPackageMetadata(packageDir string) (packageMetadata, error) {
+func readPackageMetadata(packageDir string, packageVariant string) (packageMetadata, error) {
 	log := codexcliLog.With("function", "readPackageMetadata")
 	path := filepath.Join(packageDir, "codex-package.json")
 	data, err := os.ReadFile(path)
@@ -606,15 +605,15 @@ func readPackageMetadata(packageDir string) (packageMetadata, error) {
 		log.Error("codexcli.read_package_metadata.parse_failed", "err", err)
 		return packageMetadata{}, fmt.Errorf("parse package metadata: %w", err)
 	}
-	if metadata.Version == "" || metadata.Target == "" || metadata.Variant != "codex" {
+	if metadata.Version == "" || metadata.Target == "" || metadata.Variant != packageVariant {
 		return packageMetadata{}, fmt.Errorf("invalid package metadata in %s: %+v", path, metadata)
 	}
 	return metadata, nil
 }
 
-func releaseDir(codexHome string, version string, head string, target string, buildMode BuildMode) string {
+func releaseDir(packageHome string, version string, head string, target string, buildMode BuildMode) string {
 	return filepath.Join(
-		codexHome,
+		packageHome,
 		"packages",
 		"standalone",
 		"releases",
@@ -638,19 +637,21 @@ func installPackage(
 	r *patch.Runner,
 	packageDir string,
 	releaseDir string,
-	codexHome string,
+	packageHome string,
 	installDir string,
+	packageBinaryPath string,
+	commandName string,
 ) error {
 	log := codexcliLog.With("function", "installPackage")
-	standaloneRoot := filepath.Join(codexHome, "packages", "standalone")
+	standaloneRoot := filepath.Join(packageHome, "packages", "standalone")
 	currentLink := filepath.Join(standaloneRoot, "current")
-	binPath := filepath.Join(installDir, "codex")
+	binPath := filepath.Join(installDir, commandName)
 	stageDir := filepath.Join(filepath.Dir(releaseDir), ".staging."+filepath.Base(releaseDir))
 	notef(r, "codex-cli: install package "+packageDir+" -> "+releaseDir)
 	if r.DryRun {
 		notef(r, "codex-cli: would stage package at "+stageDir)
 		notef(r, "codex-cli: update "+currentLink+" -> "+releaseDir)
-		notef(r, "codex-cli: update "+binPath+" -> "+filepath.Join(currentLink, packageBinaryRel))
+		notef(r, "codex-cli: update "+binPath+" -> "+filepath.Join(currentLink, filepath.FromSlash(packageBinaryPath)))
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(releaseDir), 0o755); err != nil {
@@ -674,8 +675,8 @@ func installPackage(
 		log.ErrorContext(ctx, "codexcli.install_package.rsync_failed", "err", err)
 		return fmt.Errorf("copy package to release stage: %w", err)
 	}
-	notef(r, "codex-cli: creating release convenience symlink "+filepath.Join(stageDir, "codex"))
-	if err := os.Symlink(packageBinaryRel, filepath.Join(stageDir, "codex")); err != nil && !errors.Is(err, os.ErrExist) {
+	notef(r, "codex-cli: creating release convenience symlink "+filepath.Join(stageDir, commandName))
+	if err := os.Symlink(packageBinaryPath, filepath.Join(stageDir, commandName)); err != nil && !errors.Is(err, os.ErrExist) {
 		log.ErrorContext(ctx, "codexcli.install_package.symlink_failed", "err", err)
 		return fmt.Errorf("create release convenience symlink: %w", err)
 	}
@@ -692,7 +693,7 @@ func installPackage(
 		return fmt.Errorf("update current release link: %w", err)
 	}
 	notef(r, "codex-cli: updating visible command symlink "+binPath)
-	if err := replaceSymlink(binPath, filepath.Join(currentLink, filepath.FromSlash(packageBinaryRel))); err != nil {
+	if err := replaceSymlink(binPath, filepath.Join(currentLink, filepath.FromSlash(packageBinaryPath))); err != nil {
 		return fmt.Errorf("update visible command link: %w", err)
 	}
 	return nil
@@ -718,9 +719,9 @@ func replaceSymlink(linkPath string, target string) error {
 	return nil
 }
 
-func verifyInstalledCommand(ctx context.Context, r *patch.Runner, installDir string) error {
+func verifyInstalledCommand(ctx context.Context, r *patch.Runner, installDir string, commandName string) error {
 	log := codexcliLog.With("function", "verifyInstalledCommand")
-	binPath := filepath.Join(installDir, "codex")
+	binPath := filepath.Join(installDir, commandName)
 	notef(r, "codex-cli: verifying signature for "+binPath)
 	if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--strict", "--verbose=2", binPath); err != nil {
 		log.ErrorContext(ctx, "codexcli.verify_installed_command.codesign_failed", "err", err)
@@ -770,7 +771,7 @@ func describeBuildMode(r *patch.Runner, buildMode BuildMode) {
 	notef(r, "codex-cli: release mode preserves the upstream release profile exactly")
 }
 
-func cargoBuildArgs(target string, buildMode BuildMode) []string {
+func cargoBuildArgs(target string, buildMode BuildMode, commandName string) []string {
 	args := []string{
 		"build",
 		"--target",
@@ -778,7 +779,7 @@ func cargoBuildArgs(target string, buildMode BuildMode) []string {
 		"--release",
 		"--timings",
 		"--bin",
-		"codex",
+		commandName,
 		"-v",
 	}
 	if buildMode == BuildModeLocalFast {
@@ -825,8 +826,11 @@ func isSccachePath(path string) bool {
 func maybeReuseInstalledRelease(
 	ctx context.Context,
 	r *patch.Runner,
-	codexHome string,
+	packageHome string,
 	installDir string,
+	packageBinaryPath string,
+	packageVariant string,
+	commandName string,
 	head string,
 	target string,
 	buildMode BuildMode,
@@ -836,7 +840,7 @@ func maybeReuseInstalledRelease(
 		notef(r, "codex-cli: force rebuild requested, skipping installed release reuse")
 		return "", false, nil
 	}
-	releasesRoot := filepath.Join(codexHome, "packages", "standalone", "releases")
+	releasesRoot := filepath.Join(packageHome, "packages", "standalone", "releases")
 	matches, err := findMatchingReleaseDirs(releasesRoot, releaseNameSuffix(head, target, buildMode))
 	if err != nil {
 		return "", false, err
@@ -850,23 +854,23 @@ func maybeReuseInstalledRelease(
 	}
 	releasePath := matches[0]
 	notef(r, "codex-cli: found matching installed release "+releasePath)
-	reuseRejected, reuseReason := releaseReuseRejected(ctx, releasePath, target)
+	reuseRejected, reuseReason := releaseReuseRejected(ctx, releasePath, target, packageBinaryPath, packageVariant)
 	if reuseRejected {
 		notef(r, "codex-cli: installed release reuse rejected: "+reuseReason)
 		return "", false, nil
 	}
 	notef(r, "codex-cli: reusing verified installed release "+releasePath)
-	if err := relinkInstalledRelease(ctx, r, codexHome, installDir, releasePath); err != nil {
+	if err := relinkInstalledRelease(ctx, r, packageHome, installDir, releasePath, packageBinaryPath, commandName); err != nil {
 		return "", false, err
 	}
-	if err := verifyInstalledCommand(ctx, r, installDir); err != nil {
+	if err := verifyInstalledCommand(ctx, r, installDir, commandName); err != nil {
 		return "", false, err
 	}
 	return releasePath, true, nil
 }
 
-func releaseReuseRejected(ctx context.Context, releasePath, target string) (bool, string) {
-	verifyErr := verifyReleaseCandidate(ctx, releasePath, target)
+func releaseReuseRejected(ctx context.Context, releasePath string, target string, packageBinaryPath string, packageVariant string) (bool, string) {
+	verifyErr := verifyReleaseCandidate(ctx, releasePath, target, packageBinaryPath, packageVariant)
 	if verifyErr == nil {
 		return false, ""
 	}
@@ -896,9 +900,9 @@ func findMatchingReleaseDirs(releasesRoot string, suffix string) ([]string, erro
 	return matches, nil
 }
 
-func verifyReleaseCandidate(ctx context.Context, releasePath string, target string) error {
+func verifyReleaseCandidate(ctx context.Context, releasePath string, target string, packageBinaryPath string, packageVariant string) error {
 	log := codexcliLog.With("function", "verifyReleaseCandidate")
-	metadata, err := readPackageMetadata(releasePath)
+	metadata, err := readPackageMetadata(releasePath, packageVariant)
 	if err != nil {
 		log.ErrorContext(ctx, "codexcli.verify_release_candidate.metadata_failed", "err", err)
 		return err
@@ -907,7 +911,7 @@ func verifyReleaseCandidate(ctx context.Context, releasePath string, target stri
 		log.ErrorContext(ctx, "codexcli.verify_release_candidate.target_mismatch", "err", fmt.Errorf("release target mismatch"))
 		return fmt.Errorf("release target mismatch: got %s want %s", metadata.Target, target)
 	}
-	binaryPath := filepath.Join(releasePath, filepath.FromSlash(packageBinaryRel))
+	binaryPath := filepath.Join(releasePath, filepath.FromSlash(packageBinaryPath))
 	if _, err := os.Stat(binaryPath); err != nil {
 		log.ErrorContext(ctx, "codexcli.verify_release_candidate.binary_missing", "err", err)
 		return fmt.Errorf("stat release binary: %w", err)
@@ -928,15 +932,17 @@ func verifyReleaseCandidate(ctx context.Context, releasePath string, target stri
 func relinkInstalledRelease(
 	ctx context.Context,
 	r *patch.Runner,
-	codexHome string,
+	packageHome string,
 	installDir string,
 	releasePath string,
+	packageBinaryPath string,
+	commandName string,
 ) error {
 	log := codexcliLog.With("function", "relinkInstalledRelease")
 	_ = ctx
-	standaloneRoot := filepath.Join(codexHome, "packages", "standalone")
+	standaloneRoot := filepath.Join(packageHome, "packages", "standalone")
 	currentLink := filepath.Join(standaloneRoot, "current")
-	binPath := filepath.Join(installDir, "codex")
+	binPath := filepath.Join(installDir, commandName)
 	if err := os.MkdirAll(standaloneRoot, 0o755); err != nil {
 		log.ErrorContext(ctx, "codexcli.relink_installed_release.mkdir_standalone_failed", "err", err)
 		return fmt.Errorf("create standalone root: %w", err)
@@ -950,8 +956,8 @@ func relinkInstalledRelease(
 		log.ErrorContext(ctx, "codexcli.relink_installed_release.current_link_failed", "err", err)
 		return fmt.Errorf("update current release link: %w", err)
 	}
-	notef(r, "codex-cli: update "+binPath+" -> "+filepath.Join(currentLink, packageBinaryRel))
-	if err := replaceSymlink(binPath, filepath.Join(currentLink, filepath.FromSlash(packageBinaryRel))); err != nil {
+	notef(r, "codex-cli: update "+binPath+" -> "+filepath.Join(currentLink, filepath.FromSlash(packageBinaryPath)))
+	if err := replaceSymlink(binPath, filepath.Join(currentLink, filepath.FromSlash(packageBinaryPath))); err != nil {
 		log.ErrorContext(ctx, "codexcli.relink_installed_release.visible_link_failed", "err", err)
 		return fmt.Errorf("update visible command link: %w", err)
 	}

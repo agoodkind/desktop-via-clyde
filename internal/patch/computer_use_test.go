@@ -8,6 +8,7 @@ import (
 )
 
 func TestTeamIDFromSignIdentity(t *testing.T) {
+	installFixture(t)
 	got, err := teamIDFromSignIdentity(paths.SignIdentity())
 	if err != nil {
 		t.Fatalf("teamIDFromSignIdentity: %v", err)

@@ -156,7 +156,7 @@ func verifyRequiredEntitlements(ctx context.Context, r *Runner, t targets.Target
 		return nil
 	}
 	main := paths.MainBinaryPath(t)
-	notef(r, fmt.Sprintf("target=%s step 9: verify required entitlements on %s", t.ID, main))
+	notef(r, fmt.Sprintf("target=%s verify required entitlements on %s", t.ID, main))
 	if err := verifyEntitlementPolicy(ctx, r, main, *t.Entitlements); err != nil {
 		return err
 	}
@@ -167,7 +167,7 @@ func verifyRequiredEntitlements(ctx context.Context, r *Runner, t targets.Target
 		}
 		return logPatchError(ctx, "patch.real_binary_stat_failed", fmt.Errorf("stat real binary %s: %w", realPath, err))
 	}
-	notef(r, fmt.Sprintf("target=%s step 9: verify required entitlements on %s", t.ID, realPath))
+	notef(r, fmt.Sprintf("target=%s verify required entitlements on %s", t.ID, realPath))
 	return verifyEntitlementPolicy(ctx, r, realPath, *t.Entitlements)
 }
 

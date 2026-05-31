@@ -67,8 +67,8 @@ func RuntimeEntitlementsArgs(id string, entFile string, codePath string) []strin
 	}
 }
 
-// RuntimeTimestampEntitlementsArgs returns the upstream Codex release signing
-// argument shape for standalone CLI binaries.
+// RuntimeTimestampEntitlementsArgs returns the timestamped hardened-runtime
+// codesign argument shape for standalone CLI binaries.
 func RuntimeTimestampEntitlementsArgs(id string, entFile string, codePath string) []string {
 	return []string{
 		"--force",

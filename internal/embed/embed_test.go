@@ -1,7 +1,7 @@
 package shimembed
 
 import (
-	"fmt"
+	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
@@ -9,13 +9,16 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"goodkind.io/desktop-via-clyde/internal/spec"
 )
 
 func TestCodexShimDryRunUsesCodexCAWithoutSSLCertFile(t *testing.T) {
 	output := runShimDryRun(t, "Codex")
 
-	assertContains(t, output, "target-policy: codex")
+	assertContains(t, output, ".launch-policy.json")
 	assertContains(t, output, "launch-cwd: ")
+	assertContains(t, output, "--proxy-server=http://[::1]:48723")
 	assertContains(t, output, "env CODEX_CA_CERTIFICATE=")
 	assertContains(t, output, "env NODE_EXTRA_CA_CERTS=")
 	assertContains(t, output, "env NO_PROXY=localhost,127.0.0.1,::1,[::1]")
@@ -27,7 +30,7 @@ func TestCodexShimDryRunUsesCodexCAWithoutSSLCertFile(t *testing.T) {
 func TestDefaultShimDryRunKeepsSSLCertFile(t *testing.T) {
 	output := runShimDryRun(t, "Cursor")
 
-	assertContains(t, output, "target-policy: default")
+	assertContains(t, output, ".launch-policy.json")
 	assertContains(t, output, "electron-run-as-node: false")
 	assertContains(t, output, "launch-cwd: ")
 	assertContains(t, output, "--proxy-server=http://[::1]:48723")
@@ -45,7 +48,7 @@ func TestDefaultShimDryRunDoesNotInjectChromiumFlagsInElectronNodeMode(t *testin
 		"ELECTRON_RUN_AS_NODE": "1",
 	})
 
-	assertContains(t, output, "target-policy: default")
+	assertContains(t, output, ".launch-policy.json")
 	assertContains(t, output, "electron-run-as-node: true")
 	assertContains(t, output, "launch-cwd: ")
 	assertNotContains(t, output, "--proxy-server=http://[::1]:48723")
@@ -75,17 +78,13 @@ func TestCodexShimExecUsesHomeAsLaunchCwd(t *testing.T) {
 	if err := os.WriteFile(fakeCA, []byte("fake-ca"), 0o644); err != nil {
 		t.Fatalf("write fake ca: %v", err)
 	}
-	configHome := t.TempDir()
-	writeShimConfig(t, configHome, fakeCA, homeDir)
+	writeShimConfig(t, shimPath, "Codex", fakeCA, homeDir)
 	cleanupListener := ensureProxyReachable(t)
 	defer cleanupListener()
 
 	command := exec.Command(shimPath)
 	command.Dir = launcherCwd
-	command.Env = envWithOverrides(os.Environ(),
-		"HOME="+homeDir,
-		"XDG_CONFIG_HOME="+configHome,
-	)
+	command.Env = envWithOverrides(os.Environ(), "HOME="+homeDir)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("shim exec failed: %v\n%s", err, output)
@@ -136,19 +135,18 @@ func runShimDryRunWithEnv(
 	}
 
 	homeDir := t.TempDir()
-	configHome := t.TempDir()
 	caPath := filepath.Join(t.TempDir(), "clyde-mitm-ca.crt")
+	if err := os.WriteFile(caPath, []byte("fake-ca"), 0o644); err != nil {
+		t.Fatalf("write fake ca: %v", err)
+	}
 	cwd := homeDir
 	if launchWorkingDirectory != nil {
 		cwd = *launchWorkingDirectory
 	}
-	writeShimConfig(t, configHome, caPath, cwd)
+	writeShimConfig(t, shimPath, executableName, caPath, cwd)
 
 	command := exec.Command(shimPath, "--clyde-dry-run")
-	command.Env = envWithOverrides(os.Environ(),
-		"HOME="+homeDir,
-		"XDG_CONFIG_HOME="+configHome,
-	)
+	command.Env = envWithOverrides(os.Environ(), "HOME="+homeDir)
 	for key, value := range extraEnv {
 		command.Env = append(command.Env, key+"="+value)
 	}
@@ -159,31 +157,61 @@ func runShimDryRunWithEnv(
 	return string(output)
 }
 
-func writeShimConfig(t *testing.T, xdgConfigHome string, caPath string, launchWorkingDirectory string) {
+func writeShimConfig(t *testing.T, shimPath string, executableName string, caPath string, launchWorkingDirectory string) {
 	t.Helper()
 
-	configRoot := filepath.Join(xdgConfigHome, "desktop-via-clyde")
-	if err := os.MkdirAll(configRoot, 0o755); err != nil {
-		t.Fatalf("MkdirAll config root: %v", err)
+	proxyURL := "http://[::1]:48723"
+	noProxy := "localhost,127.0.0.1,::1,[::1]"
+	policy := spec.LaunchPolicySpec{
+		ProxyHost:              "::1",
+		ProxyPort:              48723,
+		CACertificate:          caPath,
+		NoProxy:                noProxy,
+		LaunchWorkingDirectory: launchWorkingDirectory,
+		Arguments: []spec.ArgActionSpec{
+			{Action: "append", Value: "--proxy-server=" + proxyURL},
+			{Action: "append", Value: "--ignore-certificate-errors"},
+		},
+		Preflights: []spec.PreflightSpec{
+			{Kind: "file_exists", Path: caPath},
+			{Kind: "tcp_reachable", Host: "::1", Port: 48723, Timeout: 1000},
+		},
 	}
-	contents := fmt.Sprintf(`[proxy]
-host = "::1"
-port = 48723
-ca_certificate = %q
-no_proxy = "localhost,127.0.0.1,::1,[::1]"
-launch_working_directory = %q
 
-[apps.cursor]
-target_policy = "default"
+	switch strings.ToLower(executableName) {
+	case "codex":
+		policy.Environment = []spec.EnvActionSpec{
+			{Action: "set", Key: "CODEX_CA_CERTIFICATE", Value: caPath},
+			{Action: "set", Key: "NODE_EXTRA_CA_CERTS", Value: caPath},
+			{Action: "set", Key: "NODE_OPTIONS", Value: "--use-openssl-ca"},
+			{Action: "set", Key: "NODE_TLS_REJECT_UNAUTHORIZED", Value: "0"},
+			{Action: "set", Key: "HTTPS_PROXY", Value: proxyURL},
+			{Action: "set", Key: "HTTP_PROXY", Value: proxyURL},
+			{Action: "set", Key: "ALL_PROXY", Value: proxyURL},
+			{Action: "set", Key: "NO_PROXY", Value: noProxy},
+			{Action: "set", Key: "no_proxy", Value: noProxy},
+			{Action: "unset", Key: "SSL_CERT_FILE"},
+		}
+	default:
+		policy.Environment = []spec.EnvActionSpec{
+			{Action: "set", Key: "NODE_EXTRA_CA_CERTS", Value: caPath},
+			{Action: "set", Key: "SSL_CERT_FILE", Value: caPath},
+			{Action: "set", Key: "NODE_OPTIONS", Value: "--use-openssl-ca"},
+			{Action: "set", Key: "NODE_TLS_REJECT_UNAUTHORIZED", Value: "0"},
+			{Action: "set", Key: "HTTPS_PROXY", Value: proxyURL},
+			{Action: "set", Key: "HTTP_PROXY", Value: proxyURL},
+			{Action: "set", Key: "ALL_PROXY", Value: proxyURL},
+			{Action: "set", Key: "NO_PROXY", Value: noProxy},
+			{Action: "set", Key: "no_proxy", Value: noProxy},
+		}
+	}
 
-[apps.codex]
-target_policy = "codex"
-
-[apps.claude]
-target_policy = "default"
-`, caPath, launchWorkingDirectory)
-	if err := os.WriteFile(filepath.Join(configRoot, "config.toml"), []byte(contents), 0o644); err != nil {
-		t.Fatalf("WriteFile config.toml: %v", err)
+	data, err := json.MarshalIndent(policy, "", "  ")
+	if err != nil {
+		t.Fatalf("Marshal launch policy: %v", err)
+	}
+	if err := os.WriteFile(shimPath+".launch-policy.json", data, 0o644); err != nil {
+		t.Fatalf("WriteFile launch policy: %v", err)
 	}
 }
 

@@ -5,11 +5,10 @@
 // executable so launches route through the local Clyde MITM proxy. It is
 // built by shim/build.sh from the Swift sources under shim/.
 //
-// StdioTeeShim is the stdio-tee shim that replaces a binary spawned over
-// stdio, runs the original as a child, and tees the stdin and stdout streams
-// to log files. It is built by `make stdio-tee-shim` from the Go sources
-// under cmd/dvc-stdio-tee-shim/. The Claude patch flow installs this binary
-// against Claude Desktop's bundled CLI.
+// StdioTeeShim is the stdio-tee shim that replaces a configured child
+// process, runs the original as a child, and tees the stdin and stdout
+// streams to log files. It is built by `make stdio-tee-shim` from the Go
+// sources under cmd/dvc-stdio-tee-shim/.
 package shimembed
 
 import (

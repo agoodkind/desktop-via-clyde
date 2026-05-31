@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/state"
@@ -24,11 +25,11 @@ const (
 	goodkindRequirement  = `identifier "com.anthropic.claudefordesktop" and anchor apple generic and certificate leaf[subject.OU] = H3BMXM4W7H`
 )
 
-func TestParseCursorManifest(t *testing.T) {
+func TestParseHTTPPathJSONManifest(t *testing.T) {
 	body := []byte(`{"url":"https://downloads.cursor.com/production/abc/darwin/arm64/Cursor-darwin-arm64.zip","name":"3.5.30"}`)
-	got, err := parseCursorManifest(body)
+	got, err := parseHTTPPathJSONManifest(body)
 	if err != nil {
-		t.Fatalf("parseCursorManifest: %v", err)
+		t.Fatalf("parseHTTPPathJSONManifest: %v", err)
 	}
 	if got.Name != "3.5.30" {
 		t.Fatalf("Name = %q, want 3.5.30", got.Name)
@@ -69,7 +70,7 @@ func TestParseSparkleAppcast(t *testing.T) {
 	}
 }
 
-func TestParseClaudeSquirrelManifest(t *testing.T) {
+func TestParseSquirrelJSONManifest(t *testing.T) {
 	body := []byte(`{
   "currentRelease": "1.8555.2",
   "releases": [
@@ -85,9 +86,9 @@ func TestParseClaudeSquirrelManifest(t *testing.T) {
     }
   ]
 }`)
-	got, err := parseClaudeSquirrelManifest(body)
+	got, err := parseSquirrelJSONManifest(body)
 	if err != nil {
-		t.Fatalf("parseClaudeSquirrelManifest: %v", err)
+		t.Fatalf("parseSquirrelJSONManifest: %v", err)
 	}
 	if got.Name != "1.8555.2" {
 		t.Fatalf("Name = %q, want 1.8555.2", got.Name)
@@ -152,6 +153,7 @@ func TestClaudeUpdaterDoesNotRequireChannel(t *testing.T) {
 }
 
 func TestLoadOriginalDRUsesStateEntry(t *testing.T) {
+	installFixture(t)
 	t.Setenv("HOME", t.TempDir())
 	tg := targets.Target{
 		ID:       "claude",
@@ -181,6 +183,7 @@ func TestLoadOriginalDRUsesStateEntry(t *testing.T) {
 }
 
 func TestLoadOriginalDRBootstrapsCleanClaude(t *testing.T) {
+	installFixture(t)
 	t.Setenv("HOME", t.TempDir())
 	tg := testClaudeTarget(t)
 	restore := replaceReadDesignatedRequirement(func(_ context.Context, path string) (string, error) {
@@ -200,6 +203,7 @@ func TestLoadOriginalDRBootstrapsCleanClaude(t *testing.T) {
 }
 
 func TestLoadOriginalDRRejectsMissingStateWithRealBinary(t *testing.T) {
+	installFixture(t)
 	t.Setenv("HOME", t.TempDir())
 	tg := testClaudeTarget(t)
 	if err := os.WriteFile(paths.RealBinaryPath(tg), []byte("patched"), 0o755); err != nil {
@@ -215,6 +219,7 @@ func TestLoadOriginalDRRejectsMissingStateWithRealBinary(t *testing.T) {
 }
 
 func TestLoadOriginalDRRejectsLocalRequirementBootstrap(t *testing.T) {
+	installFixture(t)
 	t.Setenv("HOME", t.TempDir())
 	tg := testClaudeTarget(t)
 	restore := replaceReadDesignatedRequirement(func(context.Context, string) (string, error) {
@@ -268,9 +273,10 @@ func testClaudeTarget(t *testing.T) targets.Target {
 		t.Fatalf("MkdirAll MacOS: %v", err)
 	}
 	tg := targets.Target{
-		ID:       "claude",
-		AppPath:  appPath,
-		ExecName: "Claude",
+		ID:                            "claude",
+		AppPath:                       appPath,
+		ExecName:                      "Claude",
+		OriginalDRBootstrapCapability: "clean-main-binary",
 	}
 	if err := os.WriteFile(paths.MainBinaryPath(tg), []byte("clean"), 0o755); err != nil {
 		t.Fatalf("WriteFile main binary: %v", err)
@@ -288,6 +294,7 @@ func replaceReadDesignatedRequirement(fn func(context.Context, string) (string, 
 
 func lookupConfiguredTarget(t *testing.T, id string) targets.Target {
 	t.Helper()
+	installFixture(t)
 	for _, target := range targets.All() {
 		if target.ID == id {
 			return target
@@ -384,4 +391,16 @@ func TestExtractZipFindsTargetAppRootInTempDir(t *testing.T) {
 	if _, err := os.Stat(got); err != nil {
 		t.Fatalf("extracted app missing: %v", err)
 	}
+}
+
+func installFixture(t *testing.T) {
+	t.Helper()
+	cfg, err := config.LoadPath(filepath.Join("..", "testconfig", "testdata", "current-config.toml"))
+	if err != nil {
+		t.Fatalf("LoadPath(current-config.toml): %v", err)
+	}
+	config.SetCurrent(cfg)
+	t.Cleanup(func() {
+		config.SetCurrent(nil)
+	})
 }

@@ -17,9 +17,6 @@ func TestDerivedXDGPathsUseClydeRoots(t *testing.T) {
 	if got := StateRoot(); got != wantStateRoot {
 		t.Fatalf("StateRoot() = %q, want %q", got, wantStateRoot)
 	}
-	if got := CacheRoot(); got != filepath.Join(cacheHome, "clyde") {
-		t.Fatalf("CacheRoot() = %q", got)
-	}
 	if got := LogDir(); got != filepath.Join(wantStateRoot, "logs") {
 		t.Fatalf("LogDir() = %q", got)
 	}

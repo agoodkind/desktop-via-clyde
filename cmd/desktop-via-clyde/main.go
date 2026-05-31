@@ -1,41 +1,33 @@
-// Command desktop-via-clyde patches macOS Electron apps (Cursor, Codex, Claude)
-// to route every launch through the clyde MITM proxy on [::1]:48723.
-//
-// Every program is invoked with the shape `desktop-via-clyde <program> <operation>`:
-//
-//	desktop-via-clyde cursor patch             install shim and re-sign Cursor
-//	desktop-via-clyde codex upgrade            fetch the latest Codex build and re-patch
-//	desktop-via-clyde claude unpatch           restore Claude from its backup
-//	desktop-via-clyde status                   per-target state summary
-//	desktop-via-clyde codex-cli upgrade        build and install locally signed Codex CLI
-//	desktop-via-clyde codex-cli install        alias for `codex-cli upgrade`
-//
-// App operation subcommands support --dry-run. patch and keychain-migrate
-// support --no-migrate-keychain.
+// Command desktop-via-clyde patches configured macOS desktop applications so
+// they launch through the Clyde MITM harness.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 
 	"github.com/spf13/cobra"
 
-	"goodkind.io/desktop-via-clyde/internal/codexcli"
 	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/logging"
+	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
+	"goodkind.io/desktop-via-clyde/internal/spec"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
-	"goodkind.io/desktop-via-clyde/internal/upgrade"
 	"goodkind.io/desktop-via-clyde/internal/version"
 	"goodkind.io/gklog"
 )
 
 var bootstrapLog = slog.New(slog.DiscardHandler)
+
+type operationRunner func(context.Context, operations.Request) error
 
 func main() {
 	bootstrapLog.Info("desktop-via-clyde.main")
@@ -83,9 +75,13 @@ func run() int {
 }
 
 func newRootCmd(ctx context.Context, out io.Writer) *cobra.Command {
+	return newRootCmdWithRunner(ctx, out, operations.Run)
+}
+
+func newRootCmdWithRunner(ctx context.Context, out io.Writer, runner operationRunner) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "desktop-via-clyde",
-		Short:         "Patch macOS Electron apps (Cursor, Codex, Claude) to route through the clyde MITM proxy",
+		Short:         "Operate on configured desktop-via-clyde apps and CLIs",
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
@@ -93,223 +89,141 @@ func newRootCmd(ctx context.Context, out io.Writer) *cobra.Command {
 	root.SetErr(out)
 	root.SetContext(ctx)
 
-	for _, target := range targets.All() {
-		root.AddCommand(newTargetCmd(ctx, out, target))
+	for _, configuredTarget := range targets.All() {
+		target, err := targets.Lookup(configuredTarget.ID)
+		if err != nil {
+			continue
+		}
+		root.AddCommand(newAppCmd(ctx, out, target, runner))
+	}
+	for _, program := range targets.AllCLIs() {
+		root.AddCommand(newCLICmd(ctx, out, program, runner))
 	}
 	root.AddCommand(newStatusCmd(ctx, out))
-	root.AddCommand(newCodexCLICmd(ctx, out))
 	return root
 }
 
-func targetWithAppPath(t targets.Target, appPath string) targets.Target {
-	if appPath != "" {
-		t.AppPath = appPath
-	}
-	return t
-}
-
-func newTargetCmd(ctx context.Context, out io.Writer, target targets.Target) *cobra.Command {
+func newAppCmd(ctx context.Context, out io.Writer, target targets.Target, runner operationRunner) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   target.ID,
-		Short: "Operate on " + target.AppPath,
-		Args:  cobra.NoArgs,
+		Use:     target.Command.Use,
+		Aliases: append([]string(nil), target.Command.Aliases...),
+		Short:   target.Command.Short,
+		Long:    target.Command.Long,
+		Hidden:  target.Command.Hidden,
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
 	}
 	cmd.SetContext(ctx)
-	cmd.AddCommand(newPatchCmd(ctx, out, target))
-	cmd.AddCommand(newUnpatchCmd(ctx, out, target))
-	cmd.AddCommand(newUpgradeCmd(ctx, out, target))
-	cmd.AddCommand(newKeychainMigrateCmd(ctx, out, target))
-	cmd.AddCommand(newTargetStatusCmd(ctx, out, target))
+	for _, operation := range sortedOperations(target.Operations) {
+		cmd.AddCommand(newOperationCmd(ctx, out, operation, &target, nil, runner))
+	}
 	return cmd
 }
 
-func newPatchCmd(ctx context.Context, out io.Writer, target targets.Target) *cobra.Command {
-	var dryRun bool
-	var noMigrate bool
-	var appPath string
+func newCLICmd(ctx context.Context, out io.Writer, program targets.CLIProgram, runner operationRunner) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "patch",
-		Short: "Install the shim into one app bundle and re-sign it",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			t := targetWithAppPath(target, appPath)
-			return patch.Patch(ctx, t, patch.Options{
-				DryRun:            dryRun,
-				NoMigrateKeychain: noMigrate,
-				Out:               out,
-			})
+		Use:     program.Command.Use,
+		Aliases: append([]string(nil), program.Command.Aliases...),
+		Short:   program.Command.Short,
+		Long:    program.Command.Long,
+		Hidden:  program.Command.Hidden,
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
 		},
 	}
 	cmd.SetContext(ctx)
-	cmd.Long = fmt.Sprintf("Patch %s by installing the shim and re-signing the bundle.", target.AppPath)
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the bundle")
-	cmd.Flags().BoolVar(&noMigrate, "no-migrate-keychain", false, "skip steps 1b and 7a (keychain ACL re-grant)")
-	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
+	for _, operation := range sortedOperations(program.Operations) {
+		cmd.AddCommand(newOperationCmd(ctx, out, operation, nil, &program, runner))
+	}
 	return cmd
 }
 
-func newUnpatchCmd(ctx context.Context, out io.Writer, target targets.Target) *cobra.Command {
-	var dryRun bool
-	var appPath string
+func newOperationCmd(
+	ctx context.Context,
+	out io.Writer,
+	operation spec.OperationSpec,
+	target *targets.Target,
+	program *targets.CLIProgram,
+	runner operationRunner,
+) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "unpatch",
-		Short: "Restore one app's bundle from its backup",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			t := targetWithAppPath(target, appPath)
-			return patch.Unpatch(ctx, t, patch.Options{
-				DryRun:            dryRun,
-				NoMigrateKeychain: false,
-				Out:               out,
-			})
-		},
+		Use:     operation.Use,
+		Aliases: append([]string(nil), operation.Aliases...),
+		Short:   operation.Short,
+		Long:    operation.Long,
+		Hidden:  operation.Hidden,
+		Args:    cobra.NoArgs,
 	}
 	cmd.SetContext(ctx)
-	cmd.Long = fmt.Sprintf("Restore %s from its backup.", target.AppPath)
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the bundle")
-	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
-	return cmd
-}
 
-func newUpgradeCmd(ctx context.Context, out io.Writer, target targets.Target) *cobra.Command {
-	var channel string
-	var dryRun bool
-	var noMigrate bool
-	var appPath string
-	cmd := &cobra.Command{
-		Use:   "upgrade",
-		Short: "Fetch the latest build from the upstream update manifest, verify, swap into the app path, and re-patch",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			t := targetWithAppPath(target, appPath)
-			return upgrade.Run(ctx, t, upgrade.Options{
-				Channel:           channel,
-				DryRun:            dryRun,
-				NoMigrateKeychain: noMigrate,
-				Out:               out,
-			})
-		},
-	}
-	cmd.SetContext(ctx)
-	cmd.Long = fmt.Sprintf(
-		"Upgrade %s by fetching the latest upstream manifest, verifying the downloaded bundle against the recorded upstream DesignatedRequirement, swapping it into place, and re-running the patch flow.",
-		target.AppPath,
-	)
-	if target.Updater.SupportsChannels() {
-		defaultChannel, err := target.Updater.ResolveChannel("")
-		if err == nil {
-			cmd.Flags().StringVar(&channel, "channel", defaultChannel, "upstream release channel")
+	flagValues := operations.NewFlagValues()
+	for _, flag := range operation.Flags {
+		switch flag.Type {
+		case spec.FlagTypeBool:
+			value := false
+			if flag.DefaultBool != nil {
+				value = *flag.DefaultBool
+			}
+			cmd.Flags().Bool(flag.Name, value, flag.Usage)
+		case spec.FlagTypeString:
+			cmd.Flags().String(flag.Name, flag.DefaultString, flag.Usage)
+		}
+		if flag.Hidden {
+			_ = cmd.Flags().MarkHidden(flag.Name)
 		}
 	}
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the bundle")
-	cmd.Flags().BoolVar(&noMigrate, "no-migrate-keychain", false, "skip keychain ACL re-grant during the post-swap patch")
-	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
-	return cmd
-}
 
-func newKeychainMigrateCmd(ctx context.Context, out io.Writer, target targets.Target) *cobra.Command {
-	var dryRun bool
-	var appPath string
-	cmd := &cobra.Command{
-		Use:   "keychain-migrate",
-		Short: "Re-grant keychain ACLs on an already-patched app (steps 1b + 7a only)",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			t := targetWithAppPath(target, appPath)
-			return patch.KeychainMigrate(ctx, t, patch.Options{
-				DryRun:            dryRun,
-				NoMigrateKeychain: false,
-				Out:               out,
-			})
-		},
-	}
-	cmd.SetContext(ctx)
-	cmd.Long = fmt.Sprintf("Re-grant keychain ACLs on the patched %s bundle.", target.AppPath)
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without touching keychain items")
-	cmd.Flags().StringVar(&appPath, "app-path", "", "override the target .app path for isolated testing")
-	return cmd
-}
+	cmd.RunE = func(_ *cobra.Command, _ []string) error {
+		for _, flag := range operation.Flags {
+			switch flag.Type {
+			case spec.FlagTypeBool:
+				value, err := cmd.Flags().GetBool(flag.Name)
+				if err != nil {
+					gklog.LoggerFromContext(ctx).ErrorContext(ctx, "cli.read_bool_flag_failed", "flag", flag.Name, "err", err)
+					slog.Default().ErrorContext(ctx, "cli.read_bool_flag_failed", "flag", flag.Name, "err", err)
+					return errors.New("read bool flag " + flag.Name + ": " + err.Error())
+				}
+				flagValues.SetBool(flag.Name, value)
+				flagValues.SetBool(flag.Binding, value)
+			case spec.FlagTypeString:
+				value, err := cmd.Flags().GetString(flag.Name)
+				if err != nil {
+					gklog.LoggerFromContext(ctx).ErrorContext(ctx, "cli.read_string_flag_failed", "flag", flag.Name, "err", err)
+					slog.Default().ErrorContext(ctx, "cli.read_string_flag_failed", "flag", flag.Name, "err", err)
+					return errors.New("read string flag " + flag.Name + ": " + err.Error())
+				}
+				flagValues.SetString(flag.Name, value)
+				flagValues.SetString(flag.Binding, value)
+			}
+		}
 
-func newCodexCLICmd(ctx context.Context, out io.Writer) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "codex-cli",
-		Short: "Build, sign, install, and inspect the local Codex CLI",
+		var appTarget *targets.Target
+		if target != nil {
+			copied := *target
+			if appPath := flagValues.String("app-path"); appPath != "" {
+				copied.AppPath = appPath
+			}
+			appTarget = &copied
+		}
+		return runner(ctx, operations.Request{
+			Out:        out,
+			App:        appTarget,
+			CLI:        program,
+			Capability: operation.Capability,
+			Flags:      flagValues,
+		})
 	}
-	cmd.SetContext(ctx)
-	cmd.AddCommand(newCodexCLIUpgradeCmd(ctx, out))
-	cmd.AddCommand(newCodexCLIStatusCmd(ctx, out))
-	return cmd
-}
 
-func newCodexCLIUpgradeCmd(ctx context.Context, out io.Writer) *cobra.Command {
-	var dryRun bool
-	var sourceDir string
-	var ref string
-	var installDir string
-	var codexHome string
-	var buildMode string
-	var noSccache bool
-	var forceRebuild bool
-	cmd := &cobra.Command{
-		Use:     "upgrade",
-		Aliases: []string{"install"},
-		Short:   "Clone or update Codex source, build the CLI, sign it locally, and install it",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return codexcli.Install(ctx, codexcli.InstallOptions{
-				DryRun:       dryRun,
-				SourceDir:    sourceDir,
-				Ref:          ref,
-				InstallDir:   installDir,
-				CodexHome:    codexHome,
-				BuildMode:    buildMode,
-				NoSccache:    noSccache,
-				ForceRebuild: forceRebuild,
-				Out:          out,
-			})
-		},
-	}
-	cmd.SetContext(ctx)
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print every step without modifying the filesystem")
-	cmd.Flags().StringVar(&sourceDir, "source-dir", "", "Codex source checkout path (default XDG cache)")
-	cmd.Flags().StringVar(&ref, "ref", codexcli.DefaultRef(), "upstream Codex ref to fetch and build")
-	cmd.Flags().StringVar(&installDir, "install-dir", "", "directory for the visible codex command")
-	cmd.Flags().StringVar(&codexHome, "codex-home", "", "Codex home for standalone package releases")
-	cmd.Flags().StringVar(&buildMode, "build-mode", codexcli.DefaultBuildMode(), "entrypoint build mode (local-fast or release)")
-	cmd.Flags().BoolVar(&noSccache, "no-sccache", false, "disable automatic sccache wrapper detection for the Cargo build")
-	cmd.Flags().BoolVar(&forceRebuild, "force-rebuild", false, "skip same-head installed release reuse and rebuild the entrypoint")
-	return cmd
-}
-
-func newCodexCLIStatusCmd(ctx context.Context, out io.Writer) *cobra.Command {
-	var sourceDir string
-	var installDir string
-	var codexHome string
-	cmd := &cobra.Command{
-		Use:   "status",
-		Short: "Print local Codex CLI source, install, and signing state",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return codexcli.Status(ctx, codexcli.StatusOptions{
-				SourceDir:  sourceDir,
-				InstallDir: installDir,
-				CodexHome:  codexHome,
-				Out:        out,
-			})
-		},
-	}
-	cmd.SetContext(ctx)
-	cmd.Flags().StringVar(&sourceDir, "source-dir", "", "Codex source checkout path (default XDG cache)")
-	cmd.Flags().StringVar(&installDir, "install-dir", "", "directory for the visible codex command")
-	cmd.Flags().StringVar(&codexHome, "codex-home", "", "Codex home for standalone package releases")
 	return cmd
 }
 
 func newStatusCmd(ctx context.Context, out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Print per-target state (clean/patched/drifted) and bundle metadata",
+		Short: "Print per-target state (clean, patched, drifted) and bundle metadata",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			log := gklog.LoggerFromContext(ctx)
 			ms, err := state.Load(paths.StateFile())
@@ -319,8 +233,8 @@ func newStatusCmd(ctx context.Context, out io.Writer) *cobra.Command {
 			}
 			fmt.Fprintf(out, "state file: %s\n", paths.StateFile())
 			fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", "TARGET", "STATE", "VERSION", "NOTES")
-			for _, t := range targets.All() {
-				printTargetStatus(out, t, ms)
+			for _, target := range targets.All() {
+				printTargetStatus(out, target, ms)
 			}
 			return nil
 		},
@@ -329,55 +243,47 @@ func newStatusCmd(ctx context.Context, out io.Writer) *cobra.Command {
 	return cmd
 }
 
-func newTargetStatusCmd(ctx context.Context, out io.Writer, target targets.Target) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "status",
-		Short: "Print state for this target",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			log := gklog.LoggerFromContext(ctx)
-			ms, err := state.Load(paths.StateFile())
-			if err != nil {
-				log.ErrorContext(ctx, "target_status.load_state_failed", "target", target.ID, "err", err)
-				return fmt.Errorf("load state file %s: %w", paths.StateFile(), err)
-			}
-			fmt.Fprintf(out, "state file: %s\n", paths.StateFile())
-			fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", "TARGET", "STATE", "VERSION", "NOTES")
-			printTargetStatus(out, target, ms)
-			return nil
-		},
-	}
-	cmd.SetContext(ctx)
-	return cmd
-}
-
-func printTargetStatus(out io.Writer, t targets.Target, ms state.MultiState) {
-	entry, patched := ms.Targets[t.ID]
-	if _, err := os.Stat(t.AppPath); err != nil {
-		fmt.Fprintf(out, "%-8s  %-9s  %-20s  bundle missing at %s\n", t.ID, "absent", "-", t.AppPath)
+func printTargetStatus(out io.Writer, target targets.Target, ms state.MultiState) {
+	entry, patched := ms.Targets[target.ID]
+	if _, err := os.Stat(target.AppPath); err != nil {
+		fmt.Fprintf(out, "%-8s  %-9s  %-20s  bundle missing at %s\n", target.ID, "absent", "-", target.AppPath)
 		return
 	}
 	if !patched {
-		fmt.Fprintf(out, "%-8s  %-9s  %-20s  bundle present, no state entry\n", t.ID, "clean", "-")
+		fmt.Fprintf(out, "%-8s  %-9s  %-20s  bundle present, no state entry\n", target.ID, "clean", "-")
 		return
 	}
-	curVer := readBundleVersion(t)
+	curVer := readBundleVersion(target)
 	stateLabel := "patched"
 	notes := fmt.Sprintf("signed-as=%q", entry.SignIdentity)
-	realPath := paths.RealBinaryPath(t)
+	realPath := paths.RealBinaryPath(target)
 	if _, err := os.Stat(realPath); err != nil {
 		stateLabel = "drifted"
-		notes = notes + "; " + t.ExecName + ".real missing"
+		notes = notes + "; " + target.ExecName + ".real missing"
 	} else if curVer != "" && curVer != entry.PatchedVersion {
 		stateLabel = "drifted"
 		notes += fmt.Sprintf("; current version %s != patched %s", curVer, entry.PatchedVersion)
 	}
-	fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", t.ID, stateLabel, entry.PatchedVersion, notes)
+	fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", target.ID, stateLabel, entry.PatchedVersion, notes)
 }
 
-func readBundleVersion(t targets.Target) string {
-	info, err := patch.ReadInfoPlist(paths.InfoPlistPath(t))
+func readBundleVersion(target targets.Target) string {
+	info, err := patch.ReadInfoPlist(paths.InfoPlistPath(target))
 	if err != nil {
 		return ""
 	}
 	return info.CFBundleVersion
+}
+
+func sortedOperations(operationsMap map[string]spec.OperationSpec) []spec.OperationSpec {
+	ids := make([]string, 0, len(operationsMap))
+	for id := range operationsMap {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	operations := make([]spec.OperationSpec, 0, len(ids))
+	for _, id := range ids {
+		operations = append(operations, operationsMap[id])
+	}
+	return operations
 }

@@ -20,7 +20,39 @@ type Runner struct {
 	DryRun bool
 	Out    io.Writer
 	Log    *slog.Logger
+	Trace  *Trace
 	ctxFn  func() context.Context
+}
+
+// Action names one workflow action in the structured test trace.
+type Action string
+
+const (
+	actionRepairBundledComputerUse     Action = "repair_bundled_computer_use"
+	actionRepairComputerUseAuthPlugin  Action = "repair_computer_use_auth_plugin"
+	actionRepairComputerUseTrustedTeam Action = "repair_computer_use_trusted_team"
+	actionRepairComputerUseRequirement Action = "repair_computer_use_requirement"
+	actionScanComputerUseCache         Action = "scan_computer_use_cache"
+	actionSignComputerUseHelper        Action = "sign_computer_use_helper"
+	actionRestorePreservedNestedCode   Action = "restore_preserved_nested_code"
+	actionSignBundle                   Action = "sign_bundle"
+	actionSignNestedCode               Action = "sign_nested_code"
+	actionRunCommand                   Action = "run_command"
+	actionRunCommandWithCapturedStdout Action = "run_command_with_captured_stdout"
+)
+
+// Trace records structured workflow events for tests.
+type Trace struct {
+	Events []TraceEvent
+}
+
+// TraceEvent records one structured workflow event.
+type TraceEvent struct {
+	Action  Action
+	Target  string
+	Path    string
+	Command string
+	Args    []string
 }
 
 // NewRunner constructs a Runner that writes progress to out.
@@ -32,6 +64,7 @@ func NewRunner(ctx context.Context, dryRun bool, out io.Writer) *Runner {
 		DryRun: dryRun,
 		Out:    out,
 		Log:    gklog.LoggerFromContext(ctx),
+		Trace:  nil,
 		ctxFn: func() context.Context {
 			if ctx == nil {
 				return context.Background()
@@ -46,6 +79,7 @@ func NewRunner(ctx context.Context, dryRun bool, out io.Writer) *Runner {
 func (r *Runner) Run(ctx context.Context, name string, args ...string) error {
 	ctx = coalesceContext(ctx, r.context())
 	r.Log.DebugContext(ctx, "runner.run.boundary", "command", name, "args", args, "dry_run", r.DryRun)
+	traceCommand(r, actionRunCommand, name, args)
 	r.logCommand(nil, name, args...)
 	r.logInfo(ctx, "runner.command.start",
 		slog.String("command", name),
@@ -74,6 +108,7 @@ func (r *Runner) Run(ctx context.Context, name string, args ...string) error {
 // still running.
 func (r *Runner) RunWithHeartbeat(ctx context.Context, label string, interval time.Duration, name string, args ...string) error {
 	ctx = coalesceContext(ctx, r.context())
+	traceCommand(r, actionRunCommand, name, args)
 	r.logCommand(nil, name, args...)
 	r.logInfo(ctx, "runner.command.start",
 		slog.String("label", label),
@@ -172,6 +207,7 @@ func (r *Runner) runEnvInDirWithHeartbeat(
 	args ...string,
 ) error {
 	ctx = coalesceContext(ctx, r.context())
+	traceCommand(r, actionRunCommand, name, args)
 	r.logCommandInDir(env, workDir, name, args...)
 	r.logInfo(ctx, "runner.command.start",
 		slog.String("label", label),
@@ -242,6 +278,7 @@ func (r *Runner) runEnvInDirWithHeartbeat(
 func (r *Runner) RunCaptureStdout(ctx context.Context, name string, args ...string) ([]byte, error) {
 	ctx = coalesceContext(ctx, r.context())
 	r.Log.DebugContext(ctx, "runner.capture_stdout.boundary", "command", name, "args", args, "dry_run", r.DryRun)
+	traceCommand(r, actionRunCommandWithCapturedStdout, name, args)
 	r.logCommand(nil, name, args...)
 	r.logInfo(ctx, "runner.command.start",
 		slog.String("command", name),
@@ -324,6 +361,32 @@ func (r *Runner) logError(ctx context.Context, msg string, err error, attrs ...s
 
 func notef(r *Runner, message string) {
 	fmt.Fprintf(r.Out, "%s %s\n", r.prefix(), message)
+}
+
+func traceAction(r *Runner, action Action, target string, path string) {
+	if r == nil || r.Trace == nil {
+		return
+	}
+	r.Trace.Events = append(r.Trace.Events, TraceEvent{
+		Action:  action,
+		Target:  target,
+		Path:    path,
+		Command: "",
+		Args:    nil,
+	})
+}
+
+func traceCommand(r *Runner, action Action, command string, args []string) {
+	if r == nil || r.Trace == nil {
+		return
+	}
+	r.Trace.Events = append(r.Trace.Events, TraceEvent{
+		Action:  action,
+		Target:  "",
+		Path:    "",
+		Command: command,
+		Args:    append([]string(nil), args...),
+	})
 }
 
 func joinArgs(args []string) string {

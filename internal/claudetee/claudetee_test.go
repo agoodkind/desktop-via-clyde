@@ -7,8 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+)
 
-	"goodkind.io/desktop-via-clyde/internal/config"
+const (
+	testAppSupportRel = "Library/Application Support/Claude/claude-code"
+	testBundledCLIRel = "claude.app/Contents/MacOS/claude"
 )
 
 func TestCompareVersionsNumericOrdering(t *testing.T) {
@@ -34,7 +37,7 @@ func TestCompareVersionsNumericOrdering(t *testing.T) {
 
 func TestResolveBundledCLIPathPicksGreatestVersion(t *testing.T) {
 	home := t.TempDir()
-	appSupport := filepath.Join(home, AppSupportRel)
+	appSupport := filepath.Join(home, testAppSupportRel)
 	// Three versions; the resolver must pick the greatest by version sort.
 	for _, v := range []string{"2.1.99", "2.1.150", "2.1.149"} {
 		dir := filepath.Join(appSupport, v, "claude.app", "Contents", "MacOS")
@@ -45,11 +48,23 @@ func TestResolveBundledCLIPathPicksGreatestVersion(t *testing.T) {
 			t.Fatalf("write claude: %v", err)
 		}
 	}
-	got, err := ResolveBundledCLIPath(Options{HomeDir: home})
+	got, err := ResolveBundledCLIPath(Options{
+		DryRun:                   false,
+		AppSupportDir:            appSupport,
+		VersionDir:               "",
+		BundledCLIRel:            testBundledCLIRel,
+		BundledCLIPath:           "",
+		TerminateProcessNames:    nil,
+		TerminateProcessPatterns: nil,
+		CompletionSteps:          nil,
+		LogDir:                   "",
+		Out:                      nil,
+		Trace:                    nil,
+	})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	want := filepath.Join(home, AppSupportRel, "2.1.150", BundledCLIRel)
+	want := filepath.Join(home, testAppSupportRel, "2.1.150", testBundledCLIRel)
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -57,11 +72,24 @@ func TestResolveBundledCLIPathPicksGreatestVersion(t *testing.T) {
 
 func TestResolveBundledCLIPathHonorsVersionDirOverride(t *testing.T) {
 	home := t.TempDir()
-	got, err := ResolveBundledCLIPath(Options{HomeDir: home, VersionDir: "9.9.9"})
+	appSupport := filepath.Join(home, testAppSupportRel)
+	got, err := ResolveBundledCLIPath(Options{
+		DryRun:                   false,
+		AppSupportDir:            appSupport,
+		VersionDir:               "9.9.9",
+		BundledCLIRel:            testBundledCLIRel,
+		BundledCLIPath:           "",
+		TerminateProcessNames:    nil,
+		TerminateProcessPatterns: nil,
+		CompletionSteps:          nil,
+		LogDir:                   "",
+		Out:                      nil,
+		Trace:                    nil,
+	})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	want := filepath.Join(home, AppSupportRel, "9.9.9", BundledCLIRel)
+	want := filepath.Join(home, testAppSupportRel, "9.9.9", testBundledCLIRel)
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -70,9 +98,17 @@ func TestResolveBundledCLIPathHonorsVersionDirOverride(t *testing.T) {
 func TestResolveBundledCLIPathHonorsBundledCLIPathOverride(t *testing.T) {
 	override := "/some/explicit/path/claude"
 	got, err := ResolveBundledCLIPath(Options{
-		HomeDir:        "/tmp/should-be-ignored",
-		VersionDir:     "should-be-ignored",
-		BundledCLIPath: override,
+		DryRun:                   false,
+		AppSupportDir:            "",
+		VersionDir:               "should-be-ignored",
+		BundledCLIRel:            "",
+		BundledCLIPath:           override,
+		TerminateProcessNames:    nil,
+		TerminateProcessPatterns: nil,
+		CompletionSteps:          nil,
+		LogDir:                   "",
+		Out:                      nil,
+		Trace:                    nil,
 	})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -82,34 +118,19 @@ func TestResolveBundledCLIPathHonorsBundledCLIPathOverride(t *testing.T) {
 	}
 }
 
-func TestResolveBundledCLIPathUsesConfigVersionDir(t *testing.T) {
-	cfg := config.Default()
-	cfg.Apps.Claude.BundledCLITee.VersionDir = "7.7.7"
-	config.SetCurrent(cfg)
-	defer config.SetCurrent(nil)
-
-	home := t.TempDir()
-	got, err := ResolveBundledCLIPath(Options{HomeDir: home})
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	want := filepath.Join(home, AppSupportRel, "7.7.7", BundledCLIRel)
-	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
 func TestInstallDryRunWritesNothing(t *testing.T) {
-	home, bundled := setupFakeBundledCLI(t)
+	opts, bundled := setupFakeBundledCLI(t)
 	originalBytes := mustRead(t, bundled)
 
 	var out bytes.Buffer
-	err := Install(context.Background(), Options{
-		HomeDir: home,
-		DryRun:  true,
-		LogDir:  "/tmp/should-show-up",
-		Out:     &out,
-	})
+	trace := &Trace{}
+	opts.DryRun = true
+	opts.LogDir = "/tmp/should-show-up"
+	opts.TerminateProcessNames = []string{"ExampleApp"}
+	opts.TerminateProcessPatterns = []string{"example-helper/.*/child"}
+	opts.Out = &out
+	opts.Trace = trace
+	err := Install(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("dry-run install: %v", err)
 	}
@@ -120,20 +141,28 @@ func TestInstallDryRunWritesNothing(t *testing.T) {
 	if _, err := os.Stat(bundled + ".real"); err == nil {
 		t.Fatalf(".real sibling unexpectedly created by dry-run install")
 	}
-	for _, want := range []string{"dry-run:", "/tmp/should-show-up", bundled, bundled + ".real"} {
-		if !strings.Contains(out.String(), want) {
-			t.Fatalf("dry-run output missing %q\n%s", want, out.String())
-		}
+	requireTeeTraceTarget(t, trace, actionResolveInstallTarget, bundled, "/tmp/should-show-up")
+	requireTeeTraceProcessName(t, trace, "ExampleApp")
+	requireTeeTraceProcessPattern(t, trace, "example-helper/.*/child")
+	requireTeeTraceRename(t, trace, actionRenameBundledCLI, bundled, bundled+".real")
+	requireTeeTracePath(t, trace, actionWriteShim, bundled)
+}
+
+func TestRenderCompletionStepSubstitutesLogDir(t *testing.T) {
+	got := renderCompletionStep("read logs under {log_dir}/", "/tmp/example-logs")
+	if got != "read logs under /tmp/example-logs/" {
+		t.Fatalf("renderCompletionStep = %q", got)
 	}
 }
 
 func TestInstallRefusesWhenRealExists(t *testing.T) {
-	home, bundled := setupFakeBundledCLI(t)
+	opts, bundled := setupFakeBundledCLI(t)
 	if err := os.WriteFile(bundled+".real", []byte("pre-existing"), 0o755); err != nil {
 		t.Fatalf("seed .real: %v", err)
 	}
 	var out bytes.Buffer
-	err := Install(context.Background(), Options{HomeDir: home, Out: &out})
+	opts.Out = &out
+	err := Install(context.Background(), opts)
 	if err == nil {
 		t.Fatalf("expected install to refuse when .real already exists")
 	}
@@ -143,9 +172,10 @@ func TestInstallRefusesWhenRealExists(t *testing.T) {
 }
 
 func TestUninstallRefusesWhenNoRealSibling(t *testing.T) {
-	home, _ := setupFakeBundledCLI(t)
+	opts, _ := setupFakeBundledCLI(t)
 	var out bytes.Buffer
-	err := Uninstall(context.Background(), Options{HomeDir: home, Out: &out})
+	opts.Out = &out
+	err := Uninstall(context.Background(), opts)
 	if err == nil {
 		t.Fatalf("expected uninstall to refuse when there is no .real")
 	}
@@ -158,10 +188,11 @@ func TestUninstallRefusesWhenNoRealSibling(t *testing.T) {
 // under a temp HOME and returns the home dir plus the bundled CLI path. The
 // fake claude binary is just a few bytes; tests that need a working real
 // binary use a shell script when needed.
-func setupFakeBundledCLI(t *testing.T) (homeDir string, bundledCLIPath string) {
+func setupFakeBundledCLI(t *testing.T) (Options, string) {
 	t.Helper()
 	home := t.TempDir()
-	dir := filepath.Join(home, AppSupportRel, "2.1.149", "claude.app", "Contents", "MacOS")
+	appSupport := filepath.Join(home, testAppSupportRel)
+	dir := filepath.Join(appSupport, "2.1.149", "claude.app", "Contents", "MacOS")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -169,7 +200,69 @@ func setupFakeBundledCLI(t *testing.T) (homeDir string, bundledCLIPath string) {
 	if err := os.WriteFile(bundled, []byte("fake-original-claude"), 0o755); err != nil {
 		t.Fatalf("write fake claude: %v", err)
 	}
-	return home, bundled
+	return Options{
+		DryRun:                   false,
+		AppSupportDir:            appSupport,
+		VersionDir:               "",
+		BundledCLIRel:            testBundledCLIRel,
+		BundledCLIPath:           "",
+		TerminateProcessNames:    nil,
+		TerminateProcessPatterns: nil,
+		CompletionSteps:          nil,
+		LogDir:                   "",
+		Out:                      nil,
+		Trace:                    nil,
+	}, bundled
+}
+
+func requireTeeTraceTarget(t *testing.T, trace *Trace, action Action, path string, logDir string) {
+	t.Helper()
+	for _, event := range trace.Events {
+		if event.Action == action && event.Path == path && event.LogDir == logDir {
+			return
+		}
+	}
+	t.Fatalf("trace missing action=%s path=%s logDir=%s events=%#v", action, path, logDir, trace.Events)
+}
+
+func requireTeeTraceRename(t *testing.T, trace *Trace, action Action, from string, to string) {
+	t.Helper()
+	for _, event := range trace.Events {
+		if event.Action == action && event.From == from && event.To == to {
+			return
+		}
+	}
+	t.Fatalf("trace missing action=%s from=%s to=%s events=%#v", action, from, to, trace.Events)
+}
+
+func requireTeeTraceProcessName(t *testing.T, trace *Trace, name string) {
+	t.Helper()
+	for _, event := range trace.Events {
+		if event.Action == actionStopProcessName && event.Name == name {
+			return
+		}
+	}
+	t.Fatalf("trace missing process name=%s events=%#v", name, trace.Events)
+}
+
+func requireTeeTraceProcessPattern(t *testing.T, trace *Trace, pattern string) {
+	t.Helper()
+	for _, event := range trace.Events {
+		if event.Action == actionStopProcessPattern && event.Pattern == pattern {
+			return
+		}
+	}
+	t.Fatalf("trace missing process pattern=%s events=%#v", pattern, trace.Events)
+}
+
+func requireTeeTracePath(t *testing.T, trace *Trace, action Action, path string) {
+	t.Helper()
+	for _, event := range trace.Events {
+		if event.Action == action && event.Path == path {
+			return
+		}
+	}
+	t.Fatalf("trace missing action=%s path=%s events=%#v", action, path, trace.Events)
 }
 
 func mustRead(t *testing.T, path string) []byte {

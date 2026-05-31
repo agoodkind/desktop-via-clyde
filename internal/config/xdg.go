@@ -69,14 +69,14 @@ func cleanExpandedPath(path string) string {
 }
 
 func expandLeadingHome(path string) string {
-	if path == "~" {
+	if len(path) == 1 && path[0] == '~' {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return path
 		}
 		return home
 	}
-	if strings.HasPrefix(path, "~/") {
+	if len(path) >= 2 && path[0] == '~' && path[1] == '/' {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return path

@@ -3,16 +3,19 @@ package codexcli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 )
 
 func TestInstallDryRunUsesShallowGhCloneAndOriginMain(t *testing.T) {
+	installFixture(t)
 	if runtime.GOOS != "darwin" {
 		t.Skip("codex-cli install is macOS-only")
 	}
@@ -22,51 +25,50 @@ func TestInstallDryRunUsesShallowGhCloneAndOriginMain(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", cacheHome)
 
 	var out bytes.Buffer
-	err := Install(context.Background(), InstallOptions{
-		DryRun:    true,
-		BuildMode: string(BuildModeRelease),
-		Out:       &out,
-	})
+	trace := &patch.Trace{}
+	opts := testInstallOptions(home, cacheHome)
+	opts.BuildMode = string(BuildModeRelease)
+	opts.Out = &out
+	opts.Trace = trace
+	err := Install(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("Install dry-run: %v", err)
 	}
-	log := out.String()
 	sourceDir := filepath.Join(cacheHome, "clyde", "desktop-via-clyde", "codex", "source")
-	assertContains(t, log, "codex-cli step 1/7: update Codex source checkout")
-	assertContains(t, log, "codex-cli: source checkout missing, cloning openai/codex with depth 1")
-	assertContains(t, log, "gh repo clone openai/codex "+sourceDir+" -- --depth 1")
-	assertContains(t, log, "codex-cli: fetching origin/main from origin with depth 1")
-	assertContains(t, log, "git -C "+sourceDir+" fetch --depth 1 --prune origin main")
-	assertContains(t, log, "git -C "+sourceDir+" checkout --detach FETCH_HEAD")
-	assertContains(t, log, "codex-cli step 2/7: build upstream Codex entrypoint")
 	codexRoot := filepath.Join(sourceDir, "codex-rs")
-	assertContains(t, log, "codex-cli: Cargo build will run from "+codexRoot+" so rustup honors upstream rust-toolchain.toml")
-	assertContains(t, log, "codex-cli: release mode preserves the upstream release profile exactly")
-	assertContains(t, log, "codex-cli: installing or updating upstream Rust toolchain from "+filepath.Join(codexRoot, "rust-toolchain.toml"))
-	assertContains(t, log, "cd "+codexRoot)
-	assertContains(t, log, "rustup toolchain install")
-	assertContains(t, log, "cargo build")
-	assertContains(t, log, "--target aarch64-apple-darwin --release --timings --bin codex -v")
-	assertContains(t, log, "codex-cli step 3/7: sign upstream Codex entrypoint")
-	assertContains(t, log, "codex-cli: using upstream entitlements")
-	assertContains(t, log, "/usr/bin/codesign --force --options runtime --timestamp --entitlements")
-	assertContains(t, log, "codex-cli step 4/7: build upstream Codex package")
-	assertContains(t, log, "codex-cli: upstream package builder output follows")
-	assertContains(t, log, "python3 "+filepath.Join(sourceDir, "scripts", "build_codex_package.py"))
-	assertContains(t, log, "--entrypoint-bin "+filepath.Join(sourceDir, "codex-rs", "target", "aarch64-apple-darwin", "release", "codex"))
-	assertContains(t, log, "codex-cli step 6/7: install standalone package")
-	assertContains(t, log, "codex-cli: would stage package at")
-	assertContains(t, log, "codex-cli step 7/7: verify installed command")
-	assertContains(t, log, "codex-cli: verifying executable by running")
+	requireTraceCommand(t, trace, "gh", []string{"repo", "clone", "openai/codex", sourceDir, "--", "--depth", "1"})
+	requireTraceCommand(t, trace, "git", []string{"-C", sourceDir, "fetch", "--depth", "1", "--prune", "origin", "main"})
+	requireTraceCommand(t, trace, "git", []string{"-C", sourceDir, "checkout", "--detach", "FETCH_HEAD"})
+	requireTraceCommand(t, trace, "rustup", []string{"toolchain", "install"})
+	requireTraceCommand(t, trace, "cargo", []string{"build", "--target", "aarch64-apple-darwin", "--release", "--timings", "--bin", "codex", "-v"})
+	requireTraceCommand(t, trace, "python3", []string{
+		filepath.Join(sourceDir, "scripts", "build_codex_package.py"),
+		"--target",
+		"aarch64-apple-darwin",
+		"--variant",
+		"codex",
+		"--package-dir",
+		filepath.Join(cacheHome, "clyde", "desktop-via-clyde", "codex", "package"),
+		"--cargo-profile",
+		"release",
+		"--entrypoint-bin",
+		filepath.Join(codexRoot, "target", "aarch64-apple-darwin", "release", "codex"),
+		"--force",
+	})
 }
 
-func TestDefaultBuildModeIsLocalFast(t *testing.T) {
-	if got := DefaultBuildMode(); got != string(BuildModeLocalFast) {
-		t.Fatalf("DefaultBuildMode = %q, want %q", got, string(BuildModeLocalFast))
+func TestInstallRejectsMissingBuildMode(t *testing.T) {
+	installFixture(t)
+	opts := testInstallOptions(t.TempDir(), t.TempDir())
+	opts.BuildMode = ""
+	err := Install(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "build-mode is required") {
+		t.Fatalf("Install missing build mode err = %v", err)
 	}
 }
 
-func TestInstallDryRunDefaultsToLocalFastWhenBuildModeUnset(t *testing.T) {
+func TestInstallDryRunUsesConfiguredLocalFastBuildMode(t *testing.T) {
+	installFixture(t)
 	if runtime.GOOS != "darwin" {
 		t.Skip("codex-cli install is macOS-only")
 	}
@@ -75,21 +77,20 @@ func TestInstallDryRunDefaultsToLocalFastWhenBuildModeUnset(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", cacheHome)
 
-	var out bytes.Buffer
-	err := Install(context.Background(), InstallOptions{
-		DryRun: true,
-		Out:    &out,
-	})
+	trace := &patch.Trace{}
+	opts := testInstallOptions(home, cacheHome)
+	opts.BuildMode = string(BuildModeLocalFast)
+	opts.Out = io.Discard
+	opts.Trace = trace
+	err := Install(context.Background(), opts)
 	if err != nil {
-		t.Fatalf("Install dry-run with default build mode: %v", err)
+		t.Fatalf("Install dry-run with local-fast build mode: %v", err)
 	}
-	log := out.String()
-	assertContains(t, log, "build-mode=local-fast")
-	assertContains(t, log, "codex-cli: local-fast mode overrides release settings with lto=false and codegen-units=")
-	assertContains(t, log, "--config profile.release.lto=false")
+	requireTraceCommandContains(t, trace, "cargo", "--config", "profile.release.lto=false")
 }
 
 func TestInstallDryRunLocalFastAddsCargoOverrides(t *testing.T) {
+	installFixture(t)
 	if runtime.GOOS != "darwin" {
 		t.Skip("codex-cli install is macOS-only")
 	}
@@ -98,21 +99,16 @@ func TestInstallDryRunLocalFastAddsCargoOverrides(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", cacheHome)
 
-	var out bytes.Buffer
-	err := Install(context.Background(), InstallOptions{
-		DryRun:    true,
-		BuildMode: string(BuildModeLocalFast),
-		Out:       &out,
-	})
+	trace := &patch.Trace{}
+	opts := testInstallOptions(home, cacheHome)
+	opts.BuildMode = string(BuildModeLocalFast)
+	opts.Out = io.Discard
+	opts.Trace = trace
+	err := Install(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("Install local-fast dry-run: %v", err)
 	}
-	log := out.String()
-	assertContains(t, log, "build-mode=local-fast")
-	assertContains(t, log, "codex-cli: local-fast mode overrides release settings with lto=false and codegen-units=")
-	assertContains(t, log, "--config profile.release.lto=false")
-	assertContains(t, log, "--config profile.release.codegen-units=")
-	assertContains(t, log, "dryrun-main-dryrun-aarch64-apple-darwin-local-fast")
+	requireTraceCommandContains(t, trace, "cargo", "--config", "profile.release.codegen-units=")
 }
 
 func TestReadPackageMetadata(t *testing.T) {
@@ -121,7 +117,7 @@ func TestReadPackageMetadata(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(packageDir, "codex-package.json"), body, 0o644); err != nil {
 		t.Fatalf("WriteFile metadata: %v", err)
 	}
-	got, err := readPackageMetadata(packageDir)
+	got, err := readPackageMetadata(packageDir, "codex")
 	if err != nil {
 		t.Fatalf("readPackageMetadata: %v", err)
 	}
@@ -152,13 +148,13 @@ func TestInstallPackageCreatesStandaloneLinks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(packageDir, "codex-package.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatalf("WriteFile package metadata: %v", err)
 	}
-	codexHome := filepath.Join(root, "codex-home")
+	packageHome := filepath.Join(root, "package-home")
 	installDir := filepath.Join(root, "bin")
-	releaseDir := filepath.Join(codexHome, "packages", "standalone", "releases", "0.133.0-main-abcdef-aarch64-apple-darwin")
-	if err := installPackage(context.Background(), patch.NewRunner(context.Background(), false, &bytes.Buffer{}), packageDir, releaseDir, codexHome, installDir); err != nil {
+	releaseDir := filepath.Join(packageHome, "packages", "standalone", "releases", "0.133.0-main-abcdef-aarch64-apple-darwin")
+	if err := installPackage(context.Background(), patch.NewRunner(context.Background(), false, &bytes.Buffer{}), packageDir, releaseDir, packageHome, installDir, "bin/codex", "codex"); err != nil {
 		t.Fatalf("installPackage: %v", err)
 	}
-	currentLink := filepath.Join(codexHome, "packages", "standalone", "current")
+	currentLink := filepath.Join(packageHome, "packages", "standalone", "current")
 	currentTarget, err := os.Readlink(currentLink)
 	if err != nil {
 		t.Fatalf("Readlink current: %v", err)
@@ -193,6 +189,25 @@ func TestParseEnvOutput(t *testing.T) {
 	}
 	if env["RUSTY_V8_SRC_BINDING_PATH"] != "/tmp/binding" {
 		t.Fatalf("RUSTY_V8_SRC_BINDING_PATH = %q", env["RUSTY_V8_SRC_BINDING_PATH"])
+	}
+}
+
+func testInstallOptions(home string, cacheHome string) InstallOptions {
+	return InstallOptions{
+		DryRun:            true,
+		Repo:              "openai/codex",
+		SourceDir:         filepath.Join(cacheHome, "clyde", "desktop-via-clyde", "codex", "source"),
+		Ref:               "origin/main",
+		PackageDir:        filepath.Join(cacheHome, "clyde", "desktop-via-clyde", "codex", "package"),
+		PackageVariant:    "codex",
+		PackageBinaryPath: "bin/codex",
+		CommandName:       "codex",
+		InstallDir:        filepath.Join(home, ".local", "bin"),
+		PackageHome:       filepath.Join(home, ".codex"),
+		BuildMode:         string(BuildModeLocalFast),
+		NoSccache:         false,
+		ForceRebuild:      false,
+		Out:               nil,
 	}
 }
 
@@ -263,9 +278,68 @@ func TestResolveRustcWrapper(t *testing.T) {
 	}
 }
 
-func assertContains(t *testing.T, haystack string, needle string) {
+func requireTraceCommand(t *testing.T, trace *patch.Trace, command string, args []string) {
 	t.Helper()
-	if !strings.Contains(haystack, needle) {
-		t.Fatalf("expected %q in:\n%s", needle, haystack)
+	for _, event := range trace.Events {
+		if event.Command != command {
+			continue
+		}
+		if equalStrings(event.Args, args) {
+			return
+		}
 	}
+	t.Fatalf("trace missing command=%s args=%v events=%#v", command, args, trace.Events)
+}
+
+func requireTraceCommandContains(t *testing.T, trace *patch.Trace, command string, needles ...string) {
+	t.Helper()
+	for _, event := range trace.Events {
+		if event.Command != command {
+			continue
+		}
+		if argsContainAll(event.Args, needles) {
+			return
+		}
+	}
+	t.Fatalf("trace missing command=%s args containing %v events=%#v", command, needles, trace.Events)
+}
+
+func argsContainAll(args []string, needles []string) bool {
+	for _, needle := range needles {
+		found := false
+		for _, arg := range args {
+			if arg == needle || strings.HasPrefix(arg, needle) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func equalStrings(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func installFixture(t *testing.T) {
+	t.Helper()
+	cfg, err := config.LoadPath(filepath.Join("..", "testconfig", "testdata", "current-config.toml"))
+	if err != nil {
+		t.Fatalf("LoadPath(current-config.toml): %v", err)
+	}
+	config.SetCurrent(cfg)
+	t.Cleanup(func() {
+		config.SetCurrent(nil)
+	})
 }

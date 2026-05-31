@@ -1,0 +1,748 @@
+[signing]
+identity = "Developer ID Application: Alex Goodkind (H3BMXM4W7H)"
+team_id = "H3BMXM4W7H"
+
+[apps.cursor]
+app_path = "/Applications/Cursor.app"
+bundle_id = "com.todesktop.230313mzl4w4u92"
+exec_name = "Cursor"
+keychain_services = ["Cursor Safe Storage"]
+
+[apps.cursor.command]
+use = "cursor"
+short = "Operate on /Applications/Cursor.app"
+
+[apps.cursor.entitlements]
+required_boolean = [
+    "com.apple.security.automation.apple-events",
+    "com.apple.security.cs.disable-library-validation",
+]
+
+[apps.cursor.updater]
+kind = "http_path_json_manifest"
+url_template = "https://api2.cursor.sh/updates/api/update/{platform}/{product}/{version}/{commit}/{channel}"
+user_agent = "Cursor/{version}"
+platform = "darwin-arm64"
+product = "cursor"
+default_channel = "dev"
+
+[[apps.cursor.updater.channels]]
+name = "stable"
+
+[[apps.cursor.updater.channels]]
+name = "dev"
+
+[apps.cursor.launch_policy]
+proxy_host = "::1"
+proxy_port = 48723
+ca_certificate = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+no_proxy = "localhost,127.0.0.1,::1,[::1]"
+launch_working_directory = "/Users/agoodkind"
+
+[[apps.cursor.launch_policy.preflights]]
+kind = "file_exists"
+path = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.cursor.launch_policy.preflights]]
+kind = "tcp_reachable"
+host = "::1"
+port = 48723
+timeout_ms = 1000
+
+[[apps.cursor.launch_policy.environment]]
+action = "set"
+key = "NODE_EXTRA_CA_CERTS"
+value = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.cursor.launch_policy.environment]]
+action = "set"
+key = "SSL_CERT_FILE"
+value = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.cursor.launch_policy.environment]]
+action = "set"
+key = "NODE_OPTIONS"
+value = "--use-openssl-ca"
+
+[[apps.cursor.launch_policy.environment]]
+action = "set"
+key = "NODE_TLS_REJECT_UNAUTHORIZED"
+value = "0"
+
+[[apps.cursor.launch_policy.environment]]
+action = "set"
+key = "HTTPS_PROXY"
+value = "http://[::1]:48723"
+
+[[apps.cursor.launch_policy.environment]]
+action = "set"
+key = "HTTP_PROXY"
+value = "http://[::1]:48723"
+
+[[apps.cursor.launch_policy.environment]]
+action = "set"
+key = "ALL_PROXY"
+value = "http://[::1]:48723"
+
+[[apps.cursor.launch_policy.environment]]
+action = "set"
+key = "NO_PROXY"
+value = "localhost,127.0.0.1,::1,[::1]"
+
+[[apps.cursor.launch_policy.environment]]
+action = "set"
+key = "no_proxy"
+value = "localhost,127.0.0.1,::1,[::1]"
+
+[[apps.cursor.launch_policy.arguments]]
+action = "append"
+value = "--proxy-server=http://[::1]:48723"
+
+[[apps.cursor.launch_policy.arguments]]
+action = "append"
+value = "--ignore-certificate-errors"
+
+[apps.cursor.operations.patch]
+use = "patch"
+short = "Install the shim into one app bundle and re-sign it"
+capability = "app.patch"
+
+[[apps.cursor.operations.patch.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without modifying the bundle"
+
+[[apps.cursor.operations.patch.flags]]
+name = "no-migrate-keychain"
+type = "bool"
+usage = "skip keychain access repair"
+
+[[apps.cursor.operations.patch.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.cursor.operations.unpatch]
+use = "unpatch"
+short = "Restore one app's bundle from its backup"
+capability = "app.unpatch"
+
+[[apps.cursor.operations.unpatch.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without modifying the bundle"
+
+[[apps.cursor.operations.unpatch.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.cursor.operations.upgrade]
+use = "upgrade"
+short = "Fetch the latest build from the upstream update manifest, verify, swap into the app path, and re-patch"
+capability = "app.upgrade"
+
+[[apps.cursor.operations.upgrade.flags]]
+name = "channel"
+type = "string"
+usage = "upstream release channel"
+default_string = "dev"
+
+[[apps.cursor.operations.upgrade.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without modifying the bundle"
+
+[[apps.cursor.operations.upgrade.flags]]
+name = "no-migrate-keychain"
+type = "bool"
+usage = "skip keychain access repair after install"
+
+[[apps.cursor.operations.upgrade.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.cursor.operations.keychain-migrate]
+use = "keychain-migrate"
+short = "Restore keychain access for a patched app"
+capability = "app.keychain-migrate"
+
+[[apps.cursor.operations.keychain-migrate.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without touching keychain items"
+
+[[apps.cursor.operations.keychain-migrate.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.cursor.operations.status]
+use = "status"
+short = "Print state for this target"
+capability = "app.status"
+
+[apps.codex]
+app_path = "/Applications/Codex.app"
+bundle_id = "com.openai.codex"
+exec_name = "Codex"
+keychain_services = ["Codex Safe Storage", "Codex Auth", "Codex MCP Credentials"]
+nested_sign_paths = [
+    "Contents/Resources/codex",
+    "Contents/Resources/codex_chronicle",
+    "Contents/Resources/node",
+    "Contents/Resources/node_repl",
+    "Contents/Resources/rg",
+    "Contents/Resources/native/bare-modifier-monitor",
+    "Contents/Resources/native/browser-use-peer-authorization.node",
+    "Contents/Resources/native/devicecheck.node",
+    "Contents/Resources/native/launch-services-helper",
+    "Contents/Resources/native/remote-control-device-key.node",
+    "Contents/Resources/native/sky.node",
+    "Contents/Resources/native/sparkle.node",
+    "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc",
+    "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc",
+    "Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app",
+    "Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+    "Contents/Frameworks/Sparkle.framework",
+]
+
+[apps.codex.command]
+use = "codex"
+short = "Operate on /Applications/Codex.app"
+
+[apps.codex.entitlements]
+strip = [
+    "com.apple.application-identifier",
+    "com.apple.developer.team-identifier",
+    "keychain-access-groups",
+]
+required_boolean = [
+    "com.apple.security.automation.apple-events",
+    "com.apple.security.cs.disable-library-validation",
+]
+
+[apps.codex.updater]
+kind = "sparkle_appcast"
+user_agent = "desktop-via-clyde/upgrade"
+sparkle_public_key = "rhcBvttuqDFriyNqwTQJR3L4UT1WjIK4QxtwtwusVic="
+default_channel = "beta"
+
+[[apps.codex.updater.channels]]
+name = "stable"
+url = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml"
+
+[[apps.codex.updater.channels]]
+name = "beta"
+url = "https://persistent.oaistatic.com/codex-app-beta/appcast.xml"
+
+[apps.codex.launch_policy]
+proxy_host = "::1"
+proxy_port = 48723
+ca_certificate = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+no_proxy = "localhost,127.0.0.1,::1,[::1]"
+launch_working_directory = "/Users/agoodkind"
+
+[[apps.codex.launch_policy.environment]]
+action = "set"
+key = "CODEX_CA_CERTIFICATE"
+value = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.codex.launch_policy.environment]]
+action = "set"
+key = "NODE_EXTRA_CA_CERTS"
+value = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.codex.launch_policy.environment]]
+action = "set"
+key = "NODE_OPTIONS"
+value = "--use-openssl-ca"
+
+[[apps.codex.launch_policy.environment]]
+action = "set"
+key = "NODE_TLS_REJECT_UNAUTHORIZED"
+value = "0"
+
+[[apps.codex.launch_policy.environment]]
+action = "set"
+key = "HTTPS_PROXY"
+value = "http://[::1]:48723"
+
+[[apps.codex.launch_policy.environment]]
+action = "set"
+key = "HTTP_PROXY"
+value = "http://[::1]:48723"
+
+[[apps.codex.launch_policy.environment]]
+action = "set"
+key = "ALL_PROXY"
+value = "http://[::1]:48723"
+
+[[apps.codex.launch_policy.environment]]
+action = "set"
+key = "NO_PROXY"
+value = "localhost,127.0.0.1,::1,[::1]"
+
+[[apps.codex.launch_policy.environment]]
+action = "set"
+key = "no_proxy"
+value = "localhost,127.0.0.1,::1,[::1]"
+
+[[apps.codex.launch_policy.environment]]
+action = "unset"
+key = "SSL_CERT_FILE"
+
+[[apps.codex.launch_policy.preflights]]
+kind = "file_exists"
+path = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.codex.launch_policy.preflights]]
+kind = "tcp_reachable"
+host = "::1"
+port = 48723
+timeout_ms = 1000
+
+[[apps.codex.launch_policy.arguments]]
+action = "append"
+value = "--proxy-server=http://[::1]:48723"
+
+[[apps.codex.launch_policy.arguments]]
+action = "append"
+value = "--ignore-certificate-errors"
+
+[apps.codex.computer_use]
+host_app_path = "/Applications/Codex.app"
+bundled_app_path = "Contents/Resources/plugins/openai-bundled/plugins/computer-use/Codex Computer Use.app"
+app_path_from_home = ".codex/computer-use/Codex Computer Use.app"
+cache_app_globs_from_home = [".codex/plugins/cache/openai-bundled/computer-use/*/Codex Computer Use.app"]
+auth_plugin_path = "/Library/Security/SecurityAgentPlugins/CodexComputerUseAuthorizationPlugin.bundle"
+auth_plugin_executable = "Contents/MacOS/CodexComputerUseAuthorizationPlugin"
+upstream_trusted_team_id = "2DC432GLL2"
+team_patch_binaries = [
+    "Contents/MacOS/SkyComputerUseService",
+    "Contents/SharedSupport/CUALockScreenGuardian.app/Contents/MacOS/CUALockScreenGuardian",
+]
+team_requirement_plists = [
+    "Contents/SharedSupport/SkyComputerUseClient.app/Contents/Resources/SkyComputerUseClient_Parent.coderequirement",
+    "Contents/SharedSupport/CUALockScreenGuardian.app/Contents/Resources/CUALockScreenGuardian_Parent.coderequirement",
+]
+
+[[apps.codex.computer_use.sign_targets]]
+path = "Contents/SharedSupport/Codex Computer Use Installer.app"
+
+[[apps.codex.computer_use.sign_targets]]
+path = "Contents/SharedSupport/SkyComputerUseClient.app"
+[apps.codex.computer_use.sign_targets.entitlements]
+strip = ["com.apple.security.application-groups"]
+required_boolean = ["com.apple.security.automation.apple-events"]
+
+[[apps.codex.computer_use.sign_targets]]
+path = "Contents/SharedSupport/CUALockScreenGuardian.app"
+[apps.codex.computer_use.sign_targets.entitlements]
+strip = ["com.apple.security.application-groups"]
+
+[[apps.codex.computer_use.sign_targets]]
+path = "."
+[apps.codex.computer_use.sign_targets.entitlements]
+strip = ["com.apple.security.application-groups"]
+required_boolean = [
+    "com.apple.security.automation.apple-events",
+    "com.apple.security.device.audio-input",
+]
+
+[apps.codex.operations.patch]
+use = "patch"
+short = "Install the shim into one app bundle and re-sign it"
+capability = "app.patch"
+
+[[apps.codex.operations.patch.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without modifying the bundle"
+
+[[apps.codex.operations.patch.flags]]
+name = "no-migrate-keychain"
+type = "bool"
+usage = "skip keychain access repair"
+
+[[apps.codex.operations.patch.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.codex.operations.unpatch]
+use = "unpatch"
+short = "Restore one app's bundle from its backup"
+capability = "app.unpatch"
+
+[[apps.codex.operations.unpatch.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without modifying the bundle"
+
+[[apps.codex.operations.unpatch.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.codex.operations.upgrade]
+use = "upgrade"
+short = "Fetch the latest build from the upstream update manifest, verify, swap into the app path, and re-patch"
+capability = "app.upgrade"
+
+[[apps.codex.operations.upgrade.flags]]
+name = "channel"
+type = "string"
+usage = "upstream release channel"
+default_string = "beta"
+
+[[apps.codex.operations.upgrade.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without modifying the bundle"
+
+[[apps.codex.operations.upgrade.flags]]
+name = "no-migrate-keychain"
+type = "bool"
+usage = "skip keychain access repair after install"
+
+[[apps.codex.operations.upgrade.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.codex.operations.keychain-migrate]
+use = "keychain-migrate"
+short = "Restore keychain access for a patched app"
+capability = "app.keychain-migrate"
+
+[[apps.codex.operations.keychain-migrate.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without touching keychain items"
+
+[[apps.codex.operations.keychain-migrate.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.codex.operations.status]
+use = "status"
+short = "Print state for this target"
+capability = "app.status"
+
+[apps.claude]
+app_path = "/Applications/Claude.app"
+bundle_id = "com.anthropic.claudefordesktop"
+exec_name = "Claude"
+keychain_services = ["Claude Safe Storage"]
+preserved_nested_code_paths = ["Contents/Frameworks/Squirrel.framework"]
+original_dr_bootstrap_capability = "clean-main-binary"
+
+[apps.claude.command]
+use = "claude"
+short = "Operate on /Applications/Claude.app"
+
+[apps.claude.entitlements]
+strip = [
+    "com.apple.application-identifier",
+    "com.apple.developer.team-identifier",
+    "keychain-access-groups",
+]
+required_boolean = ["com.apple.security.cs.disable-library-validation"]
+
+[apps.claude.updater]
+kind = "squirrel_json"
+url = "https://api.anthropic.com/api/desktop/darwin/universal/squirrel/update"
+user_agent = "Claude/desktop-via-clyde"
+device_id_param_name = "device_id"
+
+[apps.claude.launch_policy]
+proxy_host = "::1"
+proxy_port = 48723
+ca_certificate = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+no_proxy = "localhost,127.0.0.1,::1,[::1]"
+launch_working_directory = "/Users/agoodkind"
+ignore_dry_run_signal = "SIGKILL"
+
+[[apps.claude.launch_policy.preflights]]
+kind = "file_exists"
+path = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.claude.launch_policy.preflights]]
+kind = "tcp_reachable"
+host = "::1"
+port = 48723
+timeout_ms = 1000
+
+[[apps.claude.launch_policy.environment]]
+action = "set"
+key = "NODE_EXTRA_CA_CERTS"
+value = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.claude.launch_policy.environment]]
+action = "set"
+key = "SSL_CERT_FILE"
+value = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.claude.launch_policy.environment]]
+action = "set"
+key = "NODE_OPTIONS"
+value = "--use-openssl-ca"
+
+[[apps.claude.launch_policy.environment]]
+action = "set"
+key = "NODE_TLS_REJECT_UNAUTHORIZED"
+value = "0"
+
+[[apps.claude.launch_policy.environment]]
+action = "set"
+key = "HTTPS_PROXY"
+value = "http://[::1]:48723"
+
+[[apps.claude.launch_policy.environment]]
+action = "set"
+key = "HTTP_PROXY"
+value = "http://[::1]:48723"
+
+[[apps.claude.launch_policy.environment]]
+action = "set"
+key = "ALL_PROXY"
+value = "http://[::1]:48723"
+
+[[apps.claude.launch_policy.environment]]
+action = "set"
+key = "NO_PROXY"
+value = "localhost,127.0.0.1,::1,[::1]"
+
+[[apps.claude.launch_policy.environment]]
+action = "set"
+key = "no_proxy"
+value = "localhost,127.0.0.1,::1,[::1]"
+
+[[apps.claude.launch_policy.arguments]]
+action = "append"
+value = "--proxy-server=http://[::1]:48723"
+
+[[apps.claude.launch_policy.arguments]]
+action = "append"
+value = "--ignore-certificate-errors"
+
+[apps.claude.bundled_cli_tee]
+capability = "bundled-cli-tee"
+app_support_dir = "{home}/Library/Application Support/Claude/claude-code"
+bundled_cli_rel = "claude.app/Contents/MacOS/claude"
+terminate_process_names = ["Claude"]
+terminate_process_patterns = ["claude-code/.*/claude.app/Contents/MacOS/claude"]
+completion_steps = [
+  "start Claude Desktop",
+  "open the session you want to inspect",
+  "type /context and wait for the result",
+  "read the latest stdio log under {log_dir}/",
+  "desktop-via-clyde claude unpatch when done",
+]
+
+[apps.claude.operations.patch]
+use = "patch"
+short = "Install the shim into one app bundle and re-sign it"
+capability = "app.patch"
+
+[[apps.claude.operations.patch.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without modifying the bundle"
+
+[[apps.claude.operations.patch.flags]]
+name = "no-migrate-keychain"
+type = "bool"
+usage = "skip keychain access repair"
+
+[[apps.claude.operations.patch.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.claude.operations.unpatch]
+use = "unpatch"
+short = "Restore one app's bundle from its backup"
+capability = "app.unpatch"
+
+[[apps.claude.operations.unpatch.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without modifying the bundle"
+
+[[apps.claude.operations.unpatch.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.claude.operations.upgrade]
+use = "upgrade"
+short = "Fetch the latest build from the upstream update manifest, verify, swap into the app path, and re-patch"
+capability = "app.upgrade"
+
+[[apps.claude.operations.upgrade.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without modifying the bundle"
+
+[[apps.claude.operations.upgrade.flags]]
+name = "no-migrate-keychain"
+type = "bool"
+usage = "skip keychain access repair after install"
+
+[[apps.claude.operations.upgrade.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.claude.operations.keychain-migrate]
+use = "keychain-migrate"
+short = "Restore keychain access for a patched app"
+capability = "app.keychain-migrate"
+
+[[apps.claude.operations.keychain-migrate.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without touching keychain items"
+
+[[apps.claude.operations.keychain-migrate.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.claude.operations.status]
+use = "status"
+short = "Print state for this target"
+capability = "app.status"
+
+[clis.codex-cli.command]
+use = "codex-cli"
+short = "Build, sign, install, and inspect the local Codex CLI"
+
+[clis.codex-cli.operations.upgrade]
+use = "upgrade"
+aliases = ["install"]
+short = "Clone or update Codex source, build the CLI, sign it locally, and install it"
+capability = "standalone-cli.install"
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without modifying the filesystem"
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "source-dir"
+type = "string"
+usage = "Codex source checkout path (default XDG cache)"
+default_string = "{cache_root}/desktop-via-clyde/codex/source"
+expand_path = true
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "repo"
+type = "string"
+usage = "source repository to clone"
+default_string = "openai/codex"
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "ref"
+type = "string"
+usage = "upstream Codex ref to fetch and build"
+default_string = "origin/main"
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "package-dir"
+type = "string"
+usage = "temporary package build output path"
+default_string = "{cache_root}/desktop-via-clyde/codex/package"
+expand_path = true
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "package-variant"
+type = "string"
+usage = "upstream package variant name"
+default_string = "codex"
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "package-binary-path"
+type = "string"
+usage = "binary path inside the packaged release"
+default_string = "bin/codex"
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "command-name"
+type = "string"
+usage = "visible command name"
+default_string = "codex"
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "install-dir"
+type = "string"
+usage = "directory for the visible codex command"
+default_string = "~/.local/bin"
+expand_path = true
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "codex-home"
+binding = "package-home"
+type = "string"
+usage = "Codex home for standalone package releases"
+default_string = "~/.codex"
+expand_path = true
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "build-mode"
+type = "string"
+usage = "entrypoint build mode (local-fast or release)"
+default_string = "local-fast"
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "no-sccache"
+type = "bool"
+usage = "disable automatic sccache wrapper detection for the Cargo build"
+
+[[clis.codex-cli.operations.upgrade.flags]]
+name = "force-rebuild"
+type = "bool"
+usage = "skip same-head installed release reuse and rebuild the entrypoint"
+
+[clis.codex-cli.operations.status]
+use = "status"
+short = "Print local Codex CLI source, install, and signing state"
+capability = "standalone-cli.status"
+
+[[clis.codex-cli.operations.status.flags]]
+name = "source-dir"
+type = "string"
+usage = "Codex source checkout path (default XDG cache)"
+default_string = "{cache_root}/desktop-via-clyde/codex/source"
+expand_path = true
+
+[[clis.codex-cli.operations.status.flags]]
+name = "package-binary-path"
+type = "string"
+usage = "binary path inside the packaged release"
+default_string = "bin/codex"
+
+[[clis.codex-cli.operations.status.flags]]
+name = "command-name"
+type = "string"
+usage = "visible command name"
+default_string = "codex"
+
+[[clis.codex-cli.operations.status.flags]]
+name = "install-dir"
+type = "string"
+usage = "directory for the visible codex command"
+default_string = "~/.local/bin"
+expand_path = true
+
+[[clis.codex-cli.operations.status.flags]]
+name = "codex-home"
+binding = "package-home"
+type = "string"
+usage = "Codex home for standalone package releases"
+default_string = "~/.codex"
+expand_path = true

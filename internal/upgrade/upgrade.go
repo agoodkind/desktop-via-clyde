@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/clock"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
@@ -50,7 +51,7 @@ type updateManifest struct {
 	Signature string
 }
 
-type cursorManifest struct {
+type pathJSONManifest struct {
 	URL  string `json:"url"`
 	Name string `json:"name"`
 }
@@ -78,17 +79,17 @@ type sparkleEnclosure struct {
 	Signature string `xml:"http://www.andymatuschak.org/xml-namespaces/sparkle edSignature,attr"`
 }
 
-type claudeSquirrelManifest struct {
-	CurrentRelease string                  `json:"currentRelease"`
-	Releases       []claudeSquirrelRelease `json:"releases"`
+type squirrelJSONManifest struct {
+	CurrentRelease string                `json:"currentRelease"`
+	Releases       []squirrelJSONRelease `json:"releases"`
 }
 
-type claudeSquirrelRelease struct {
-	Version  string               `json:"version"`
-	UpdateTo claudeSquirrelUpdate `json:"updateTo"`
+type squirrelJSONRelease struct {
+	Version  string             `json:"version"`
+	UpdateTo squirrelJSONUpdate `json:"updateTo"`
 }
 
-type claudeSquirrelUpdate struct {
+type squirrelJSONUpdate struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 	URL     string `json:"url"`
@@ -178,6 +179,7 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 		DryRun:            opts.DryRun,
 		NoMigrateKeychain: opts.NoMigrateKeychain,
 		Out:               opts.Out,
+		Trace:             nil,
 	}
 	if err := patch.Patch(ctx, t, patchOpts); err != nil {
 		return logUpgradeError(ctx, "upgrade.repatch_failed", fmt.Errorf("re-patch after swap: %w", err))
@@ -207,38 +209,33 @@ func readBundleVersion(ctx context.Context, t targets.Target) (string, error) {
 
 func fetchManifest(ctx context.Context, t targets.Target, currentVersion, channel string) (updateManifest, error) {
 	switch t.Updater.Kind {
-	case targets.UpdaterCursorManifest:
-		return fetchCursorManifest(ctx, t, currentVersion, channel)
+	case targets.UpdaterHTTPPathJSONManifest:
+		return fetchHTTPPathJSONManifest(ctx, t, currentVersion, channel)
 	case targets.UpdaterSparkleAppcast:
 		return fetchSparkleManifest(ctx, t, channel)
-	case targets.UpdaterClaudeSquirrel:
-		return fetchClaudeSquirrelManifest(ctx, t)
+	case targets.UpdaterSquirrelJSON:
+		return fetchSquirrelJSONManifest(ctx, t)
 	default:
 		return updateManifest{}, fmt.Errorf("target %s has unsupported updater kind %q", t.ID, t.Updater.Kind)
 	}
 }
 
-// fetchCursorManifest queries the Cursor update endpoint with a dummy commit
-// segment. The fetch deliberately bypasses proxy configuration so the command
-// behaves the same whether or not clyde is running.
-func fetchCursorManifest(ctx context.Context, t targets.Target, currentVersion, channel string) (updateManifest, error) {
-	const dummyCommit = "0000000000000000000000000000000000000000000000000000000000000000"
-	endpoint := fmt.Sprintf(
-		"https://api2.cursor.sh/updates/api/update/%s/%s/%s/%s/%s",
-		url.PathEscape(t.Updater.Platform),
-		url.PathEscape(t.Updater.Product),
-		url.PathEscape(currentVersion),
-		dummyCommit,
-		url.PathEscape(channel),
-	)
-	body, err := fetchURL(ctx, endpoint, "Cursor/"+currentVersion, "application/json", 1<<16)
+func fetchHTTPPathJSONManifest(ctx context.Context, t targets.Target, currentVersion, channel string) (updateManifest, error) {
+	endpoint := renderUpdaterTemplate(t.Updater.URLTemplate, map[string]string{
+		"platform": t.Updater.Platform,
+		"product":  t.Updater.Product,
+		"version":  currentVersion,
+		"commit":   placeholderCommit(),
+		"channel":  channel,
+	})
+	body, err := fetchURL(ctx, endpoint, renderUserAgent(t.Updater.UserAgent, currentVersion), "application/json", 1<<16)
 	if err != nil {
 		if errors.Is(err, errNoUpdate) {
 			return updateManifest{}, errors.New("upstream returned 204; no update available on this channel")
 		}
 		return updateManifest{}, err
 	}
-	return parseCursorManifest(body)
+	return parseHTTPPathJSONManifest(body)
 }
 
 func fetchSparkleManifest(ctx context.Context, t targets.Target, channel string) (updateManifest, error) {
@@ -246,17 +243,17 @@ func fetchSparkleManifest(ctx context.Context, t targets.Target, channel string)
 	if err != nil {
 		return updateManifest{}, logUpgradeError(ctx, "upgrade.sparkle_updater_url_failed", fmt.Errorf("resolve Sparkle updater URL: %w", err))
 	}
-	body, err := fetchURL(ctx, endpoint, "desktop-via-clyde/upgrade", "application/xml", 2<<20)
+	body, err := fetchURL(ctx, endpoint, renderUserAgent(t.Updater.UserAgent, ""), "application/xml", 2<<20)
 	if err != nil {
 		return updateManifest{}, err
 	}
 	return parseSparkleAppcast(body)
 }
 
-func fetchClaudeSquirrelManifest(ctx context.Context, t targets.Target) (updateManifest, error) {
+func fetchSquirrelJSONManifest(ctx context.Context, t targets.Target) (updateManifest, error) {
 	endpoint, err := url.Parse(t.Updater.URL)
 	if err != nil {
-		return updateManifest{}, logUpgradeError(ctx, "upgrade.claude_updater_url_parse_failed", fmt.Errorf("parse Claude updater URL: %w", err))
+		return updateManifest{}, logUpgradeError(ctx, "upgrade.squirrel_updater_url_parse_failed", fmt.Errorf("parse squirrel updater URL: %w", err))
 	}
 	deviceID, err := generatedDeviceID()
 	if err != nil {
@@ -269,11 +266,11 @@ func fetchClaudeSquirrelManifest(ctx context.Context, t targets.Target) (updateM
 	values := endpoint.Query()
 	values.Set(paramName, deviceID)
 	endpoint.RawQuery = values.Encode()
-	body, err := fetchURL(ctx, endpoint.String(), "Claude/desktop-via-clyde", "application/json", 1<<16)
+	body, err := fetchURL(ctx, endpoint.String(), renderUserAgent(t.Updater.UserAgent, ""), "application/json", 1<<16)
 	if err != nil {
 		return updateManifest{}, err
 	}
-	return parseClaudeSquirrelManifest(body)
+	return parseSquirrelJSONManifest(body)
 }
 
 var errNoUpdate = errors.New("no update available")
@@ -306,10 +303,10 @@ func fetchURL(ctx context.Context, endpoint, userAgent, accept string, limit int
 	return body, nil
 }
 
-func parseCursorManifest(body []byte) (updateManifest, error) {
-	m := cursorManifest{URL: "", Name: ""}
+func parseHTTPPathJSONManifest(body []byte) (updateManifest, error) {
+	m := pathJSONManifest{URL: "", Name: ""}
 	if err := json.Unmarshal(body, &m); err != nil {
-		return updateManifest{}, logUpgradeErrorNoContext("upgrade.cursor_manifest_parse_failed", fmt.Errorf("parse Cursor manifest JSON: %w (body=%s)", err, string(body)))
+		return updateManifest{}, logUpgradeErrorNoContext("upgrade.http_path_json_manifest_parse_failed", fmt.Errorf("parse path JSON manifest: %w (body=%s)", err, string(body)))
 	}
 	return updateManifest{URL: m.URL, Name: m.Name, Signature: ""}, nil
 }
@@ -336,19 +333,35 @@ func parseSparkleAppcast(body []byte) (updateManifest, error) {
 	return updateManifest{}, errors.New("sparkle appcast contains no arm64 full zip enclosure")
 }
 
-func parseClaudeSquirrelManifest(body []byte) (updateManifest, error) {
-	m := claudeSquirrelManifest{CurrentRelease: "", Releases: nil}
+func parseSquirrelJSONManifest(body []byte) (updateManifest, error) {
+	m := squirrelJSONManifest{CurrentRelease: "", Releases: nil}
 	if err := json.Unmarshal(body, &m); err != nil {
-		return updateManifest{}, logUpgradeErrorNoContext("upgrade.claude_squirrel_manifest_parse_failed", fmt.Errorf("parse Claude Squirrel manifest JSON: %w (body=%s)", err, string(body)))
+		return updateManifest{}, logUpgradeErrorNoContext("upgrade.squirrel_manifest_parse_failed", fmt.Errorf("parse Squirrel manifest JSON: %w (body=%s)", err, string(body)))
 	}
 	for _, release := range m.Releases {
 		if release.UpdateTo.URL == "" {
 			continue
 		}
-		name := firstNonEmpty(release.UpdateTo.Version, release.Version, strings.TrimPrefix(release.UpdateTo.Name, "Claude "))
+		name := firstNonEmpty(release.UpdateTo.Version, release.Version, release.UpdateTo.Name)
 		return updateManifest{URL: release.UpdateTo.URL, Name: name, Signature: ""}, nil
 	}
-	return updateManifest{}, errors.New("claude squirrel manifest contains no updateTo.url")
+	return updateManifest{}, errors.New("squirrel manifest contains no updateTo.url")
+}
+
+func renderUpdaterTemplate(template string, values map[string]string) string {
+	rendered := template
+	for key, value := range values {
+		rendered = strings.ReplaceAll(rendered, "{"+key+"}", url.PathEscape(value))
+	}
+	return rendered
+}
+
+func renderUserAgent(template string, version string) string {
+	return strings.ReplaceAll(template, "{version}", version)
+}
+
+func placeholderCommit() string {
+	return strings.Repeat("0", 64)
 }
 
 func firstNonEmpty(values ...string) string {
@@ -389,22 +402,29 @@ func loadOriginalDR(ctx context.Context, t targets.Target, dryRun bool) (string,
 	if err == nil {
 		return verifyOriginalRequirementIsUpstream(t, dr)
 	}
-	if t.ID != "claude" || !errors.Is(err, patch.ErrMissingStateEntry) {
+	if !errors.Is(err, patch.ErrMissingStateEntry) {
 		return "", logUpgradeError(ctx, "upgrade.original_dr_load_failed", fmt.Errorf("load original designated requirement: %w", err))
 	}
-	return bootstrapClaudeOriginalDR(ctx, t)
+	switch t.OriginalDRBootstrapCapability {
+	case "":
+		return "", logUpgradeError(ctx, "upgrade.original_dr_load_failed", fmt.Errorf("load original designated requirement: %w", err))
+	case catalog.OriginalDRBootstrapCleanMainBinary:
+		return bootstrapOriginalDRFromCleanMainBinary(ctx, t)
+	default:
+		return "", logUpgradeError(ctx, "upgrade.original_dr_bootstrap_capability_unknown", fmt.Errorf("unknown original DR bootstrap capability %q", t.OriginalDRBootstrapCapability))
+	}
 }
 
-func bootstrapClaudeOriginalDR(ctx context.Context, t targets.Target) (string, error) {
+func bootstrapOriginalDRFromCleanMainBinary(ctx context.Context, t targets.Target) (string, error) {
 	realPath := paths.RealBinaryPath(t)
 	if _, err := os.Stat(realPath); err == nil {
-		return "", logUpgradeError(ctx, "upgrade.claude_state_missing_real_exists", fmt.Errorf("target=claude has no state entry but %s exists; restore or unpatch Claude before upgrade", realPath))
+		return "", logUpgradeError(ctx, "upgrade.original_dr_state_missing_real_exists", fmt.Errorf("target=%s has no state entry but %s exists; restore or unpatch the app before upgrade", t.ID, realPath))
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", logUpgradeError(ctx, "upgrade.claude_real_stat_failed", fmt.Errorf("stat %s: %w", realPath, err))
+		return "", logUpgradeError(ctx, "upgrade.original_dr_real_stat_failed", fmt.Errorf("stat %s: %w", realPath, err))
 	}
 	dr, err := readDesignatedRequirement(ctx, paths.MainBinaryPath(t))
 	if err != nil {
-		return "", logUpgradeError(ctx, "upgrade.claude_original_dr_capture_failed", fmt.Errorf("capture Claude DesignatedRequirement from clean app: %w", err))
+		return "", logUpgradeError(ctx, "upgrade.original_dr_capture_failed", fmt.Errorf("capture designated requirement from clean app: %w", err))
 	}
 	return verifyOriginalRequirementIsUpstream(t, dr)
 }
@@ -445,6 +465,7 @@ func handleCurrentVersion(
 			DryRun:            opts.DryRun,
 			NoMigrateKeychain: opts.NoMigrateKeychain,
 			Out:               opts.Out,
+			Trace:             nil,
 		}); err != nil {
 			return logUpgradeError(ctx, "upgrade.current_version_patch_failed", fmt.Errorf("patch clean bundle after version check: %w", err))
 		}

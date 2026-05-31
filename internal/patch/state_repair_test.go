@@ -24,6 +24,7 @@ func TestEnsureOriginalDesignatedRequirementRequiresStateEntry(t *testing.T) {
 }
 
 func TestEnsureOriginalDesignatedRequirementReportsMissingBackupRepair(t *testing.T) {
+	installFixture(t)
 	t.Setenv("HOME", t.TempDir())
 	target := targets.Target{ID: "codex", AppPath: "/Applications/Codex.app", ExecName: "Codex"}
 	multiState := state.MultiState{

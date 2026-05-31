@@ -30,10 +30,9 @@ type KeychainItem struct {
 // destructive; instead we use `dump-keychain` filtered by service. That would
 // be too broad (dumps everything); the lighter approach is `security
 // find-generic-password -s <svc> -g` which prints one item to stderr and the
-// password to stderr too — but only one item per service. The keychain may
-// hold multiple accounts under the same service (Codex has separate auth and
-// MCP accounts), so we iterate by repeatedly invoking find-generic-password
-// with each item's account once discovered.
+// password to stderr too, but only one item per service. The keychain may
+// hold multiple accounts under the same service, so a future implementation
+// could iterate by account once account discovery is available.
 //
 // The pragmatic path: call `security find-generic-password -s <svc>` (without
 // -g) which prints all attributes (including acct) for the *first* matching
@@ -42,13 +41,11 @@ type KeychainItem struct {
 // Keychains/login.keychain-db` and filter. But dump-keychain prompts for the
 // keychain password on locked keychains.
 //
-// For the verified-known set of services in this tool (Cursor Safe Storage,
-// Codex {Safe Storage, Auth, MCP Credentials}, Claude Safe Storage), each
-// service typically has one account ("Cursor", "Codex", "Claude"). We
-// capture using `security find-generic-password -s <svc> -w` (password to
-// stdout) plus a second call without -w to read account from the printed
-// attribute block. If the service has multiple accounts, we capture only
-// the most recently added one — the user is warned via stdout.
+// The current capture path assumes each declared service usually has one
+// account. It captures using `security find-generic-password -s <svc> -w`
+// plus a second call without -w to read account from the printed attribute
+// block. If the service has multiple accounts, it captures only the most
+// recently added one, and the user is warned via stdout.
 func CaptureItems(ctx context.Context, t targets.Target) ([]KeychainItem, error) {
 	if len(t.KeychainServices) == 0 {
 		return nil, nil

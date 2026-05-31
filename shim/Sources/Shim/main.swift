@@ -1,192 +1,66 @@
 import Darwin
 import Foundation
 
-// Self-locating desktop-via-clyde MITM shim. Replaces
-// <App>.app/Contents/MacOS/<ExecName> for any registered target. Resolves its
-// own path with _NSGetExecutablePath, derives the sibling .real binary,
-// preflights the clyde MITM proxy, applies the target-specific environment
-// policy, and execv's the real binary with launch-mode-appropriate proxy
-// settings.
-
-enum TargetPolicy: String {
-    case codex
-    case `default`
-}
-
-struct EnvAction {
+struct EnvAction: Decodable {
+    let action: String
     let key: String
     let value: String?
 }
 
-struct ShimConfig {
-    var proxyHost: String
-    var proxyPort: UInt16
-    var caCertificate: String
-    var noProxy: String
-    var launchWorkingDirectory: String
-    var targetPolicies: [String: TargetPolicy]
+struct ArgAction: Decodable {
+    let action: String
+    let value: String
 }
 
-func homeDir() -> String {
-    if let h = ProcessInfo.processInfo.environment["HOME"], !h.isEmpty {
-        return h
+struct Preflight: Decodable {
+    let kind: String
+    let path: String?
+    let host: String?
+    let port: UInt16?
+    let timeoutMs: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case path
+        case host
+        case port
+        case timeoutMs = "timeout_ms"
     }
-    return NSHomeDirectory()
 }
 
-func defaultShimConfig() -> ShimConfig {
-    let stateBase = defaultStateRoot()
-    return ShimConfig(
-        proxyHost: "::1",
-        proxyPort: 48723,
-        caCertificate: "\(stateBase)/mitm/ca/clyde-mitm-ca.crt",
-        noProxy: "localhost,127.0.0.1,::1,[::1]",
-        launchWorkingDirectory: homeDir(),
-        targetPolicies: [
-            "cursor": .default,
-            "codex": .codex,
-            "claude": .default,
-        ]
-    )
-}
+struct LaunchPolicy: Decodable {
+    let proxyHost: String
+    let proxyPort: UInt16
+    let caCertificate: String
+    let noProxy: String
+    let launchWorkingDirectory: String
+    let ignoreDryRunSignal: String?
+    let environment: [EnvAction]
+    let arguments: [ArgAction]
+    let preflights: [Preflight]
 
-func configPath() -> String {
-    if let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"], !xdg.isEmpty {
-        return "\(xdg)/desktop-via-clyde/config.toml"
+    enum CodingKeys: String, CodingKey {
+        case proxyHost = "proxy_host"
+        case proxyPort = "proxy_port"
+        case caCertificate = "ca_certificate"
+        case noProxy = "no_proxy"
+        case launchWorkingDirectory = "launch_working_directory"
+        case ignoreDryRunSignal = "ignore_dry_run_signal"
+        case environment
+        case arguments
+        case preflights
     }
-    return "\(homeDir())/.config/desktop-via-clyde/config.toml"
 }
 
-func defaultStateRoot() -> String {
-    if let xdg = ProcessInfo.processInfo.environment["XDG_STATE_HOME"], !xdg.isEmpty {
-        return "\(xdg)/clyde"
-    }
-    return "\(homeDir())/.local/state/clyde"
-}
-
-func loadShimConfig() throws -> ShimConfig {
-    let path = configPath()
-    guard FileManager.default.fileExists(atPath: path) else {
-        throw NSError(domain: "desktop-via-clyde", code: 1, userInfo: [
-            NSLocalizedDescriptionKey: "Config file missing at \(path)",
-        ])
-    }
-    let contents = try String(contentsOfFile: path, encoding: .utf8)
-    var config = defaultShimConfig()
-    var section: [String] = []
-
-    for rawLine in contents.components(separatedBy: .newlines) {
-        let line = stripComments(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
-        if line.isEmpty {
-            continue
-        }
-        if line.hasPrefix("[") && line.hasSuffix("]") {
-            let name = String(line.dropFirst().dropLast())
-            section = name.split(separator: ".").map(String.init)
-            continue
-        }
-        guard let separator = line.firstIndex(of: "=") else {
-            continue
-        }
-        let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines)
-        let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if section == ["proxy"] {
-            switch key {
-            case "host":
-                config.proxyHost = try parseStringValue(value)
-            case "port":
-                config.proxyPort = try parsePortValue(value)
-            case "ca_certificate":
-                config.caCertificate = try parseStringValue(value)
-            case "no_proxy":
-                config.noProxy = try parseStringValue(value)
-            case "launch_working_directory":
-                config.launchWorkingDirectory = try parseStringValue(value)
-            default:
-                break
-            }
-            continue
-        }
-
-        if section.count == 2, section[0] == "apps", key == "target_policy" {
-            let appID = section[1].lowercased()
-            config.targetPolicies[appID] = parseTargetPolicy(try parseStringValue(value))
-        }
-    }
-
-    return config
-}
-
-func stripComments(_ line: String) -> String {
-    var inQuotes = false
-    var escaped = false
-    var output = ""
-    for character in line {
-        if character == "\\" && inQuotes {
-            escaped.toggle()
-            output.append(character)
-            continue
-        }
-        if character == "\"" && !escaped {
-            inQuotes.toggle()
-            output.append(character)
-            continue
-        }
-        escaped = false
-        if character == "#" && !inQuotes {
-            break
-        }
-        output.append(character)
-    }
-    return output
-}
-
-func parseStringValue(_ value: String) throws -> String {
-    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard trimmed.count >= 2, trimmed.first == "\"", trimmed.last == "\"" else {
-        throw NSError(domain: "desktop-via-clyde", code: 2, userInfo: [
-            NSLocalizedDescriptionKey: "Expected quoted TOML string, got \(trimmed)",
-        ])
-    }
-    let inner = trimmed.dropFirst().dropLast()
-    return String(inner)
-        .replacingOccurrences(of: "\\\"", with: "\"")
-        .replacingOccurrences(of: "\\\\", with: "\\")
-}
-
-func parsePortValue(_ value: String) throws -> UInt16 {
-    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let parsed = UInt16(trimmed) else {
-        throw NSError(domain: "desktop-via-clyde", code: 3, userInfo: [
-            NSLocalizedDescriptionKey: "Expected TOML port number, got \(trimmed)",
-        ])
-    }
-    return parsed
-}
-
-func parseTargetPolicy(_ value: String) -> TargetPolicy {
-    if value.lowercased() == "codex" {
-        return .codex
-    }
-    return .default
-}
-
-func proxyURL(_ config: ShimConfig) -> String {
-    return "http://[\(config.proxyHost)]:\(config.proxyPort)"
-}
-
-// resolveSelfPath returns the absolute, symlink-resolved path of the running
-// shim binary. _NSGetExecutablePath may return a relative or symlinked path.
 func resolveSelfPath() -> String? {
     var size: UInt32 = 0
     _ = _NSGetExecutablePath(nil, &size)
-    var buf = [CChar](repeating: 0, count: Int(size) + 1)
-    let rc = _NSGetExecutablePath(&buf, &size)
+    var buffer = [CChar](repeating: 0, count: Int(size) + 1)
+    let rc = _NSGetExecutablePath(&buffer, &size)
     if rc != 0 {
         return nil
     }
-    let raw = String(cString: buf)
+    let raw = String(cString: buffer)
     var resolved = [CChar](repeating: 0, count: Int(PATH_MAX))
     if realpath(raw, &resolved) == nil {
         return raw
@@ -206,10 +80,20 @@ func showAlertAndExit(_ message: String, _ exitCode: Int32) -> Never {
         try process.run()
         process.waitUntilExit()
     } catch {
-        // best-effort dialog; fall through to stderr write and exit
     }
     FileHandle.standardError.write(Data("desktop-via-clyde shim: \(message)\n".utf8))
     exit(exitCode)
+}
+
+func loadLaunchPolicy(selfPath: String) throws -> LaunchPolicy {
+    let path = selfPath + ".launch-policy.json"
+    guard FileManager.default.fileExists(atPath: path) else {
+        throw NSError(domain: "desktop-via-clyde", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "Launch policy missing at \(path). Re-patch the app.",
+        ])
+    }
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    return try JSONDecoder().decode(LaunchPolicy.self, from: data)
 }
 
 func tcpReachable(host: String, port: UInt16, timeoutMs: Int) -> Bool {
@@ -264,145 +148,128 @@ func tcpReachable(host: String, port: UInt16, timeoutMs: Int) -> Bool {
     return false
 }
 
-func runPreflight(_ config: ShimConfig) {
-    if !FileManager.default.fileExists(atPath: config.caCertificate) {
-        showAlertAndExit("CA certificate missing at \(config.caCertificate). Start clyde first.", 11)
-    }
-    if !tcpReachable(host: config.proxyHost, port: config.proxyPort, timeoutMs: 500) {
-        showAlertAndExit("Cannot reach clyde MITM proxy at [\(config.proxyHost)]:\(config.proxyPort). Start clyde first.", 12)
-    }
-}
-
-func targetKey(argv0: String, selfPath: String) -> String {
-    let executableName = argv0.lowercased()
-    let executablePath = selfPath.lowercased()
-    if executableName == "codex" || executablePath.contains("/codex.app/") {
-        return "codex"
-    }
-    if executableName == "cursor" || executablePath.contains("/cursor.app/") {
-        return "cursor"
-    }
-    if executableName == "claude" || executablePath.contains("/claude.app/") {
-        return "claude"
-    }
-    return "cursor"
-}
-
-func targetPolicy(argv0: String, selfPath: String, config: ShimConfig) -> TargetPolicy {
-    return config.targetPolicies[targetKey(argv0: argv0, selfPath: selfPath)] ?? .default
-}
-
-func envActions(policy: TargetPolicy, config: ShimConfig) -> [EnvAction] {
-    let proxy = proxyURL(config)
-    switch policy {
-    case .codex:
-        return [
-            EnvAction(key: "CODEX_CA_CERTIFICATE", value: config.caCertificate),
-            EnvAction(key: "NODE_EXTRA_CA_CERTS", value: config.caCertificate),
-            EnvAction(key: "NODE_OPTIONS", value: "--use-openssl-ca"),
-            EnvAction(key: "NODE_TLS_REJECT_UNAUTHORIZED", value: "0"),
-            EnvAction(key: "HTTPS_PROXY", value: proxy),
-            EnvAction(key: "HTTP_PROXY", value: proxy),
-            EnvAction(key: "ALL_PROXY", value: proxy),
-            EnvAction(key: "NO_PROXY", value: config.noProxy),
-            EnvAction(key: "no_proxy", value: config.noProxy),
-            EnvAction(key: "SSL_CERT_FILE", value: nil),
-        ]
-    case .default:
-        return [
-            EnvAction(key: "NODE_EXTRA_CA_CERTS", value: config.caCertificate),
-            EnvAction(key: "SSL_CERT_FILE", value: config.caCertificate),
-            EnvAction(key: "NODE_OPTIONS", value: "--use-openssl-ca"),
-            EnvAction(key: "NODE_TLS_REJECT_UNAUTHORIZED", value: "0"),
-            EnvAction(key: "HTTPS_PROXY", value: proxy),
-            EnvAction(key: "HTTP_PROXY", value: proxy),
-            EnvAction(key: "ALL_PROXY", value: proxy),
-            EnvAction(key: "NO_PROXY", value: config.noProxy),
-            EnvAction(key: "no_proxy", value: config.noProxy),
-        ]
+func runPreflights(_ policy: LaunchPolicy) {
+    for preflight in policy.preflights {
+        switch preflight.kind {
+        case "file_exists":
+            guard let path = preflight.path else {
+                showAlertAndExit("Launch policy file_exists check is missing a path.", 11)
+            }
+            if !FileManager.default.fileExists(atPath: path) {
+                showAlertAndExit("Required file missing at \(path). Start clyde first.", 11)
+            }
+        case "tcp_reachable":
+            guard let host = preflight.host, let port = preflight.port else {
+                showAlertAndExit("Launch policy tcp_reachable check is incomplete.", 12)
+            }
+            let timeoutMs = preflight.timeoutMs ?? 500
+            if !tcpReachable(host: host, port: port, timeoutMs: timeoutMs) {
+                showAlertAndExit("Cannot reach proxy at [\(host)]:\(port). Start clyde first.", 12)
+            }
+        default:
+            showAlertAndExit("Unsupported launch policy preflight \(preflight.kind). Re-patch the app.", 13)
+        }
     }
 }
 
-func setEnvVars(policy: TargetPolicy, config: ShimConfig) {
-    for action in envActions(policy: policy, config: config) {
-        if let value = action.value {
-            setenv(action.key, value, 1)
-        } else {
+func resolvedEnvActions(policy: LaunchPolicy) -> [EnvAction] {
+    return policy.environment
+}
+
+func applyEnvironment(policy: LaunchPolicy) {
+    for action in resolvedEnvActions(policy: policy) {
+        switch action.action {
+        case "set":
+            if let value = action.value {
+                setenv(action.key, value, 1)
+            } else {
+                unsetenv(action.key)
+            }
+        case "unset":
             unsetenv(action.key)
+        default:
+            showAlertAndExit("Unsupported launch policy environment action \(action.action). Re-patch the app.", 14)
         }
     }
 }
 
 func isElectronRunAsNode() -> Bool {
-    ProcessInfo.processInfo.environment["ELECTRON_RUN_AS_NODE"] == "1"
+    return ProcessInfo.processInfo.environment["ELECTRON_RUN_AS_NODE"] == "1"
 }
 
-func proxyArguments(electronRunAsNode: Bool, config: ShimConfig) -> [String] {
+func resolvedArguments(policy: LaunchPolicy, electronRunAsNode: Bool) -> [String] {
     if electronRunAsNode {
         return []
     }
-    return ["--proxy-server=\(proxyURL(config))", "--ignore-certificate-errors"]
+    var prepended: [String] = []
+    var appended: [String] = []
+    for action in policy.arguments {
+        switch action.action {
+        case "prepend":
+            prepended.append(action.value)
+        case "append":
+            appended.append(action.value)
+        default:
+            showAlertAndExit("Unsupported launch policy argument action \(action.action). Re-patch the app.", 15)
+        }
+    }
+    return prepended + appended
 }
 
 func main() {
     guard let selfPath = resolveSelfPath() else {
-        showAlertAndExit("Could not resolve own executable path", 14)
+        showAlertAndExit("Could not resolve own executable path.", 16)
     }
     let target = selfPath + ".real"
     let argv0 = (selfPath as NSString).lastPathComponent
-    let shimConfig: ShimConfig
+    let policy: LaunchPolicy
     do {
-        shimConfig = try loadShimConfig()
+        policy = try loadLaunchPolicy(selfPath: selfPath)
     } catch {
-        showAlertAndExit("Could not load config: \(error.localizedDescription)", 10)
+        showAlertAndExit("Could not load launch policy: \(error.localizedDescription)", 10)
     }
-    let policy = targetPolicy(argv0: argv0, selfPath: selfPath, config: shimConfig)
 
-    let args = CommandLine.arguments
-    let forwarded = Array(args.dropFirst())
+    let forwarded = Array(CommandLine.arguments.dropFirst())
     let electronRunAsNode = isElectronRunAsNode()
-
     if forwarded.contains("--clyde-dry-run") {
-        setEnvVars(policy: policy, config: shimConfig)
-        let injected = proxyArguments(electronRunAsNode: electronRunAsNode, config: shimConfig)
+        applyEnvironment(policy: policy)
+        let injected = resolvedArguments(policy: policy, electronRunAsNode: electronRunAsNode)
         let passThrough = forwarded.filter { $0 != "--clyde-dry-run" }
-        let newArgv = [argv0] + injected + passThrough
+        let argv = [argv0] + injected + passThrough
         print("would exec \(argv0).real")
         print("self: \(selfPath)")
         print("target: \(target)")
-        print("argv0: \(argv0)")
-        print("target-policy: \(policy.rawValue)")
+        print("policy: \(selfPath).launch-policy.json")
         print("electron-run-as-node: \(electronRunAsNode)")
-        print("launch-cwd: \(shimConfig.launchWorkingDirectory)")
-        print("argv: \(newArgv)")
-        for action in envActions(policy: policy, config: shimConfig) {
-            if let value = action.value {
-                print("env \(action.key)=\(value)")
-            } else {
+        print("launch-cwd: \(policy.launchWorkingDirectory)")
+        print("argv: \(argv)")
+        for action in resolvedEnvActions(policy: policy) {
+            switch action.action {
+            case "set":
+                print("env \(action.key)=\(action.value ?? "")")
+            case "unset":
                 print("env \(action.key)=<unset>")
+            default:
+                print("env \(action.key)=<invalid action \(action.action)>")
             }
         }
         exit(0)
     }
 
-    runPreflight(shimConfig)
-    setEnvVars(policy: policy, config: shimConfig)
-    let launchCwd = shimConfig.launchWorkingDirectory
-    if launchCwd.isEmpty {
-        showAlertAndExit("Could not resolve launch working directory", 15)
-    }
-    let chdirResult = launchCwd.withCString { pathPointer in
-        chdir(pathPointer)
+    runPreflights(policy)
+    applyEnvironment(policy: policy)
+    let launchCwd = policy.launchWorkingDirectory
+    let chdirResult = launchCwd.withCString { pointer in
+        chdir(pointer)
     }
     if chdirResult != 0 {
         let err = String(cString: strerror(errno))
-        showAlertAndExit("Could not change working directory to \(launchCwd): \(err)", 16)
+        showAlertAndExit("Could not change working directory to \(launchCwd): \(err)", 17)
     }
 
-    let injected = proxyArguments(electronRunAsNode: electronRunAsNode, config: shimConfig)
-    let newArgv = [argv0] + injected + forwarded
-
-    let cArgs: [UnsafeMutablePointer<CChar>?] = newArgv.map { strdup($0) }
+    let injected = resolvedArguments(policy: policy, electronRunAsNode: electronRunAsNode)
+    let argv = [argv0] + injected + forwarded
+    let cArgs: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) }
     var cArgsWithNull = cArgs
     cArgsWithNull.append(nil)
     let result = target.withCString { pathPointer in
@@ -410,7 +277,7 @@ func main() {
     }
     let err = String(cString: strerror(errno))
     FileHandle.standardError.write(Data("desktop-via-clyde shim: execv(\(target)) failed: \(err)\n".utf8))
-    exit(result == 0 ? 13 : 13)
+    exit(result == 0 ? 18 : 18)
 }
 
 main()

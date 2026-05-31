@@ -33,11 +33,6 @@ func StateRoot() string {
 	return config.StateRoot()
 }
 
-// CacheRoot returns the XDG-derived Clyde cache root used by the harness.
-func CacheRoot() string {
-	return config.CacheRoot()
-}
-
 // LogDir returns the structured log directory for desktop-via-clyde.
 func LogDir() string {
 	return filepath.Join(StateRoot(), "logs")
@@ -81,6 +76,11 @@ func MacOSDir(t targets.Target) string {
 // MainBinaryPath returns the primary executable path for one target.
 func MainBinaryPath(t targets.Target) string {
 	return filepath.Join(MacOSDir(t), t.ExecName)
+}
+
+// LaunchPolicyPath returns the installed launch policy path for one target.
+func LaunchPolicyPath(t targets.Target) string {
+	return MainBinaryPath(t) + ".launch-policy.json"
 }
 
 // RealBinaryPath returns the moved original executable path for one target.

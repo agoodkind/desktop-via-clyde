@@ -1,74 +1,46 @@
 package config
 
 import (
-	"bufio"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
+
+	"goodkind.io/desktop-via-clyde/internal/catalog"
+	"goodkind.io/desktop-via-clyde/internal/spec"
 )
 
 var configLog = slog.With("component", "desktop-via-clyde", "subcomponent", "config")
 
-// LoadRequired loads the required desktop-via-clyde XDG config file.
-func LoadRequired() (*Config, error) {
-	path := Path()
+// LoadPath reads and validates a config file at an explicit path.
+func LoadPath(path string) (*spec.Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		wrappedErr := fmt.Errorf("read %s: %w", path, err)
-		configLog.Error("config.load.read_failed", "path", path, "err", wrappedErr)
-		return nil, wrappedErr
+		configLog.Error("config.load.read_failed", "path", path, "err", err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	cfg := Default()
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		wrappedErr := fmt.Errorf("parse %s: %w", path, err)
-		configLog.Error("config.load.parse_failed", "path", path, "err", wrappedErr)
-		return nil, wrappedErr
+	var cfg spec.Config
+	if err := toml.Unmarshal(data, &cfg); err != nil {
+		configLog.Error("config.load.parse_failed", "path", path, "err", err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-
-	if err := applyUpdaterChannelOverrides(cfg, string(data)); err != nil {
-		wrappedErr := fmt.Errorf("invalid %s: %w", path, err)
-		configLog.Error("config.load.channels_failed", "path", path, "err", wrappedErr)
-		return nil, wrappedErr
+	if err := normalizeAndValidate(&cfg); err != nil {
+		configLog.Error("config.load.validate_failed", "path", path, "err", err)
+		return nil, fmt.Errorf("invalid %s: %w", path, err)
 	}
-	if err := normalizeAndValidate(cfg); err != nil {
-		wrappedErr := fmt.Errorf("invalid %s: %w", path, err)
-		configLog.Error("config.load.validate_failed", "path", path, "err", wrappedErr)
-		return nil, wrappedErr
-	}
-	return cfg, nil
+	return cfg.Clone(), nil
 }
 
-func normalizeAndValidate(cfg *Config) error {
+func normalizeAndValidate(cfg *spec.Config) error {
 	if cfg == nil {
 		return fmt.Errorf("config is required")
 	}
-	if err := validateSigning(cfg); err != nil {
-		return err
-	}
-	if err := validateProxy(cfg); err != nil {
-		return err
-	}
-	if err := validateCodexCLI(cfg); err != nil {
-		return err
-	}
-	if err := normalizeAndValidateApp("apps.cursor", &cfg.Apps.Cursor, true, false, false); err != nil {
-		return err
-	}
-	if err := normalizeAndValidateApp("apps.codex", &cfg.Apps.Codex, true, true, false); err != nil {
-		return err
-	}
-	if err := normalizeAndValidateApp("apps.claude", &cfg.Apps.Claude, false, false, true); err != nil {
-		return err
-	}
-	return nil
-}
 
-func validateSigning(cfg *Config) error {
 	cfg.Signing.Identity = strings.TrimSpace(cfg.Signing.Identity)
 	cfg.Signing.TeamID = strings.TrimSpace(cfg.Signing.TeamID)
 	if cfg.Signing.Identity == "" {
@@ -77,218 +49,244 @@ func validateSigning(cfg *Config) error {
 	if cfg.Signing.TeamID == "" {
 		return fmt.Errorf("signing.team_id is required")
 	}
+
+	if len(cfg.Apps) == 0 {
+		return fmt.Errorf("at least one app must be declared")
+	}
+	if len(cfg.CLIs) == 0 {
+		return fmt.Errorf("at least one cli must be declared")
+	}
+
+	appIDs := sortedAppKeys(cfg.Apps)
+	for _, id := range appIDs {
+		app := cfg.Apps[id]
+		if err := normalizeAndValidateApp(id, &app); err != nil {
+			return err
+		}
+		cfg.Apps[id] = app
+	}
+
+	cliIDs := sortedCLIKeys(cfg.CLIs)
+	for _, id := range cliIDs {
+		cli := cfg.CLIs[id]
+		if err := normalizeAndValidateCLI(id, &cli); err != nil {
+			return err
+		}
+		cfg.CLIs[id] = cli
+	}
+
 	return nil
 }
 
-func validateProxy(cfg *Config) error {
-	cfg.Proxy.Host = strings.TrimSpace(cfg.Proxy.Host)
-	cfg.Proxy.CACertificate = cleanExpandedPath(strings.TrimSpace(cfg.Proxy.CACertificate))
-	cfg.Proxy.NoProxy = strings.TrimSpace(cfg.Proxy.NoProxy)
-	cfg.Proxy.LaunchWorkingDirectory = cleanExpandedPath(strings.TrimSpace(cfg.Proxy.LaunchWorkingDirectory))
-	if cfg.Proxy.Host == "" {
-		return fmt.Errorf("proxy.host is required")
+func normalizeAndValidateApp(id string, app *spec.AppSpec) error {
+	app.ID = strings.TrimSpace(id)
+	if app.ID == "" {
+		return fmt.Errorf("apps contains an empty id")
 	}
-	if cfg.Proxy.Port < 1 || cfg.Proxy.Port > 65535 {
-		return fmt.Errorf("proxy.port must be between 1 and 65535")
+	normalizeCommand(&app.Command)
+	app.Command.Use = strings.TrimSpace(app.Command.Use)
+	if app.Command.Use == "" {
+		return fmt.Errorf("apps.%s.command.use is required", app.ID)
 	}
-	if cfg.Proxy.CACertificate == "" {
-		return fmt.Errorf("proxy.ca_certificate is required")
+	if err := normalizeAndValidateOperations("apps."+app.ID+".operations", app.Operations); err != nil {
+		return err
 	}
-	if !filepath.IsAbs(cfg.Proxy.CACertificate) {
-		return fmt.Errorf("proxy.ca_certificate must be an absolute path")
-	}
-	if cfg.Proxy.NoProxy == "" {
-		return fmt.Errorf("proxy.no_proxy is required")
-	}
-	if cfg.Proxy.LaunchWorkingDirectory == "" {
-		return fmt.Errorf("proxy.launch_working_directory is required")
-	}
-	if !filepath.IsAbs(cfg.Proxy.LaunchWorkingDirectory) {
-		return fmt.Errorf("proxy.launch_working_directory must be an absolute path")
-	}
-	return nil
-}
 
-func validateCodexCLI(cfg *Config) error {
-	cfg.CLI.Codex.SourceRef = strings.TrimSpace(cfg.CLI.Codex.SourceRef)
-	cfg.CLI.Codex.BuildMode = strings.TrimSpace(cfg.CLI.Codex.BuildMode)
-	cfg.CLI.Codex.InstallDir = cleanExpandedPath(strings.TrimSpace(cfg.CLI.Codex.InstallDir))
-	cfg.CLI.Codex.CodexHome = cleanExpandedPath(strings.TrimSpace(cfg.CLI.Codex.CodexHome))
-	if cfg.CLI.Codex.SourceRef == "" {
-		return fmt.Errorf("cli.codex.source_ref is required")
-	}
-	if cfg.CLI.Codex.BuildMode != "local-fast" && cfg.CLI.Codex.BuildMode != "release" {
-		return fmt.Errorf("cli.codex.build_mode must be one of local-fast|release")
-	}
-	if cfg.CLI.Codex.InstallDir == "" {
-		return fmt.Errorf("cli.codex.install_dir is required")
-	}
-	if !filepath.IsAbs(cfg.CLI.Codex.InstallDir) {
-		return fmt.Errorf("cli.codex.install_dir must be an absolute path")
-	}
-	if cfg.CLI.Codex.CodexHome == "" {
-		return fmt.Errorf("cli.codex.codex_home is required")
-	}
-	if !filepath.IsAbs(cfg.CLI.Codex.CodexHome) {
-		return fmt.Errorf("cli.codex.codex_home must be an absolute path")
-	}
-	return nil
-}
-
-func normalizeAndValidateApp(path string, app *AppConfig, allowChannels bool, requireComputerUse bool, allowBundledCLITee bool) error {
 	app.AppPath = cleanExpandedPath(strings.TrimSpace(app.AppPath))
 	app.BundleID = strings.TrimSpace(app.BundleID)
 	app.ExecName = strings.TrimSpace(app.ExecName)
-	app.TargetPolicy = TargetPolicy(strings.TrimSpace(string(app.TargetPolicy)))
 	app.KeychainServices = normalizeStringSlice(app.KeychainServices)
 	app.NestedSignPaths = normalizeStringSlice(app.NestedSignPaths)
 	app.PreservedNestedCodePaths = normalizeStringSlice(app.PreservedNestedCodePaths)
 	app.Entitlements.Strip = normalizeStringSlice(app.Entitlements.Strip)
 	app.Entitlements.RequiredBoolean = normalizeStringSlice(app.Entitlements.RequiredBoolean)
-	app.BundledCLITee.VersionDir = strings.TrimSpace(app.BundledCLITee.VersionDir)
-	app.BundledCLITee.BundledCLIPath = cleanExpandedPath(strings.TrimSpace(app.BundledCLITee.BundledCLIPath))
+	app.OriginalDRBootstrapCapability = strings.TrimSpace(app.OriginalDRBootstrapCapability)
 
 	if app.AppPath == "" {
-		return fmt.Errorf("%s.app_path is required", path)
+		return fmt.Errorf("apps.%s.app_path is required", app.ID)
 	}
 	if app.BundleID == "" {
-		return fmt.Errorf("%s.bundle_id is required", path)
+		return fmt.Errorf("apps.%s.bundle_id is required", app.ID)
 	}
 	if app.ExecName == "" {
-		return fmt.Errorf("%s.exec_name is required", path)
+		return fmt.Errorf("apps.%s.exec_name is required", app.ID)
 	}
-	if app.TargetPolicy != TargetPolicyDefault && app.TargetPolicy != TargetPolicyCodex {
-		return fmt.Errorf("%s.target_policy must be one of default|codex", path)
-	}
-	if !allowBundledCLITee && (app.BundledCLITee.VersionDir != "" || app.BundledCLITee.BundledCLIPath != "") {
-		return fmt.Errorf("%s.bundled_cli_tee is not supported", path)
-	}
-	if app.BundledCLITee.BundledCLIPath != "" && !filepath.IsAbs(app.BundledCLITee.BundledCLIPath) {
-		return fmt.Errorf("%s.bundled_cli_tee.bundled_cli_path must be an absolute path", path)
-	}
-	if err := normalizeAndValidateUpdater(path+".updater", &app.Updater, allowChannels); err != nil {
+	if err := normalizeAndValidateUpdater("apps."+app.ID+".updater", &app.Updater); err != nil {
 		return err
 	}
-	if requireComputerUse {
-		if err := normalizeAndValidateComputerUse(path+".computer_use", &app.ComputerUse); err != nil {
+	if app.OriginalDRBootstrapCapability != "" && !catalog.HasBootstrapCapability(app.OriginalDRBootstrapCapability) {
+		return fmt.Errorf("apps.%s.original_dr_bootstrap_capability %q is unknown", app.ID, app.OriginalDRBootstrapCapability)
+	}
+	if app.ComputerUse != nil {
+		if err := normalizeAndValidateComputerUse("apps."+app.ID+".computer_use", app.ComputerUse); err != nil {
 			return err
 		}
+	}
+	if app.BundledCLITee != nil {
+		if err := normalizeAndValidateBundledCLITee("apps."+app.ID+".bundled_cli_tee", app.BundledCLITee); err != nil {
+			return err
+		}
+	}
+	if err := normalizeAndValidateLaunchPolicy("apps."+app.ID+".launch_policy", &app.LaunchPolicy); err != nil {
+		return err
 	}
 	return nil
 }
 
-func normalizeAndValidateUpdater(path string, updater *UpdaterConfig, allowChannels bool) error {
-	normalizeUpdaterFields(updater)
-	channelNames, err := normalizeUpdaterChannels(path, updater)
-	if err != nil {
-		return err
+func normalizeAndValidateCLI(id string, cli *spec.CLISpec) error {
+	cli.ID = strings.TrimSpace(id)
+	if cli.ID == "" {
+		return fmt.Errorf("clis contains an empty id")
 	}
-	if len(updater.Channels) > 0 && !allowChannels {
-		return fmt.Errorf("%s.channels is not supported", path)
+	normalizeCommand(&cli.Command)
+	if strings.TrimSpace(cli.Command.Use) == "" {
+		return fmt.Errorf("clis.%s.command.use is required", cli.ID)
 	}
-	if updater.Kind == UpdaterKindCursorManifest {
-		return validateCursorUpdater(path, updater, channelNames)
-	}
-	if updater.Kind == UpdaterKindSparkleAppcast {
-		return validateSparkleUpdater(path, updater, channelNames)
-	}
-	if updater.Kind == UpdaterKindClaudeSquirrel {
-		return validateClaudeUpdater(path, updater)
-	}
-	return fmt.Errorf("%s.kind must be one of cursor_manifest|sparkle_appcast|claude_squirrel", path)
+	return normalizeAndValidateOperations("clis."+cli.ID+".operations", cli.Operations)
 }
 
-func normalizeUpdaterFields(updater *UpdaterConfig) {
-	updater.Kind = UpdaterKind(strings.TrimSpace(string(updater.Kind)))
+func normalizeAndValidateOperations(path string, operations map[string]spec.OperationSpec) error {
+	if len(operations) == 0 {
+		return fmt.Errorf("%s must declare at least one operation", path)
+	}
+	for _, id := range sortedOperationKeys(operations) {
+		operation := operations[id]
+		operation.ID = strings.TrimSpace(id)
+		operation.Use = strings.TrimSpace(operation.Use)
+		operation.Short = strings.TrimSpace(operation.Short)
+		operation.Long = strings.TrimSpace(operation.Long)
+		operation.Aliases = normalizeStringSlice(operation.Aliases)
+		operation.Capability = strings.TrimSpace(operation.Capability)
+		if operation.Use == "" {
+			return fmt.Errorf("%s.%s.use is required", path, id)
+		}
+		if operation.Capability == "" {
+			return fmt.Errorf("%s.%s.capability is required", path, id)
+		}
+		if !catalog.HasOperationCapability(operation.Capability) {
+			return fmt.Errorf("%s.%s.capability %q is unknown", path, id, operation.Capability)
+		}
+		normalizedFlags := make([]spec.FlagSpec, 0, len(operation.Flags))
+		seenFlags := map[string]bool{}
+		seenBindings := map[string]bool{}
+		for index, flag := range operation.Flags {
+			normalized, err := normalizeAndValidateFlag(path+"."+id, index, flag)
+			if err != nil {
+				return err
+			}
+			if seenFlags[normalized.Name] {
+				return fmt.Errorf("%s.%s.flags contains duplicate %q", path, id, normalized.Name)
+			}
+			seenFlags[normalized.Name] = true
+			if seenBindings[normalized.Binding] {
+				return fmt.Errorf("%s.%s.flags contains duplicate binding %q", path, id, normalized.Binding)
+			}
+			seenBindings[normalized.Binding] = true
+			normalizedFlags = append(normalizedFlags, normalized)
+		}
+		operation.Flags = normalizedFlags
+		operations[id] = operation
+	}
+	return nil
+}
+
+func normalizeAndValidateFlag(path string, index int, flag spec.FlagSpec) (spec.FlagSpec, error) {
+	flag.Name = strings.TrimSpace(flag.Name)
+	flag.Binding = strings.TrimSpace(flag.Binding)
+	flag.Type = spec.FlagType(strings.TrimSpace(string(flag.Type)))
+	flag.Usage = strings.TrimSpace(flag.Usage)
+	if flag.Name == "" {
+		return spec.FlagSpec{}, fmt.Errorf("%s.flags[%d].name is required", path, index)
+	}
+	if flag.Binding == "" {
+		flag.Binding = flag.Name
+	}
+	switch flag.Type {
+	case spec.FlagTypeBool:
+		if flag.DefaultBool == nil {
+			value := false
+			flag.DefaultBool = &value
+		}
+		flag.DefaultString = ""
+	case spec.FlagTypeString:
+		if flag.DefaultBool != nil {
+			return spec.FlagSpec{}, fmt.Errorf("%s.flags[%d].default_bool is not supported for string flags", path, index)
+		}
+		flag.DefaultString = strings.TrimSpace(flag.DefaultString)
+		if flag.ExpandPath {
+			flag.DefaultString = cleanExpandedPath(renderPathTokens(flag.DefaultString))
+		}
+	default:
+		return spec.FlagSpec{}, fmt.Errorf("%s.flags[%d].type must be one of bool|string", path, index)
+	}
+	return flag, nil
+}
+
+func renderPathTokens(value string) string {
+	replacer := strings.NewReplacer(
+		"{cache_root}", CacheRoot(),
+		"{config_root}", filepath.Dir(Path()),
+		"{home}", homeRelativeRoot(""),
+		"{state_root}", StateRoot(),
+	)
+	return replacer.Replace(value)
+}
+
+func normalizeAndValidateUpdater(path string, updater *spec.UpdaterSpec) error {
+	updater.Kind = spec.UpdaterKind(strings.TrimSpace(string(updater.Kind)))
 	updater.URL = strings.TrimSpace(updater.URL)
+	updater.URLTemplate = strings.TrimSpace(updater.URLTemplate)
+	updater.UserAgent = strings.TrimSpace(updater.UserAgent)
 	updater.Platform = strings.TrimSpace(updater.Platform)
 	updater.Product = strings.TrimSpace(updater.Product)
 	updater.SparklePublicKey = strings.TrimSpace(updater.SparklePublicKey)
 	updater.DeviceIDParamName = strings.TrimSpace(updater.DeviceIDParamName)
 	updater.DefaultChannel = strings.TrimSpace(updater.DefaultChannel)
-}
 
-func normalizeUpdaterChannels(path string, updater *UpdaterConfig) (map[string]bool, error) {
-	channels := make([]UpdaterChannel, 0, len(updater.Channels))
-	channelNames := map[string]bool{}
+	switch updater.Kind {
+	case spec.UpdaterKindHTTPPathJSONManifest, spec.UpdaterKindSparkleAppcast, spec.UpdaterKindSquirrelJSON:
+	default:
+		return fmt.Errorf("%s.kind must be one of http_path_json_manifest|sparkle_appcast|squirrel_json", path)
+	}
+
+	channels := make([]spec.UpdaterChannel, 0, len(updater.Channels))
+	seen := map[string]bool{}
 	for _, channel := range updater.Channels {
-		normalizedName := strings.TrimSpace(channel.Name)
-		normalizedURL := strings.TrimSpace(channel.URL)
-		if normalizedName == "" {
-			return nil, fmt.Errorf("%s.channels contains a channel without name", path)
+		channel.Name = strings.TrimSpace(channel.Name)
+		channel.URL = strings.TrimSpace(channel.URL)
+		if channel.Name == "" {
+			return fmt.Errorf("%s.channels contains a channel without name", path)
 		}
-		if channelNames[normalizedName] {
-			return nil, fmt.Errorf("%s.channels.%s is duplicated", path, normalizedName)
+		if seen[channel.Name] {
+			return fmt.Errorf("%s.channels.%s is duplicated", path, channel.Name)
 		}
-		channelNames[normalizedName] = true
-		channels = append(channels, UpdaterChannel{Name: normalizedName, URL: normalizedURL})
+		seen[channel.Name] = true
+		channels = append(channels, channel)
 	}
 	updater.Channels = channels
-	return channelNames, nil
-}
 
-func validateCursorUpdater(path string, updater *UpdaterConfig, channelNames map[string]bool) error {
-	if updater.Platform == "" {
-		return fmt.Errorf("%s.platform is required", path)
-	}
-	if updater.Product == "" {
-		return fmt.Errorf("%s.product is required", path)
-	}
-	if len(updater.Channels) == 0 {
-		return fmt.Errorf("%s.channels is required", path)
-	}
-	if updater.DefaultChannel == "" {
-		return fmt.Errorf("%s.default_channel is required", path)
-	}
-	for _, channel := range updater.Channels {
-		if channel.URL != "" {
-			return fmt.Errorf("%s.channels.%s.url is not supported for cursor_manifest", path, channel.Name)
+	switch updater.Kind {
+	case spec.UpdaterKindHTTPPathJSONManifest:
+		if err := validateHTTPPathJSONManifestUpdater(path, updater); err != nil {
+			return err
+		}
+	case spec.UpdaterKindSparkleAppcast:
+		if err := validateSparkleUpdater(path, updater); err != nil {
+			return err
+		}
+	case spec.UpdaterKindSquirrelJSON:
+		if err := validateSquirrelUpdater(path, updater); err != nil {
+			return err
 		}
 	}
-	if !channelNames[updater.DefaultChannel] {
+
+	if updater.DefaultChannel != "" && !seen[updater.DefaultChannel] {
 		return fmt.Errorf("%s.default_channel %q is not declared in channels", path, updater.DefaultChannel)
 	}
 	return nil
 }
 
-func validateSparkleUpdater(path string, updater *UpdaterConfig, channelNames map[string]bool) error {
-	if updater.SparklePublicKey == "" {
-		return fmt.Errorf("%s.sparkle_public_key is required", path)
-	}
-	if len(updater.Channels) == 0 && updater.URL == "" {
-		return fmt.Errorf("%s.url or %s.channels is required", path, path)
-	}
-	if len(updater.Channels) == 0 {
-		return nil
-	}
-	if updater.DefaultChannel == "" {
-		return fmt.Errorf("%s.default_channel is required", path)
-	}
-	for _, channel := range updater.Channels {
-		if channel.URL == "" {
-			return fmt.Errorf("%s.channels.%s.url is required", path, channel.Name)
-		}
-	}
-	if !channelNames[updater.DefaultChannel] {
-		return fmt.Errorf("%s.default_channel %q is not declared in channels", path, updater.DefaultChannel)
-	}
-	return nil
-}
-
-func validateClaudeUpdater(path string, updater *UpdaterConfig) error {
-	if updater.URL == "" {
-		return fmt.Errorf("%s.url is required", path)
-	}
-	if updater.DeviceIDParamName == "" {
-		return fmt.Errorf("%s.device_id_param_name is required", path)
-	}
-	if len(updater.Channels) > 0 || updater.DefaultChannel != "" {
-		return fmt.Errorf("%s does not support channels", path)
-	}
-	return nil
-}
-
-func normalizeAndValidateComputerUse(path string, policy *ComputerUseConfig) error {
+func normalizeAndValidateComputerUse(path string, policy *spec.ComputerUseSpec) error {
 	policy.HostAppPath = cleanExpandedPath(strings.TrimSpace(policy.HostAppPath))
 	policy.BundledAppPath = strings.TrimSpace(policy.BundledAppPath)
 	policy.AppPathFromHome = strings.TrimSpace(policy.AppPathFromHome)
@@ -320,18 +318,103 @@ func normalizeAndValidateComputerUse(path string, policy *ComputerUseConfig) err
 	if policy.UpstreamTrustedTeamID == "" {
 		return fmt.Errorf("%s.upstream_trusted_team_id is required", path)
 	}
-	normalizedTargets := make([]ComputerUseSignTarget, 0, len(policy.SignTargets))
+	normalizedTargets := make([]spec.ComputerUseSignTarget, 0, len(policy.SignTargets))
 	for index, target := range policy.SignTargets {
 		target.Path = strings.TrimSpace(target.Path)
+		target.Entitlements.Strip = normalizeStringSlice(target.Entitlements.Strip)
+		target.Entitlements.RequiredBoolean = normalizeStringSlice(target.Entitlements.RequiredBoolean)
 		if target.Path == "" {
 			return fmt.Errorf("%s.sign_targets[%d].path is required", path, index)
 		}
-		target.Entitlements.Strip = normalizeStringSlice(target.Entitlements.Strip)
-		target.Entitlements.RequiredBoolean = normalizeStringSlice(target.Entitlements.RequiredBoolean)
 		normalizedTargets = append(normalizedTargets, target)
 	}
 	policy.SignTargets = normalizedTargets
 	return nil
+}
+
+func normalizeAndValidateBundledCLITee(path string, tee *spec.BundledCLITeeSpec) error {
+	tee.Capability = strings.TrimSpace(tee.Capability)
+	tee.AppSupportDir = cleanExpandedPath(renderPathTokens(strings.TrimSpace(tee.AppSupportDir)))
+	tee.VersionDir = strings.TrimSpace(tee.VersionDir)
+	tee.BundledCLIRel = strings.TrimSpace(tee.BundledCLIRel)
+	tee.BundledCLIPath = cleanExpandedPath(renderPathTokens(strings.TrimSpace(tee.BundledCLIPath)))
+	tee.TerminateProcessNames = normalizeStringSlice(tee.TerminateProcessNames)
+	tee.TerminateProcessPatterns = normalizeStringSlice(tee.TerminateProcessPatterns)
+	tee.CompletionSteps = normalizeStringSlice(tee.CompletionSteps)
+
+	if tee.Capability == "" {
+		return fmt.Errorf("%s.capability is required", path)
+	}
+	if !catalog.HasPatchHookCapability(tee.Capability) {
+		return fmt.Errorf("%s.capability %q is unknown", path, tee.Capability)
+	}
+	if err := validateBundledCLITeePaths(path, tee); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateBundledCLITeePaths(path string, tee *spec.BundledCLITeeSpec) error {
+	if tee.BundledCLIPath == "" && tee.AppSupportDir == "" {
+		return fmt.Errorf("%s.app_support_dir is required when bundled_cli_path is empty", path)
+	}
+	if tee.BundledCLIPath == "" && tee.BundledCLIRel == "" {
+		return fmt.Errorf("%s.bundled_cli_rel is required when bundled_cli_path is empty", path)
+	}
+	if tee.AppSupportDir != "" && !filepath.IsAbs(tee.AppSupportDir) {
+		return fmt.Errorf("%s.app_support_dir must be an absolute path", path)
+	}
+	if tee.BundledCLIPath != "" && !filepath.IsAbs(tee.BundledCLIPath) {
+		return fmt.Errorf("%s.bundled_cli_path must be an absolute path", path)
+	}
+	return nil
+}
+
+func normalizeAndValidateLaunchPolicy(path string, policy *spec.LaunchPolicySpec) error {
+	policy.ProxyHost = strings.TrimSpace(policy.ProxyHost)
+	policy.CACertificate = cleanExpandedPath(strings.TrimSpace(policy.CACertificate))
+	policy.NoProxy = strings.TrimSpace(policy.NoProxy)
+	policy.LaunchWorkingDirectory = cleanExpandedPath(strings.TrimSpace(policy.LaunchWorkingDirectory))
+	policy.IgnoreDryRunSignal = spec.DryRunSignal(strings.TrimSpace(string(policy.IgnoreDryRunSignal)))
+
+	if policy.ProxyHost == "" {
+		return fmt.Errorf("%s.proxy_host is required", path)
+	}
+	if policy.ProxyPort < 1 || policy.ProxyPort > 65535 {
+		return fmt.Errorf("%s.proxy_port must be between 1 and 65535", path)
+	}
+	if policy.CACertificate == "" {
+		return fmt.Errorf("%s.ca_certificate is required", path)
+	}
+	if !filepath.IsAbs(policy.CACertificate) {
+		return fmt.Errorf("%s.ca_certificate must be an absolute path", path)
+	}
+	if policy.NoProxy == "" {
+		return fmt.Errorf("%s.no_proxy is required", path)
+	}
+	if policy.LaunchWorkingDirectory == "" {
+		return fmt.Errorf("%s.launch_working_directory is required", path)
+	}
+	if !filepath.IsAbs(policy.LaunchWorkingDirectory) {
+		return fmt.Errorf("%s.launch_working_directory must be an absolute path", path)
+	}
+	if err := normalizeLaunchPolicyEnvironment(path, policy); err != nil {
+		return err
+	}
+	if err := normalizeLaunchPolicyArguments(path, policy); err != nil {
+		return err
+	}
+	if err := normalizeLaunchPolicyPreflights(path, policy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func normalizeCommand(command *spec.CommandSpec) {
+	command.Use = strings.TrimSpace(command.Use)
+	command.Short = strings.TrimSpace(command.Short)
+	command.Long = strings.TrimSpace(command.Long)
+	command.Aliases = normalizeStringSlice(command.Aliases)
 }
 
 func normalizeStringSlice(values []string) []string {
@@ -349,247 +432,162 @@ func normalizeStringSlice(values []string) []string {
 	return normalized
 }
 
-func applyUpdaterChannelOverrides(cfg *Config, data string) error {
-	parser := updaterChannelParser{
-		cfg:               cfg,
-		currentTable:      "",
-		currentChannelApp: "",
-		currentChannel:    UpdaterChannel{Name: "", URL: ""},
-		seenChannelTables: map[string]bool{},
+func sortedAppKeys(values map[string]spec.AppSpec) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
 	}
-	scanner := bufio.NewScanner(strings.NewReader(data))
-	for scanner.Scan() {
-		if err := parser.consumeLine(scanner.Text()); err != nil {
-			return err
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		configLog.Error("config.load.channels_scan_failed", "err", err)
-		return fmt.Errorf("scan config channels: %w", err)
-	}
-	return parser.finish()
+	sort.Strings(keys)
+	return keys
 }
 
-type updaterChannelParser struct {
-	cfg               *Config
-	currentTable      string
-	currentChannelApp string
-	currentChannel    UpdaterChannel
-	seenChannelTables map[string]bool
+func sortedCLIKeys(values map[string]spec.CLISpec) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
-func (p *updaterChannelParser) consumeLine(rawLine string) error {
-	line := strings.TrimSpace(stripLineComment(rawLine))
-	if line == "" {
-		return nil
+func sortedOperationKeys(values map[string]spec.OperationSpec) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
 	}
-	if isArrayTableLine(line) {
-		return p.handleArrayTable(line)
-	}
-	if isTableLine(line) {
-		return p.handleTable(line)
-	}
-	key, value, ok := parseKeyValue(line)
-	if !ok {
-		return nil
-	}
-	if p.currentChannelApp != "" {
-		p.applyChannelField(key, value)
-		return nil
-	}
-	return p.handleUpdaterTableValue(key, value)
+	sort.Strings(keys)
+	return keys
 }
 
-func (p *updaterChannelParser) finish() error {
-	return p.flushCurrentChannel()
-}
-
-func (p *updaterChannelParser) handleArrayTable(line string) error {
-	if err := p.flushCurrentChannel(); err != nil {
-		return err
+func validateHTTPPathJSONManifestUpdater(path string, updater *spec.UpdaterSpec) error {
+	if updater.URLTemplate == "" {
+		return fmt.Errorf("%s.url_template is required", path)
 	}
-	p.currentChannel = UpdaterChannel{Name: "", URL: ""}
-	p.currentTable = strings.TrimSpace(line[2 : len(line)-2])
-	appID, ok := parseUpdaterChannelTableName(p.currentTable)
-	if !ok {
-		p.currentChannelApp = ""
-		return nil
+	if updater.UserAgent == "" {
+		return fmt.Errorf("%s.user_agent is required", path)
 	}
-	p.currentChannelApp = appID
-	if p.seenChannelTables[appID] {
-		return nil
+	if updater.Platform == "" {
+		return fmt.Errorf("%s.platform is required", path)
 	}
-	if err := replaceAppChannels(p.cfg, appID, nil); err != nil {
-		return err
+	if updater.Product == "" {
+		return fmt.Errorf("%s.product is required", path)
 	}
-	p.seenChannelTables[appID] = true
+	if len(updater.Channels) == 0 {
+		return fmt.Errorf("%s.channels is required", path)
+	}
+	if updater.DefaultChannel == "" {
+		return fmt.Errorf("%s.default_channel is required", path)
+	}
 	return nil
 }
 
-func (p *updaterChannelParser) handleTable(line string) error {
-	if err := p.flushCurrentChannel(); err != nil {
-		return err
+func validateSparkleUpdater(path string, updater *spec.UpdaterSpec) error {
+	if updater.UserAgent == "" {
+		return fmt.Errorf("%s.user_agent is required", path)
 	}
-	p.currentChannel = UpdaterChannel{Name: "", URL: ""}
-	p.currentChannelApp = ""
-	p.currentTable = strings.TrimSpace(line[1 : len(line)-1])
+	if updater.SparklePublicKey == "" {
+		return fmt.Errorf("%s.sparkle_public_key is required", path)
+	}
+	if len(updater.Channels) == 0 && updater.URL == "" {
+		return fmt.Errorf("%s.url or %s.channels is required", path, path)
+	}
+	if len(updater.Channels) == 0 {
+		return nil
+	}
+	if updater.DefaultChannel == "" {
+		return fmt.Errorf("%s.default_channel is required", path)
+	}
+	for _, channel := range updater.Channels {
+		if channel.URL == "" {
+			return fmt.Errorf("%s.channels.%s.url is required", path, channel.Name)
+		}
+	}
 	return nil
 }
 
-func (p *updaterChannelParser) applyChannelField(key string, value string) {
-	if key == "name" {
-		p.currentChannel.Name = parseQuotedString(value)
+func validateSquirrelUpdater(path string, updater *spec.UpdaterSpec) error {
+	if updater.URL == "" {
+		return fmt.Errorf("%s.url is required", path)
 	}
-	if key == "url" {
-		p.currentChannel.URL = parseQuotedString(value)
+	if updater.UserAgent == "" {
+		return fmt.Errorf("%s.user_agent is required", path)
 	}
+	if updater.DeviceIDParamName == "" {
+		return fmt.Errorf("%s.device_id_param_name is required", path)
+	}
+	if len(updater.Channels) > 0 || updater.DefaultChannel != "" {
+		return fmt.Errorf("%s does not support channels", path)
+	}
+	return nil
 }
 
-func (p *updaterChannelParser) handleUpdaterTableValue(key string, value string) error {
-	appID, ok := parseUpdaterTableName(p.currentTable)
-	if !ok || key != "channels" {
-		return nil
-	}
-	channels, err := parseStringChannels(appID, value)
-	if err != nil {
-		return err
-	}
-	return replaceAppChannels(p.cfg, appID, channels)
-}
-
-func (p *updaterChannelParser) flushCurrentChannel() error {
-	if p.currentChannelApp == "" {
-		return nil
-	}
-	if p.currentChannel.Name == "" && p.currentChannel.URL == "" {
-		return nil
-	}
-	return appendAppChannel(p.cfg, p.currentChannelApp, p.currentChannel)
-}
-
-func parseUpdaterTableName(table string) (string, bool) {
-	if !strings.HasPrefix(table, "apps.") || !strings.HasSuffix(table, ".updater") {
-		return "", false
-	}
-	appID := strings.TrimSuffix(strings.TrimPrefix(table, "apps."), ".updater")
-	if strings.Contains(appID, ".") || appID == "" {
-		return "", false
-	}
-	return appID, true
-}
-
-func parseUpdaterChannelTableName(table string) (string, bool) {
-	if !strings.HasPrefix(table, "apps.") || !strings.HasSuffix(table, ".updater.channels") {
-		return "", false
-	}
-	appID := strings.TrimSuffix(strings.TrimPrefix(table, "apps."), ".updater.channels")
-	if strings.Contains(appID, ".") || appID == "" {
-		return "", false
-	}
-	return appID, true
-}
-
-func parseKeyValue(line string) (string, string, bool) {
-	key, value, ok := strings.Cut(line, "=")
-	if !ok {
-		return "", "", false
-	}
-	key = strings.TrimSpace(key)
-	value = strings.TrimSpace(value)
-	if key == "" {
-		return "", "", false
-	}
-	return key, value, true
-}
-
-func parseQuotedString(value string) string {
-	trimmed := strings.TrimSpace(value)
-	trimmed = strings.TrimPrefix(trimmed, "\"")
-	trimmed = strings.TrimSuffix(trimmed, "\"")
-	return strings.ReplaceAll(trimmed, "\\\"", "\"")
-}
-
-func parseStringChannels(appID string, value string) ([]UpdaterChannel, error) {
-	trimmed := strings.TrimSpace(value)
-	if !strings.HasPrefix(trimmed, "[") || !strings.HasSuffix(trimmed, "]") {
-		return nil, fmt.Errorf("apps.%s.updater.channels must use the TOML array form", appID)
-	}
-	inner := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
-	if inner == "" {
-		return []UpdaterChannel{}, nil
-	}
-	parts := strings.Split(inner, ",")
-	channels := make([]UpdaterChannel, 0, len(parts))
-	for _, part := range parts {
-		name := parseQuotedString(part)
-		if name == "" {
-			return nil, fmt.Errorf("apps.%s.updater.channels contains an empty channel name", appID)
+func normalizeLaunchPolicyEnvironment(path string, policy *spec.LaunchPolicySpec) error {
+	for index, action := range policy.Environment {
+		action.Action = strings.TrimSpace(action.Action)
+		action.Key = strings.TrimSpace(action.Key)
+		if action.Action != "set" && action.Action != "unset" {
+			return fmt.Errorf("%s.environment[%d].action must be one of set|unset", path, index)
 		}
-		channels = append(channels, UpdaterChannel{Name: name, URL: ""})
-	}
-	return channels, nil
-}
-
-func replaceAppChannels(cfg *Config, appID string, channels []UpdaterChannel) error {
-	if appID == "cursor" {
-		cfg.Apps.Cursor.Updater.Channels = append([]UpdaterChannel(nil), channels...)
-		return nil
-	}
-	if appID == "codex" {
-		cfg.Apps.Codex.Updater.Channels = append([]UpdaterChannel(nil), channels...)
-		return nil
-	}
-	if appID == "claude" {
-		cfg.Apps.Claude.Updater.Channels = append([]UpdaterChannel(nil), channels...)
-		return nil
-	}
-	return fmt.Errorf("apps.%s.updater.channels references an unknown app", appID)
-}
-
-func appendAppChannel(cfg *Config, appID string, channel UpdaterChannel) error {
-	if appID == "cursor" {
-		cfg.Apps.Cursor.Updater.Channels = append(cfg.Apps.Cursor.Updater.Channels, channel)
-		return nil
-	}
-	if appID == "codex" {
-		cfg.Apps.Codex.Updater.Channels = append(cfg.Apps.Codex.Updater.Channels, channel)
-		return nil
-	}
-	if appID == "claude" {
-		cfg.Apps.Claude.Updater.Channels = append(cfg.Apps.Claude.Updater.Channels, channel)
-		return nil
-	}
-	return fmt.Errorf("apps.%s.updater.channels references an unknown app", appID)
-}
-
-func isArrayTableLine(line string) bool {
-	return strings.HasPrefix(line, "[[") && strings.HasSuffix(line, "]]")
-}
-
-func isTableLine(line string) bool {
-	return strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]")
-}
-
-func stripLineComment(line string) string {
-	var builder strings.Builder
-	inQuotes := false
-	escaped := false
-	for _, character := range line {
-		if character == '\\' && inQuotes {
-			escaped = !escaped
-			builder.WriteRune(character)
-			continue
+		if action.Key == "" {
+			return fmt.Errorf("%s.environment[%d].key is required", path, index)
 		}
-		if character == '"' && !escaped {
-			inQuotes = !inQuotes
-			builder.WriteRune(character)
-			continue
+		if action.Value != "" && hasLaunchPolicyTemplate(action.Value) {
+			return fmt.Errorf("%s.environment[%d].value must be fully resolved", path, index)
 		}
-		escaped = false
-		if character == '#' && !inQuotes {
-			break
-		}
-		builder.WriteRune(character)
+		policy.Environment[index] = action
 	}
-	return builder.String()
+	return nil
+}
+
+func normalizeLaunchPolicyArguments(path string, policy *spec.LaunchPolicySpec) error {
+	for index, action := range policy.Arguments {
+		action.Action = strings.TrimSpace(action.Action)
+		action.Value = strings.TrimSpace(action.Value)
+		if action.Action != "append" && action.Action != "prepend" {
+			return fmt.Errorf("%s.arguments[%d].action must be one of append|prepend", path, index)
+		}
+		if action.Value == "" {
+			return fmt.Errorf("%s.arguments[%d].value is required", path, index)
+		}
+		if hasLaunchPolicyTemplate(action.Value) {
+			return fmt.Errorf("%s.arguments[%d].value must be fully resolved", path, index)
+		}
+		policy.Arguments[index] = action
+	}
+	return nil
+}
+
+func normalizeLaunchPolicyPreflights(path string, policy *spec.LaunchPolicySpec) error {
+	for index, preflight := range policy.Preflights {
+		preflight.Kind = spec.PreflightKind(strings.TrimSpace(string(preflight.Kind)))
+		preflight.Path = cleanExpandedPath(strings.TrimSpace(preflight.Path))
+		preflight.Host = strings.TrimSpace(preflight.Host)
+		switch preflight.Kind {
+		case spec.PreflightKindFileExists:
+			if preflight.Path == "" {
+				return fmt.Errorf("%s.preflights[%d].path is required", path, index)
+			}
+			if hasLaunchPolicyTemplate(preflight.Path) {
+				return fmt.Errorf("%s.preflights[%d].path must be fully resolved", path, index)
+			}
+		case spec.PreflightKindTCPReachable:
+			if preflight.Host == "" {
+				return fmt.Errorf("%s.preflights[%d].host is required", path, index)
+			}
+			if preflight.Port < 1 || preflight.Port > 65535 {
+				return fmt.Errorf("%s.preflights[%d].port must be between 1 and 65535", path, index)
+			}
+			if preflight.Timeout < 1 {
+				return fmt.Errorf("%s.preflights[%d].timeout_ms must be positive", path, index)
+			}
+		default:
+			return fmt.Errorf("%s.preflights[%d].kind must be one of file_exists|tcp_reachable", path, index)
+		}
+		policy.Preflights[index] = preflight
+	}
+	return nil
+}
+
+func hasLaunchPolicyTemplate(value string) bool {
+	return strings.Contains(value, "{") || strings.Contains(value, "}")
 }

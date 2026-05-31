@@ -1,49 +1,44 @@
-// Package targets defines the configured macOS apps that desktop-via-clyde can patch.
+// Package targets builds runtime app and CLI records from declared config.
 package targets
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"goodkind.io/desktop-via-clyde/internal/config"
+	"goodkind.io/desktop-via-clyde/internal/spec"
 )
-
-// UpdaterKind identifies the upstream update protocol used by a target.
-type UpdaterKind string
 
 const (
-	// UpdaterCursorManifest selects Cursor's JSON manifest endpoint.
-	UpdaterCursorManifest UpdaterKind = "cursor-manifest"
-	// UpdaterSparkleAppcast selects Sparkle's XML appcast format.
-	UpdaterSparkleAppcast UpdaterKind = "sparkle-appcast"
-	// UpdaterClaudeSquirrel selects Claude's Squirrel-style JSON endpoint.
-	UpdaterClaudeSquirrel UpdaterKind = "claude-squirrel"
+	// UpdaterHTTPPathJSONManifest fetches a JSON manifest from a path template.
+	UpdaterHTTPPathJSONManifest spec.UpdaterKind = spec.UpdaterKindHTTPPathJSONManifest
+	// UpdaterSparkleAppcast fetches a Sparkle XML appcast.
+	UpdaterSparkleAppcast spec.UpdaterKind = spec.UpdaterKindSparkleAppcast
+	// UpdaterSquirrelJSON fetches a Squirrel-style JSON manifest.
+	UpdaterSquirrelJSON spec.UpdaterKind = spec.UpdaterKindSquirrelJSON
 )
-
-// UpdaterChannel declares one named updater channel.
-type UpdaterChannel struct {
-	Name string
-	URL  string
-}
 
 // Updater describes the upstream updater endpoint for one target.
 type Updater struct {
-	Kind              UpdaterKind
+	Kind              spec.UpdaterKind
 	URL               string
+	URLTemplate       string
+	UserAgent         string
 	Platform          string
 	Product           string
 	SparklePublicKey  string
 	DeviceIDParamName string
 	DefaultChannel    string
-	Channels          []UpdaterChannel
+	Channels          []spec.UpdaterChannel
 }
 
-// SupportsChannels reports whether the updater exposes named channels.
+// SupportsChannels reports whether the updater declares named channels.
 func (u Updater) SupportsChannels() bool {
 	return len(u.Channels) > 0
 }
 
-// ResolveChannel returns the requested channel or the configured default.
+// ResolveChannel picks the effective update channel for one request.
 func (u Updater) ResolveChannel(requested string) (string, error) {
 	channel := strings.TrimSpace(requested)
 	if !u.SupportsChannels() {
@@ -66,7 +61,7 @@ func (u Updater) ResolveChannel(requested string) (string, error) {
 	return "", fmt.Errorf("unknown channel %q", channel)
 }
 
-// URLWithChannel returns the updater URL for the resolved channel.
+// URLWithChannel resolves the updater URL for one channel name.
 func (u Updater) URLWithChannel(channel string) (string, error) {
 	if !u.SupportsChannels() {
 		return u.URL, nil
@@ -77,28 +72,28 @@ func (u Updater) URLWithChannel(channel string) (string, error) {
 	}
 	for _, candidate := range u.Channels {
 		if candidate.Name == resolved {
-			if candidate.URL == "" {
-				return u.URL, nil
+			if candidate.URL != "" {
+				return candidate.URL, nil
 			}
-			return candidate.URL, nil
+			return u.URL, nil
 		}
 	}
 	return "", fmt.Errorf("unknown channel %q", resolved)
 }
 
-// EntitlementsPolicy describes how a target's extracted entitlements are normalized before re-signing.
+// EntitlementsPolicy describes how to normalize entitlements before signing.
 type EntitlementsPolicy struct {
 	Strip                       []string
 	RequiredBooleanEntitlements []string
 }
 
-// ComputerUseSignTarget describes one app bundle inside Codex Computer Use that must be re-signed after local trust-policy repair.
+// ComputerUseSignTarget describes one helper that must be re-signed.
 type ComputerUseSignTarget struct {
 	Path         string
 	Entitlements *EntitlementsPolicy
 }
 
-// ComputerUsePolicy describes the Codex companion helper bundle whose native IPC trust policy must match the locally re-signed Codex app.
+// ComputerUsePolicy describes the companion helper repair settings for one app.
 type ComputerUsePolicy struct {
 	HostAppPath           string
 	BundledAppPath        string
@@ -112,91 +107,122 @@ type ComputerUsePolicy struct {
 	SignTargets           []ComputerUseSignTarget
 }
 
-// Target describes one patchable bundle.
+// Target is the runtime app target derived from validated config declarations.
 type Target struct {
-	ID                       string
-	AppPath                  string
-	BundleID                 string
-	ExecName                 string
-	Entitlements             *EntitlementsPolicy
-	KeychainServices         []string
-	NestedSignPaths          []string
-	PreservedNestedCodePaths []string
-	ComputerUse              *ComputerUsePolicy
-	Updater                  Updater
-	BundledCLITee            config.BundledCLITeeConfig
-	TargetPolicy             string
+	ID                            string
+	Command                       spec.CommandSpec
+	Operations                    map[string]spec.OperationSpec
+	AppPath                       string
+	BundleID                      string
+	ExecName                      string
+	KeychainServices              []string
+	NestedSignPaths               []string
+	PreservedNestedCodePaths      []string
+	Entitlements                  *EntitlementsPolicy
+	Updater                       Updater
+	ComputerUse                   *ComputerUsePolicy
+	BundledCLITee                 *spec.BundledCLITeeSpec
+	LaunchPolicy                  spec.LaunchPolicySpec
+	OriginalDRBootstrapCapability string
 }
 
-// All returns the configured targets in stable CLI order.
+// CLIProgram is the runtime non-app CLI declaration derived from config.
+type CLIProgram struct {
+	ID         string
+	Command    spec.CommandSpec
+	Operations map[string]spec.OperationSpec
+}
+
+// All returns all configured app targets in stable command order.
 func All() []Target {
 	cfg := config.Current()
-	return []Target{
-		buildTarget("cursor", cfg.Apps.Cursor),
-		buildTarget("codex", cfg.Apps.Codex),
-		buildTarget("claude", cfg.Apps.Claude),
+	ids := make([]string, 0, len(cfg.Apps))
+	for id := range cfg.Apps {
+		ids = append(ids, id)
 	}
+	sort.Strings(ids)
+	results := make([]Target, 0, len(ids))
+	for _, id := range ids {
+		results = append(results, buildTarget(cfg.Apps[id]))
+	}
+	return results
 }
 
-func buildTarget(id string, app config.AppConfig) Target {
-	target := Target{
-		ID:                       id,
-		AppPath:                  app.AppPath,
-		BundleID:                 app.BundleID,
-		ExecName:                 app.ExecName,
-		Entitlements:             buildEntitlements(app.Entitlements),
-		KeychainServices:         cloneStrings(app.KeychainServices),
-		NestedSignPaths:          cloneStrings(app.NestedSignPaths),
-		PreservedNestedCodePaths: cloneStrings(app.PreservedNestedCodePaths),
-		ComputerUse:              nil,
-		Updater:                  buildUpdater(app.Updater),
-		BundledCLITee:            app.BundledCLITee,
-		TargetPolicy:             string(app.TargetPolicy),
+// Lookup returns one configured app target by declaration id.
+func Lookup(id string) (Target, error) {
+	app, ok := config.Current().Apps[id]
+	if !ok {
+		return Target{}, fmt.Errorf("unknown target %q", id)
 	}
-	if app.ComputerUse.HostAppPath != "" {
-		target.ComputerUse = buildComputerUse(app.ComputerUse)
+	return buildTarget(app), nil
+}
+
+// AllCLIs returns all configured non-app CLI programs in stable command order.
+func AllCLIs() []CLIProgram {
+	cfg := config.Current()
+	ids := make([]string, 0, len(cfg.CLIs))
+	for id := range cfg.CLIs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	results := make([]CLIProgram, 0, len(ids))
+	for _, id := range ids {
+		results = append(results, CLIProgram{
+			ID:         cfg.CLIs[id].ID,
+			Command:    cfg.CLIs[id].Command,
+			Operations: cloneOperations(cfg.CLIs[id].Operations),
+		})
+	}
+	return results
+}
+
+func buildTarget(app spec.AppSpec) Target {
+	target := Target{
+		ID:                            app.ID,
+		Command:                       app.Command,
+		Operations:                    cloneOperations(app.Operations),
+		AppPath:                       app.AppPath,
+		BundleID:                      app.BundleID,
+		ExecName:                      app.ExecName,
+		KeychainServices:              cloneStrings(app.KeychainServices),
+		NestedSignPaths:               cloneStrings(app.NestedSignPaths),
+		PreservedNestedCodePaths:      cloneStrings(app.PreservedNestedCodePaths),
+		Entitlements:                  buildEntitlements(app.Entitlements),
+		Updater:                       buildUpdater(app.Updater),
+		BundledCLITee:                 cloneBundledCLITee(app.BundledCLITee),
+		LaunchPolicy:                  app.LaunchPolicy,
+		ComputerUse:                   nil,
+		OriginalDRBootstrapCapability: app.OriginalDRBootstrapCapability,
+	}
+	if app.ComputerUse != nil {
+		target.ComputerUse = buildComputerUse(*app.ComputerUse)
 	}
 	return target
 }
 
-func buildUpdater(updater config.UpdaterConfig) Updater {
-	channels := make([]UpdaterChannel, 0, len(updater.Channels))
-	for _, channel := range updater.Channels {
-		channels = append(channels, UpdaterChannel{Name: channel.Name, URL: channel.URL})
-	}
+func buildUpdater(updater spec.UpdaterSpec) Updater {
 	return Updater{
-		Kind:              mapUpdaterKind(updater.Kind),
+		Kind:              updater.Kind,
 		URL:               updater.URL,
+		URLTemplate:       updater.URLTemplate,
+		UserAgent:         updater.UserAgent,
 		Platform:          updater.Platform,
 		Product:           updater.Product,
 		SparklePublicKey:  updater.SparklePublicKey,
 		DeviceIDParamName: updater.DeviceIDParamName,
 		DefaultChannel:    updater.DefaultChannel,
-		Channels:          channels,
+		Channels:          append([]spec.UpdaterChannel(nil), updater.Channels...),
 	}
 }
 
-func mapUpdaterKind(kind config.UpdaterKind) UpdaterKind {
-	switch kind {
-	case config.UpdaterKindCursorManifest:
-		return UpdaterCursorManifest
-	case config.UpdaterKindSparkleAppcast:
-		return UpdaterSparkleAppcast
-	case config.UpdaterKindClaudeSquirrel:
-		return UpdaterClaudeSquirrel
-	default:
-		return UpdaterKind(kind)
-	}
-}
-
-func buildEntitlements(entitlements config.EntitlementsConfig) *EntitlementsPolicy {
+func buildEntitlements(entitlements spec.EntitlementsSpec) *EntitlementsPolicy {
 	return &EntitlementsPolicy{
 		Strip:                       cloneStrings(entitlements.Strip),
 		RequiredBooleanEntitlements: cloneStrings(entitlements.RequiredBoolean),
 	}
 }
 
-func buildComputerUse(policy config.ComputerUseConfig) *ComputerUsePolicy {
+func buildComputerUse(policy spec.ComputerUseSpec) *ComputerUsePolicy {
 	signTargets := make([]ComputerUseSignTarget, 0, len(policy.SignTargets))
 	for _, target := range policy.SignTargets {
 		signTargets = append(signTargets, ComputerUseSignTarget{
@@ -216,6 +242,30 @@ func buildComputerUse(policy config.ComputerUseConfig) *ComputerUsePolicy {
 		TeamRequirementPlists: cloneStrings(policy.TeamRequirementPlists),
 		SignTargets:           signTargets,
 	}
+}
+
+func cloneBundledCLITee(tee *spec.BundledCLITeeSpec) *spec.BundledCLITeeSpec {
+	if tee == nil {
+		return nil
+	}
+	cloned := *tee
+	return &cloned
+}
+
+func cloneOperations(operations map[string]spec.OperationSpec) map[string]spec.OperationSpec {
+	if len(operations) == 0 {
+		return nil
+	}
+	cloned := make(map[string]spec.OperationSpec, len(operations))
+	for id, operation := range operations {
+		item := operation
+		item.Aliases = cloneStrings(operation.Aliases)
+		if len(operation.Flags) > 0 {
+			item.Flags = append([]spec.FlagSpec(nil), operation.Flags...)
+		}
+		cloned[id] = item
+	}
+	return cloned
 }
 
 func cloneStrings(values []string) []string {

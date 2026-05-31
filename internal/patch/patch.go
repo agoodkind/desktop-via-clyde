@@ -3,6 +3,7 @@ package patch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,11 +14,13 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
-	"goodkind.io/desktop-via-clyde/internal/claudetee"
+	"goodkind.io/desktop-via-clyde/internal/bundledclitee"
+	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/clock"
 	shimembed "goodkind.io/desktop-via-clyde/internal/embed"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/signing"
+	"goodkind.io/desktop-via-clyde/internal/spec"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 	"goodkind.io/gklog"
@@ -46,16 +49,17 @@ type Options struct {
 	DryRun            bool
 	NoMigrateKeychain bool
 	Out               io.Writer
+	Trace             *Trace
 }
 
-// Patch performs the full patch flow for one target. Steps are numbered to
-// match the plan: 1, 1b, 2..7, 7a, 8..9.
+// Patch performs the full patch flow for one target.
 func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	if opts.Out == nil {
 		opts.Out = os.Stdout
 	}
 	log := gklog.LoggerFromContext(ctx).With("subcomponent", "patch", "target", t.ID)
 	r := NewRunner(ctx, opts.DryRun, opts.Out)
+	r.Trace = opts.Trace
 	log.InfoContext(ctx, "patch.start", "app_path", t.AppPath, "dry_run", opts.DryRun, "no_migrate_keychain", opts.NoMigrateKeychain)
 
 	if !opts.DryRun {
@@ -68,31 +72,27 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	if err != nil {
 		return err
 	}
-	notef(r, fmt.Sprintf("target=%s step 0: read Info.plist version=%s id=%s exec=%s",
+	notef(r, fmt.Sprintf("target=%s read Info.plist version=%s id=%s exec=%s",
 		t.ID, info.CFBundleVersion, info.CFBundleIdentifier, info.CFBundleExecutable))
 
-	// Step 1: backup.
 	if err := stepBackup(ctx, r, t); err != nil {
 		return logPatchError(ctx, "patch.backup_failed", fmt.Errorf("backup: %w", err))
 	}
 
-	// Step 1b: keychain capture (in-memory).
 	var captured []KeychainItem
 	switch {
 	case opts.NoMigrateKeychain:
-		notef(r, fmt.Sprintf("target=%s step 1b: skipped (--no-migrate-keychain)", t.ID))
+		notef(r, fmt.Sprintf("target=%s skipped keychain access repair (--no-migrate-keychain)", t.ID))
 	case opts.DryRun:
-		notef(r, fmt.Sprintf("target=%s step 1b: would capture keychain items for services=%v", t.ID, t.KeychainServices))
+		notef(r, fmt.Sprintf("target=%s would find keychain items for services=%v", t.ID, t.KeychainServices))
 	default:
 		captured, err = CaptureItems(ctx, t)
 		if err != nil {
 			return logPatchError(ctx, "patch.keychain_capture_failed", fmt.Errorf("keychain capture: %w", err))
 		}
-		notef(r, fmt.Sprintf("target=%s step 1b: captured %d keychain items", t.ID, len(captured)))
+		notef(r, fmt.Sprintf("target=%s found %d keychain items", t.ID, len(captured)))
 	}
 
-	// Steps 2-7: bundle mutation (entitlements, exec rename, shim
-	// install, re-sign, strip quarantine).
 	if err := patchBundleSteps(ctx, r, t); err != nil {
 		return err
 	}
@@ -101,40 +101,34 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 		return logPatchError(ctx, "patch.computer_use_failed", fmt.Errorf("patch computer use helper: %w", err))
 	}
 
-	// Step 7a: keychain re-grant.
 	switch {
 	case opts.NoMigrateKeychain:
-		notef(r, fmt.Sprintf("target=%s step 7a: skipped (--no-migrate-keychain)", t.ID))
+		notef(r, fmt.Sprintf("target=%s skipped keychain access restore (--no-migrate-keychain)", t.ID))
 	case opts.DryRun:
-		notef(r, fmt.Sprintf("target=%s step 7a: would re-grant ACLs on captured keychain items", t.ID))
+		notef(r, fmt.Sprintf("target=%s would restore keychain access for captured items", t.ID))
 	case len(captured) > 0:
 		if err := RegrantItems(ctx, t, captured); err != nil {
-			notef(r, fmt.Sprintf("target=%s step 7a: re-grant returned errors (continuing): %v", t.ID, err))
+			notef(r, fmt.Sprintf("target=%s keychain access restore returned errors (continuing): %v", t.ID, err))
 		} else {
-			notef(r, fmt.Sprintf("target=%s step 7a: re-granted ACLs on %d keychain items", t.ID, len(captured)))
+			notef(r, fmt.Sprintf("target=%s restored keychain access for %d items", t.ID, len(captured)))
 		}
 	default:
-		notef(r, fmt.Sprintf("target=%s step 7a: no captured items, nothing to re-grant", t.ID))
+		notef(r, fmt.Sprintf("target=%s no keychain items needed access restore", t.ID))
 	}
 
-	// Step 8: update state.json.
 	if err := stepWriteState(ctx, r, t, info.CFBundleVersion); err != nil {
 		return logPatchError(ctx, "patch.write_state_failed", fmt.Errorf("write state: %w", err))
 	}
 
-	// Step 9: verify.
 	if err := stepVerify(ctx, r, t); err != nil {
 		return logPatchError(ctx, "patch.verify_failed", fmt.Errorf("verify: %w", err))
 	}
 
-	// Step 10: bundled-CLI stdio tee (claude only). Claude Desktop spawns a
-	// separate claude binary under Application Support over stdio for tasks
-	// such as the /context slash command; that traffic does not cross the
-	// MITM HTTPS proxy. Wrapping the bundled CLI with the stdio tee makes
-	// the SDK control protocol bytes visible alongside the Electron HTTPS
-	// captures, so a "patched" claude reflects the full canonical state.
-	if t.ID == "claude" {
-		if err := stepInstallBundledCLITee(ctx, r, opts); err != nil {
+	if t.BundledCLITee != nil {
+		if t.BundledCLITee.Capability != catalog.PatchHookBundledCLITee {
+			return fmt.Errorf("unknown bundled CLI tee capability %q", t.BundledCLITee.Capability)
+		}
+		if err := stepInstallBundledCLITee(ctx, r, t, opts); err != nil {
 			return logPatchError(ctx, "patch.install_bundled_cli_tee_failed", fmt.Errorf("install bundled cli tee: %w", err))
 		}
 	}
@@ -143,42 +137,57 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	return nil
 }
 
-// stepInstallBundledCLITee wraps Claude Desktop's bundled claude CLI with the
-// stdio tee shim. Idempotent: if the bundled CLI is already wrapped, the
-// step logs and returns without acting. A missing Application Support tree
-// (Claude Desktop not yet launched) is a no-op rather than a hard failure;
-// the patch flow's invariant is the Electron main, and the tee is a layered
-// diagnostic surface.
-func stepInstallBundledCLITee(ctx context.Context, r *Runner, opts Options) error {
-	teeOpts := claudetee.Options{
-		DryRun:         opts.DryRun,
-		VersionDir:     "",
-		BundledCLIPath: "",
-		LogDir:         "",
-		HomeDir:        "",
-		Out:            opts.Out,
+// stepInstallBundledCLITee wraps a declared bundled CLI with the stdio tee shim.
+func stepInstallBundledCLITee(ctx context.Context, r *Runner, t targets.Target, opts Options) error {
+	teeAppSupportDir := ""
+	teeVersionDir := ""
+	teeBundledCLIRel := ""
+	teeBundledCLIPath := ""
+	var teeTerminateProcessNames []string
+	var teeTerminateProcessPatterns []string
+	var teeCompletionSteps []string
+	if t.BundledCLITee != nil {
+		teeAppSupportDir = t.BundledCLITee.AppSupportDir
+		teeVersionDir = t.BundledCLITee.VersionDir
+		teeBundledCLIRel = t.BundledCLITee.BundledCLIRel
+		teeBundledCLIPath = t.BundledCLITee.BundledCLIPath
+		teeTerminateProcessNames = append([]string(nil), t.BundledCLITee.TerminateProcessNames...)
+		teeTerminateProcessPatterns = append([]string(nil), t.BundledCLITee.TerminateProcessPatterns...)
+		teeCompletionSteps = append([]string(nil), t.BundledCLITee.CompletionSteps...)
 	}
-	bundled, resolveErr := claudetee.ResolveBundledCLIPath(teeOpts)
+	teeOpts := bundledclitee.Options{
+		DryRun:                   opts.DryRun,
+		AppSupportDir:            teeAppSupportDir,
+		VersionDir:               teeVersionDir,
+		BundledCLIRel:            teeBundledCLIRel,
+		BundledCLIPath:           teeBundledCLIPath,
+		TerminateProcessNames:    teeTerminateProcessNames,
+		TerminateProcessPatterns: teeTerminateProcessPatterns,
+		CompletionSteps:          teeCompletionSteps,
+		Out:                      opts.Out,
+		Trace:                    nil,
+	}
+	bundled, resolveErr := bundledclitee.ResolvePath(teeOpts)
 	if resolveErr != nil {
-		notef(r, fmt.Sprintf("target=claude step 10: bundled CLI not present, skipping tee install (%v)", resolveErr))
+		notef(r, fmt.Sprintf("target=%s bundled CLI not present, skipping tee install (%v)", t.ID, resolveErr))
 		return nil
 	}
 	if _, statErr := os.Stat(bundled); statErr != nil {
 		if !errors.Is(statErr, os.ErrNotExist) {
 			return logPatchError(ctx, "patch.bundled_cli_stat_failed", fmt.Errorf("stat bundled cli %s: %w", bundled, statErr))
 		}
-		notef(r, fmt.Sprintf("target=claude step 10: bundled CLI missing at %s, skipping tee install", bundled))
+		notef(r, fmt.Sprintf("target=%s bundled CLI missing at %s, skipping tee install", t.ID, bundled))
 		return nil
 	}
 	if _, realErr := os.Stat(bundled + ".real"); realErr == nil {
-		notef(r, "target=claude step 10: bundled CLI already wrapped (.real present), skipping")
+		notef(r, fmt.Sprintf("target=%s bundled CLI already wrapped (.real present), skipping", t.ID))
 		return nil
 	}
-	notef(r, "target=claude step 10: install bundled-CLI stdio tee at "+bundled)
+	notef(r, fmt.Sprintf("target=%s install bundled CLI stdio tee at %s", t.ID, bundled))
 	if opts.DryRun {
 		return nil
 	}
-	if err := claudetee.Install(ctx, teeOpts); err != nil {
+	if err := bundledclitee.Install(ctx, teeOpts); err != nil {
 		return logPatchError(ctx, "patch.bundled_cli_tee_install_failed", fmt.Errorf("install bundled cli tee: %w", err))
 	}
 	return nil
@@ -194,7 +203,7 @@ func patchBundleSteps(ctx context.Context, r *Runner, t targets.Target) error {
 	if err != nil {
 		return logPatchError(ctx, "patch.extract_entitlements_failed", fmt.Errorf("extract entitlements: %w", err))
 	}
-	notef(r, fmt.Sprintf("target=%s step 3: augment entitlements (strip=%v required=%v)",
+	notef(r, fmt.Sprintf("target=%s augment entitlements (strip=%v required=%v)",
 		t.ID, t.Entitlements.Strip, t.Entitlements.RequiredBooleanEntitlements))
 	if err := stepMoveToReal(ctx, r, t); err != nil {
 		return logPatchError(ctx, "patch.move_binary_failed", fmt.Errorf("move binary to .real: %w", err))
@@ -215,33 +224,33 @@ func patchBundleSteps(ctx context.Context, r *Runner, t targets.Target) error {
 	return nil
 }
 
-// KeychainMigrate runs only steps 1b + 7a against an already-patched app.
-// Useful for retroactive ACL cleanup.
+// KeychainMigrate restores keychain access for an app that is already patched.
 func KeychainMigrate(ctx context.Context, t targets.Target, opts Options) error {
 	if opts.Out == nil {
 		opts.Out = os.Stdout
 	}
 	log := gklog.LoggerFromContext(ctx).With("subcomponent", "keychain-migrate", "target", t.ID)
 	r := NewRunner(ctx, opts.DryRun, opts.Out)
-	notef(r, fmt.Sprintf("target=%s keychain-migrate: step 1b + 7a only", t.ID))
+	r.Trace = opts.Trace
+	notef(r, fmt.Sprintf("target=%s keychain access repair", t.ID))
 	log.InfoContext(ctx, "keychain_migrate.start", "app_path", t.AppPath, "dry_run", opts.DryRun)
 
 	if opts.DryRun {
-		notef(r, fmt.Sprintf("target=%s would capture and re-grant services=%v", t.ID, t.KeychainServices))
+		notef(r, fmt.Sprintf("target=%s would restore keychain access for services=%v", t.ID, t.KeychainServices))
 		return nil
 	}
 	items, err := CaptureItems(ctx, t)
 	if err != nil {
 		return logPatchError(ctx, "keychain_migrate.capture_failed", fmt.Errorf("keychain capture: %w", err))
 	}
-	notef(r, fmt.Sprintf("target=%s captured %d items", t.ID, len(items)))
+	notef(r, fmt.Sprintf("target=%s found %d keychain items", t.ID, len(items)))
 	if len(items) == 0 {
 		return nil
 	}
 	if err := RegrantItems(ctx, t, items); err != nil {
-		return logPatchError(ctx, "keychain_migrate.regrant_failed", fmt.Errorf("keychain re-grant: %w", err))
+		return logPatchError(ctx, "keychain_migrate.regrant_failed", fmt.Errorf("restore keychain access: %w", err))
 	}
-	notef(r, fmt.Sprintf("target=%s re-granted %d items", t.ID, len(items)))
+	notef(r, fmt.Sprintf("target=%s restored keychain access for %d items", t.ID, len(items)))
 	return nil
 }
 
@@ -265,14 +274,14 @@ func stepBackup(ctx context.Context, r *Runner, t targets.Target) error {
 	bundle := paths.BackupBundle(t)
 	if !r.DryRun {
 		if _, err := os.Stat(bundle); err == nil {
-			notef(r, fmt.Sprintf("target=%s step 1: backup exists at %s, skipping", t.ID, bundle))
+			notef(r, fmt.Sprintf("target=%s backup exists at %s, skipping", t.ID, bundle))
 			return nil
 		}
 		if err := os.MkdirAll(paths.BackupDir(t), 0o755); err != nil {
 			return logPatchError(ctx, "patch.create_backup_dir_failed", fmt.Errorf("create backup dir %s: %w", paths.BackupDir(t), err))
 		}
 	}
-	notef(r, fmt.Sprintf("target=%s step 1: backup %s -> %s", t.ID, t.AppPath, bundle))
+	notef(r, fmt.Sprintf("target=%s backup app bundle %s -> %s", t.ID, t.AppPath, bundle))
 	return r.Run(ctx, "/usr/bin/rsync", "-a", t.AppPath+"/", bundle+"/")
 }
 
@@ -286,14 +295,14 @@ func stepExtractEntitlements(ctx context.Context, r *Runner, t targets.Target) (
 	if t.Entitlements == nil {
 		return "", logPatchError(ctx, "patch.entitlement_policy_missing", fmt.Errorf("target %s has no entitlement policy", t.ID))
 	}
-	return writeAugmentedEntitlementsFile(ctx, r, "target="+t.ID+" step 2", source, *t.Entitlements)
+	return writeAugmentedEntitlementsFile(ctx, r, "target="+t.ID+" entitlements", source, *t.Entitlements)
 }
 
 func stepMoveToReal(ctx context.Context, r *Runner, t targets.Target) error {
 	patchLog.DebugContext(ctx, "patch.move_to_real.boundary", "target", t.ID)
 	main := paths.MainBinaryPath(t)
 	realPath := paths.RealBinaryPath(t)
-	notef(r, fmt.Sprintf("target=%s step 4: mv %s -> %s", t.ID, main, realPath))
+	notef(r, fmt.Sprintf("target=%s move original executable %s -> %s", t.ID, main, realPath))
 	if r.DryRun {
 		return nil
 	}
@@ -310,7 +319,9 @@ func stepMoveToReal(ctx context.Context, r *Runner, t targets.Target) error {
 func stepInstallShim(ctx context.Context, r *Runner, t targets.Target) error {
 	patchLog.DebugContext(ctx, "patch.install_shim.boundary", "target", t.ID)
 	main := paths.MainBinaryPath(t)
-	notef(r, fmt.Sprintf("target=%s step 5: install shim (%d bytes) -> %s", t.ID, len(shimembed.ShimBinary), main))
+	policyPath := paths.LaunchPolicyPath(t)
+	notef(r, fmt.Sprintf("target=%s install shim (%d bytes) -> %s", t.ID, len(shimembed.ShimBinary), main))
+	notef(r, fmt.Sprintf("target=%s install launch policy -> %s", t.ID, policyPath))
 	if r.DryRun {
 		return nil
 	}
@@ -323,6 +334,13 @@ func stepInstallShim(ctx context.Context, r *Runner, t targets.Target) error {
 	if err := os.Chmod(main, 0o755); err != nil {
 		return logPatchError(ctx, "patch.chmod_shim_failed", fmt.Errorf("chmod shim %s: %w", main, err))
 	}
+	policyBytes, err := json.MarshalIndent(t.LaunchPolicy, "", "  ")
+	if err != nil {
+		return logPatchError(ctx, "patch.launch_policy_encode_failed", fmt.Errorf("encode launch policy for %s: %w", t.ID, err))
+	}
+	if err := os.WriteFile(policyPath, policyBytes, 0o600); err != nil {
+		return logPatchError(ctx, "patch.launch_policy_write_failed", fmt.Errorf("write launch policy %s: %w", policyPath, err))
+	}
 	return nil
 }
 
@@ -331,7 +349,8 @@ func stepRestorePreservedNestedCode(ctx context.Context, r *Runner, t targets.Ta
 	for _, relPath := range t.PreservedNestedCodePaths {
 		source := filepath.Join(paths.BackupBundle(t), filepath.FromSlash(relPath))
 		destination := filepath.Join(t.AppPath, filepath.FromSlash(relPath))
-		notef(r, fmt.Sprintf("target=%s step 5c: restore preserved nested code %s -> %s", t.ID, source, destination))
+		traceAction(r, actionRestorePreservedNestedCode, t.ID, destination)
+		notef(r, fmt.Sprintf("target=%s restore preserved nested code %s -> %s", t.ID, source, destination))
 		if r.DryRun {
 			continue
 		}
@@ -363,7 +382,8 @@ func stepResign(ctx context.Context, r *Runner, t targets.Target, entFile string
 	if err != nil {
 		return err
 	}
-	notef(r, fmt.Sprintf("target=%s step 6: re-sign with %q (sha1=%s)", t.ID, paths.SignIdentity(), id))
+	traceAction(r, actionSignBundle, t.ID, t.AppPath)
+	notef(r, fmt.Sprintf("target=%s re-sign with %q (sha1=%s)", t.ID, paths.SignIdentity(), id))
 	if err := stepResignNestedCode(ctx, r, t, id); err != nil {
 		return err
 	}
@@ -393,13 +413,14 @@ func stepResignNestedCode(ctx context.Context, r *Runner, t targets.Target, id s
 		if !r.DryRun {
 			if _, err := os.Stat(codePath); err != nil {
 				if errors.Is(err, os.ErrNotExist) {
-					notef(r, fmt.Sprintf("target=%s step 6: nested code object missing, skipping %s", t.ID, codePath))
+					notef(r, fmt.Sprintf("target=%s nested code object missing, skipping %s", t.ID, codePath))
 					continue
 				}
 				return logPatchError(ctx, "patch.nested_code_stat_failed", fmt.Errorf("stat nested code object %s: %w", codePath, err))
 			}
 		}
-		notef(r, fmt.Sprintf("target=%s step 6: re-sign nested code object %s", t.ID, codePath))
+		traceAction(r, actionSignNestedCode, t.ID, codePath)
+		notef(r, fmt.Sprintf("target=%s re-sign nested code object %s", t.ID, codePath))
 		if err := r.Run(ctx,
 			"/usr/bin/codesign",
 			"--force",
@@ -425,7 +446,7 @@ func resolveSignIdentity(ctx context.Context, dryRun bool) (string, error) {
 }
 
 func stepStripQuarantine(ctx context.Context, r *Runner, t targets.Target) {
-	notef(r, fmt.Sprintf("target=%s step 7: strip com.apple.quarantine (best effort)", t.ID))
+	notef(r, fmt.Sprintf("target=%s remove quarantine attribute (best effort)", t.ID))
 	if r.DryRun {
 		return
 	}
@@ -434,7 +455,7 @@ func stepStripQuarantine(ctx context.Context, r *Runner, t targets.Target) {
 }
 
 func stepWriteState(ctx context.Context, r *Runner, t targets.Target, version string) error {
-	notef(r, fmt.Sprintf("target=%s step 8: write state.json version=%s -> %s", t.ID, version, paths.StateFile()))
+	notef(r, fmt.Sprintf("target=%s write patch state version=%s -> %s", t.ID, version, paths.StateFile()))
 	if r.DryRun {
 		return nil
 	}
@@ -499,7 +520,7 @@ func OriginalDesignatedRequirement(ctx context.Context, t targets.Target, repair
 // a single requirement-language line. The function reads from the
 // backup bundle because the live /Applications copy has already been
 // re-signed with Goodkind by the time stepWriteState runs; the
-// backup created in step 1 is the only on-disk copy of the bundle
+// backup created before mutation is the only on-disk copy of the bundle
 // that still carries the vendor signature, so the DR captured from
 // there reflects what a freshly downloaded update payload from
 // upstream must satisfy. Falls back to the live bundle for cases
@@ -542,7 +563,7 @@ func DesignatedRequirement(ctx context.Context, codePath string) (string, error)
 }
 
 func stepVerify(ctx context.Context, r *Runner, t targets.Target) error {
-	notef(r, fmt.Sprintf("target=%s step 9: verify bundle signature and shim dry-run", t.ID))
+	notef(r, fmt.Sprintf("target=%s verify bundle signature and shim dry-run", t.ID))
 	if r.DryRun {
 		return nil
 	}
@@ -567,7 +588,7 @@ func stepVerify(ctx context.Context, r *Runner, t targets.Target) error {
 	out, err := r.RunCaptureStdout(ctx, paths.MainBinaryPath(t), "--clyde-dry-run")
 	if err != nil {
 		if ignoreShimDryRunError(t, err) {
-			notef(r, fmt.Sprintf("target=%s step 9: shim dry-run was killed; continuing after signature and entitlement verification", t.ID))
+			notef(r, fmt.Sprintf("target=%s shim dry-run was killed; continuing after signature and entitlement verification", t.ID))
 			return nil
 		}
 		return logPatchError(ctx, "patch.shim_dry_run_failed", fmt.Errorf("shim dry-run: %w", err))
@@ -577,7 +598,8 @@ func stepVerify(ctx context.Context, r *Runner, t targets.Target) error {
 }
 
 func ignoreShimDryRunError(t targets.Target, err error) bool {
-	if t.ID != "claude" {
+	signalName := t.LaunchPolicy.IgnoreDryRunSignal
+	if signalName == "" {
 		return false
 	}
 	var exitErr *exec.ExitError
@@ -585,5 +607,22 @@ func ignoreShimDryRunError(t targets.Target, err error) bool {
 		return false
 	}
 	status, ok := exitErr.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled() && status.Signal() == syscall.SIGKILL
+	if !ok || !status.Signaled() {
+		return false
+	}
+	expectedSignal, ok := signalByName(signalName)
+	return ok && status.Signal() == expectedSignal
+}
+
+func signalByName(name spec.DryRunSignal) (syscall.Signal, bool) {
+	switch name {
+	case spec.DryRunSignalSIGKILL:
+		return syscall.SIGKILL, true
+	case spec.DryRunSignalSIGTERM:
+		return syscall.SIGTERM, true
+	case spec.DryRunSignalSIGINT:
+		return syscall.SIGINT, true
+	default:
+		return 0, false
+	}
 }

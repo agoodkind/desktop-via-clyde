@@ -2,16 +2,22 @@ package targets
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
+
+	"goodkind.io/desktop-via-clyde/internal/config"
+	"goodkind.io/desktop-via-clyde/internal/spec"
 )
 
 func TestAllHasThreeTargets(t *testing.T) {
+	installFixture(t)
 	if len(All()) != 3 {
 		t.Fatalf("expected 3 targets, got %d", len(All()))
 	}
 }
 
 func TestLookupKnown(t *testing.T) {
+	installFixture(t)
 	for _, id := range []string{"cursor", "codex", "claude"} {
 		tg, err := lookupTarget(id)
 		if err != nil {
@@ -28,12 +34,14 @@ func TestLookupKnown(t *testing.T) {
 }
 
 func TestLookupUnknown(t *testing.T) {
+	installFixture(t)
 	if _, err := lookupTarget("nope"); err == nil {
 		t.Fatal("expected error for unknown id")
 	}
 }
 
 func TestEntitlementsPolicyPerTarget(t *testing.T) {
+	installFixture(t)
 	wantStrip := map[string][]string{
 		"cursor": {},
 		"codex": {
@@ -75,11 +83,12 @@ func TestEntitlementsPolicyPerTarget(t *testing.T) {
 }
 
 func TestUpdaterMetadataPerTarget(t *testing.T) {
+	installFixture(t)
 	cursor, err := lookupTarget("cursor")
 	if err != nil {
 		t.Fatalf("lookup cursor: %v", err)
 	}
-	if cursor.Updater.Kind != UpdaterCursorManifest {
+	if cursor.Updater.Kind != UpdaterHTTPPathJSONManifest {
 		t.Fatalf("cursor updater kind = %q", cursor.Updater.Kind)
 	}
 	if !cursor.Updater.SupportsChannels() {
@@ -114,7 +123,7 @@ func TestUpdaterMetadataPerTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookup claude: %v", err)
 	}
-	if claude.Updater.Kind != UpdaterClaudeSquirrel {
+	if claude.Updater.Kind != UpdaterSquirrelJSON {
 		t.Fatalf("claude updater kind = %q", claude.Updater.Kind)
 	}
 	if claude.Updater.SupportsChannels() {
@@ -126,6 +135,7 @@ func TestUpdaterMetadataPerTarget(t *testing.T) {
 }
 
 func TestNestedSignPathsPerTarget(t *testing.T) {
+	installFixture(t)
 	want := map[string][]string{
 		"cursor": nil,
 		"codex": {
@@ -157,6 +167,7 @@ func TestNestedSignPathsPerTarget(t *testing.T) {
 }
 
 func TestPreservedNestedCodePathsPerTarget(t *testing.T) {
+	installFixture(t)
 	want := map[string][]string{
 		"cursor": nil,
 		"codex":  nil,
@@ -170,6 +181,7 @@ func TestPreservedNestedCodePathsPerTarget(t *testing.T) {
 }
 
 func TestComputerUsePolicyPerTarget(t *testing.T) {
+	installFixture(t)
 	for _, tg := range All() {
 		if tg.ID != "codex" {
 			if tg.ComputerUse != nil {
@@ -238,6 +250,7 @@ func TestComputerUsePolicyPerTarget(t *testing.T) {
 }
 
 func TestCodexComputerUseTeamRequirementPlists(t *testing.T) {
+	installFixture(t)
 	tg, err := lookupTarget("codex")
 	if err != nil {
 		t.Fatalf("Lookup(%q) returned error: %v", "codex", err)
@@ -251,6 +264,63 @@ func TestCodexComputerUseTeamRequirementPlists(t *testing.T) {
 	}
 	if !stringSlicesEqual(tg.ComputerUse.TeamRequirementPlists, want) {
 		t.Errorf("Codex Computer Use requirement plists mismatch: got %v want %v", tg.ComputerUse.TeamRequirementPlists, want)
+	}
+}
+
+func TestRegistryUsesConfiguredGenericIDs(t *testing.T) {
+	config.SetCurrent(&spec.Config{
+		Signing: spec.SigningSpec{Identity: "Test Identity", TeamID: "TEST123456"},
+		Apps: map[string]spec.AppSpec{
+			"zeta": {
+				ID:       "zeta",
+				AppPath:  "/Applications/Zeta.app",
+				BundleID: "example.zeta",
+				ExecName: "Zeta",
+				Command:  spec.CommandSpec{Use: "zeta"},
+				Operations: map[string]spec.OperationSpec{
+					"status": {ID: "status", Use: "status", Capability: "app.status"},
+				},
+				LaunchPolicy: spec.LaunchPolicySpec{
+					ProxyHost: "::1", ProxyPort: 1, CACertificate: "/tmp/ca", NoProxy: "localhost", LaunchWorkingDirectory: "/tmp",
+				},
+			},
+			"alpha": {
+				ID:       "alpha",
+				AppPath:  "/Applications/Alpha.app",
+				BundleID: "example.alpha",
+				ExecName: "Alpha",
+				Command:  spec.CommandSpec{Use: "alpha"},
+				Operations: map[string]spec.OperationSpec{
+					"status": {ID: "status", Use: "status", Capability: "app.status"},
+				},
+				LaunchPolicy: spec.LaunchPolicySpec{
+					ProxyHost: "::1", ProxyPort: 1, CACertificate: "/tmp/ca", NoProxy: "localhost", LaunchWorkingDirectory: "/tmp",
+				},
+			},
+		},
+		CLIs: map[string]spec.CLISpec{
+			"beta": {
+				ID:         "beta",
+				Command:    spec.CommandSpec{Use: "beta"},
+				Operations: map[string]spec.OperationSpec{},
+			},
+		},
+	})
+	t.Cleanup(func() { config.SetCurrent(nil) })
+
+	all := All()
+	if len(all) != 2 {
+		t.Fatalf("expected 2 targets, got %d", len(all))
+	}
+	if all[0].ID != "alpha" || all[1].ID != "zeta" {
+		t.Fatalf("target ids = %q, %q", all[0].ID, all[1].ID)
+	}
+	found, err := Lookup("zeta")
+	if err != nil {
+		t.Fatalf("Lookup(zeta): %v", err)
+	}
+	if found.Command.Use != "zeta" {
+		t.Fatalf("Lookup(zeta).Command.Use = %q", found.Command.Use)
 	}
 }
 
@@ -273,4 +343,16 @@ func lookupTarget(id string) (Target, error) {
 		}
 	}
 	return Target{}, fmt.Errorf("unknown target %q", id)
+}
+
+func installFixture(t *testing.T) {
+	t.Helper()
+	cfg, err := config.LoadPath(filepath.Join("..", "testconfig", "testdata", "current-config.toml"))
+	if err != nil {
+		t.Fatalf("LoadPath(current-config.toml): %v", err)
+	}
+	config.SetCurrent(cfg)
+	t.Cleanup(func() {
+		config.SetCurrent(nil)
+	})
 }

@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"goodkind.io/desktop-via-clyde/internal/claudetee"
+	"goodkind.io/desktop-via-clyde/internal/bundledclitee"
+	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
@@ -23,11 +24,11 @@ func Unpatch(ctx context.Context, t targets.Target, opts Options) error {
 	r := NewRunner(ctx, opts.DryRun, opts.Out)
 	log.InfoContext(ctx, "unpatch.start", "app_path", t.AppPath, "dry_run", opts.DryRun)
 
-	// Step 0 (claude only): undo the bundled-CLI stdio tee wrap before
-	// restoring the Electron bundle, so the bundled claude.real binary
-	// moves back over the shim while the .real sibling is still present.
-	if t.ID == "claude" {
-		if err := stepUninstallBundledCLITee(ctx, r, opts); err != nil {
+	if t.BundledCLITee != nil {
+		if t.BundledCLITee.Capability != catalog.PatchHookBundledCLITee {
+			return fmt.Errorf("unknown bundled CLI tee capability %q", t.BundledCLITee.Capability)
+		}
+		if err := stepUninstallBundledCLITee(ctx, r, t, opts); err != nil {
 			return logPatchError(ctx, "unpatch.uninstall_bundled_cli_tee_failed", fmt.Errorf("uninstall bundled cli tee: %w", err))
 		}
 	}
@@ -38,12 +39,12 @@ func Unpatch(ctx context.Context, t targets.Target, opts Options) error {
 			return logPatchError(ctx, "unpatch.backup_stat_failed", fmt.Errorf("backup not found at %s: %w", backup, err))
 		}
 	}
-	notef(r, fmt.Sprintf("target=%s step 1: restore %s -> %s", t.ID, backup, t.AppPath))
+	notef(r, fmt.Sprintf("target=%s restore app bundle %s -> %s", t.ID, backup, t.AppPath))
 	if err := r.Run(ctx, "/usr/bin/rsync", "-a", "--delete", backup+"/", t.AppPath+"/"); err != nil {
 		return logPatchError(ctx, "unpatch.restore_bundle_failed", fmt.Errorf("restore bundle: %w", err))
 	}
 
-	notef(r, fmt.Sprintf("target=%s step 2: remove state.json entry", t.ID))
+	notef(r, fmt.Sprintf("target=%s remove patch state entry", t.ID))
 	if !opts.DryRun {
 		if err := removeTargetState(ctx, t.ID); err != nil {
 			return err
@@ -51,7 +52,7 @@ func Unpatch(ctx context.Context, t targets.Target, opts Options) error {
 	}
 
 	if !opts.DryRun {
-		notef(r, fmt.Sprintf("target=%s step 3: verify restored signature", t.ID))
+		notef(r, fmt.Sprintf("target=%s verify restored signature", t.ID))
 		if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--verbose=2", t.AppPath); err != nil {
 			return logPatchError(ctx, "unpatch.verify_failed", fmt.Errorf("verify after unpatch: %w", err))
 		}
@@ -61,37 +62,53 @@ func Unpatch(ctx context.Context, t targets.Target, opts Options) error {
 	return nil
 }
 
-// stepUninstallBundledCLITee removes the bundled-CLI stdio tee wrap. If
-// there is no .real sibling next to the bundled claude (the tee was never
-// installed, or already removed), the step is a no-op. Failures inside
-// claudetee.Uninstall surface as errors so the overall unpatch can be
-// retried.
-func stepUninstallBundledCLITee(ctx context.Context, r *Runner, opts Options) error {
-	teeOpts := claudetee.Options{
-		DryRun:         opts.DryRun,
-		VersionDir:     "",
-		BundledCLIPath: "",
-		LogDir:         "",
-		HomeDir:        "",
-		Out:            opts.Out,
+// stepUninstallBundledCLITee removes the declared bundled CLI stdio tee wrap.
+func stepUninstallBundledCLITee(ctx context.Context, r *Runner, t targets.Target, opts Options) error {
+	teeAppSupportDir := ""
+	teeVersionDir := ""
+	teeBundledCLIRel := ""
+	teeBundledCLIPath := ""
+	var teeTerminateProcessNames []string
+	var teeTerminateProcessPatterns []string
+	var teeCompletionSteps []string
+	if t.BundledCLITee != nil {
+		teeAppSupportDir = t.BundledCLITee.AppSupportDir
+		teeVersionDir = t.BundledCLITee.VersionDir
+		teeBundledCLIRel = t.BundledCLITee.BundledCLIRel
+		teeBundledCLIPath = t.BundledCLITee.BundledCLIPath
+		teeTerminateProcessNames = append([]string(nil), t.BundledCLITee.TerminateProcessNames...)
+		teeTerminateProcessPatterns = append([]string(nil), t.BundledCLITee.TerminateProcessPatterns...)
+		teeCompletionSteps = append([]string(nil), t.BundledCLITee.CompletionSteps...)
 	}
-	bundled, resolveErr := claudetee.ResolveBundledCLIPath(teeOpts)
+	teeOpts := bundledclitee.Options{
+		DryRun:                   opts.DryRun,
+		AppSupportDir:            teeAppSupportDir,
+		VersionDir:               teeVersionDir,
+		BundledCLIRel:            teeBundledCLIRel,
+		BundledCLIPath:           teeBundledCLIPath,
+		TerminateProcessNames:    teeTerminateProcessNames,
+		TerminateProcessPatterns: teeTerminateProcessPatterns,
+		CompletionSteps:          teeCompletionSteps,
+		Out:                      opts.Out,
+		Trace:                    nil,
+	}
+	bundled, resolveErr := bundledclitee.ResolvePath(teeOpts)
 	if resolveErr != nil {
-		notef(r, fmt.Sprintf("target=claude step 0: bundled CLI not present, skipping tee uninstall (%v)", resolveErr))
+		notef(r, fmt.Sprintf("target=%s bundled CLI not present, skipping tee uninstall (%v)", t.ID, resolveErr))
 		return nil
 	}
 	if _, statErr := os.Stat(bundled + ".real"); statErr != nil {
 		if !errors.Is(statErr, os.ErrNotExist) {
 			return logPatchError(ctx, "unpatch.bundled_cli_real_stat_failed", fmt.Errorf("stat bundled cli real sibling %s.real: %w", bundled, statErr))
 		}
-		notef(r, fmt.Sprintf("target=claude step 0: no .real sibling at %s.real, nothing to uninstall", bundled))
+		notef(r, fmt.Sprintf("target=%s no .real sibling at %s.real, nothing to uninstall", t.ID, bundled))
 		return nil
 	}
-	notef(r, "target=claude step 0: uninstall bundled-CLI stdio tee at "+bundled)
+	notef(r, fmt.Sprintf("target=%s uninstall bundled CLI stdio tee at %s", t.ID, bundled))
 	if opts.DryRun {
 		return nil
 	}
-	if err := claudetee.Uninstall(ctx, teeOpts); err != nil {
+	if err := bundledclitee.Uninstall(ctx, teeOpts); err != nil {
 		return logPatchError(ctx, "unpatch.bundled_cli_tee_uninstall_failed", fmt.Errorf("uninstall bundled cli tee: %w", err))
 	}
 	return nil
