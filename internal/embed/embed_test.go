@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +115,63 @@ func TestCodexShimExecUsesHomeAsLaunchCwd(t *testing.T) {
 	}
 }
 
+func TestShimExecAcceptsLocalhostProxyPolicy(t *testing.T) {
+	listener, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen localhost: %v", err)
+	}
+	defer listener.Close()
+	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener addr = %T, want *net.TCPAddr", listener.Addr())
+	}
+	proxyURL := "http://localhost:" + strconv.Itoa(tcpAddr.Port)
+
+	recordDir := t.TempDir()
+	recordPath := filepath.Join(recordDir, "proxy.txt")
+	shimDir := t.TempDir()
+	shimPath := filepath.Join(shimDir, "Cursor")
+	if err := os.WriteFile(shimPath, ShimBinary, 0o755); err != nil {
+		t.Fatalf("write shim fixture: %v", err)
+	}
+	realPath := filepath.Join(shimDir, "Cursor.real")
+	script := "#!/bin/sh\nprintf '%s\\n' $HTTPS_PROXY $HTTP_PROXY $ALL_PROXY $1 > " + shellQuote(recordPath) + "\n"
+	if err := os.WriteFile(realPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write real fixture: %v", err)
+	}
+
+	homeDir := t.TempDir()
+	fakeCA := filepath.Join(t.TempDir(), "clyde-mitm-ca.crt")
+	if err := os.WriteFile(fakeCA, []byte("fake-ca"), 0o644); err != nil {
+		t.Fatalf("write fake ca: %v", err)
+	}
+	writeShimConfigWithProxy(t, shimPath, "Cursor", fakeCA, homeDir, "localhost", tcpAddr.Port, proxyURL)
+
+	command := exec.Command(shimPath)
+	command.Env = envWithOverrides(os.Environ(), "HOME="+homeDir)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shim exec failed: %v\n%s", err, output)
+	}
+	recorded, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read recorded proxy env: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(recorded)), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("recorded proxy lines = %#v", lines)
+	}
+	for index, got := range lines {
+		want := proxyURL
+		if index == 3 {
+			want = "--proxy-server=" + proxyURL
+		}
+		if got != want {
+			t.Fatalf("recorded proxy line %d = %q, want %q", index, got, want)
+		}
+	}
+}
+
 func runShimDryRun(t *testing.T, executableName string) string {
 	t.Helper()
 
@@ -161,10 +219,25 @@ func writeShimConfig(t *testing.T, shimPath string, executableName string, caPat
 	t.Helper()
 
 	proxyURL := "http://[::1]:48723"
+	writeShimConfigWithProxy(t, shimPath, executableName, caPath, launchWorkingDirectory, "::1", 48723, proxyURL)
+}
+
+func writeShimConfigWithProxy(
+	t *testing.T,
+	shimPath string,
+	executableName string,
+	caPath string,
+	launchWorkingDirectory string,
+	proxyHost string,
+	proxyPort int,
+	proxyURL string,
+) {
+	t.Helper()
+
 	noProxy := "localhost,127.0.0.1,::1,[::1]"
 	policy := spec.LaunchPolicySpec{
-		ProxyHost:              "::1",
-		ProxyPort:              48723,
+		ProxyHost:              proxyHost,
+		ProxyPort:              proxyPort,
 		CACertificate:          caPath,
 		NoProxy:                noProxy,
 		LaunchWorkingDirectory: launchWorkingDirectory,
@@ -174,7 +247,7 @@ func writeShimConfig(t *testing.T, shimPath string, executableName string, caPat
 		},
 		Preflights: []spec.PreflightSpec{
 			{Kind: "file_exists", Path: caPath},
-			{Kind: "tcp_reachable", Host: "::1", Port: 48723, Timeout: 1000},
+			{Kind: "tcp_reachable", Host: proxyHost, Port: proxyPort, Timeout: 1000},
 		},
 	}
 

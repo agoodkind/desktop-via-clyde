@@ -156,6 +156,19 @@ value = "{proxy_url}"
 	}
 }
 
+func TestLoadPathAcceptsLocalhostLaunchPolicyHost(t *testing.T) {
+	body := strings.Replace(validFakeConfig(""), `proxy_host = "::1"`, `proxy_host = "localhost"`, 1)
+	path := writeConfigForTest(t, body)
+
+	cfg, err := config.LoadPath(path)
+	if err != nil {
+		t.Fatalf("LoadPath(%s): %v", path, err)
+	}
+	if got := cfg.Apps["fake"].LaunchPolicy.ProxyHost; got != "localhost" {
+		t.Fatalf("launch policy proxy_host = %q, want localhost", got)
+	}
+}
+
 func TestLoadPathExpandsConfiguredFlagPathTokens(t *testing.T) {
 	cacheRoot := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", cacheRoot)
