@@ -35,6 +35,7 @@ override GO_MK_APPLIED_NOTICES := .make/.go-mk-applied-notices
 
 # Pipeline modules.
 GO_MK_MODULES := go-build.mk
+GO_MK_DEV_DIR ?= $(HOME)/Sites/go-makefile
 
 include bootstrap.mk
 
@@ -54,7 +55,7 @@ generated-shims: shim stdio-tee-shim
 build build-check check lint lint-golangci lint-files lint-diff staticcheck-extra vet test govulncheck: generated-shims
 
 shim:
-	$(REPO_ROOT)/shim/build.sh
+	$(MAKE) -C $(REPO_ROOT)/shim SWIFT_MK_DEV_DIR=$(HOME)/Sites/swift-makefile SWIFT_MK_NOTICES_FILE=/dev/null LINT_GATES='lint-swiftlint lint-format lint-complexity lint-deadcode swiftcheck-extra' build
 
 # stdio-tee-shim is a Go program. It builds a universal Mach-O via two arch
 # passes plus lipo so the embedded binary runs on both arm64 and x86_64 Macs.
