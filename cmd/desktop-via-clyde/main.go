@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"goodkind.io/desktop-via-clyde/internal/composition"
 	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/logging"
 	"goodkind.io/desktop-via-clyde/internal/operations"
@@ -52,6 +53,13 @@ func run() int {
 		"gklog_build", logging.GklogBuild(),
 		"log_path", paths.ProcessLogPath(),
 		"args", os.Args[1:])
+
+	if err := composition.Register(); err != nil {
+		logger.ErrorContext(ctx, "cli.composition_register_failed", "err", err)
+		fmt.Fprintln(os.Stderr, "error:", err)
+		_ = closer.Close()
+		return 1
+	}
 
 	loadedConfig, err := config.LoadRequired()
 	if err != nil {

@@ -3,14 +3,39 @@ package bundledclitee
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 
+	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/claudetee"
+	"goodkind.io/desktop-via-clyde/internal/extensions"
+	"goodkind.io/desktop-via-clyde/internal/patch"
+	"goodkind.io/desktop-via-clyde/internal/targets"
 )
 
 var bundledCLITeeLog = slog.With("component", "desktop-via-clyde", "subcomponent", "bundled-cli-tee")
+
+const HookCapability = "bundled-cli-tee"
+
+// RegisterPatchHooks links bundled CLI tee lifecycle hooks.
+func RegisterPatchHooks() error {
+	if !catalog.HasPatchHookCapability(HookCapability) {
+		if err := catalog.RegisterPatchHookCapability(HookCapability); err != nil {
+			return err
+		}
+	}
+	if err := patch.RegisterPostPatchHook(HookCapability, PostPatchHook); err != nil {
+		return err
+	}
+	return patch.RegisterPreUnpatchHook(HookCapability, PreUnpatchHook)
+}
+
+func RegisterValidators() error {
+	return extensions.RegisterAppValidator("bundled_cli_tee", extensions.ValidateBundledCLITee)
+}
 
 // Options carries one bundled CLI tee hook invocation.
 type Options struct {
@@ -54,6 +79,60 @@ func Uninstall(ctx context.Context, opts Options) error {
 	return nil
 }
 
+// PostPatchHook installs the tee wrapper after a successful shared patch flow.
+func PostPatchHook(ctx context.Context, runner *patch.Runner, target targets.Target, opts patch.Options) error {
+	if target.Extensions.BundledCLITee == nil {
+		return nil
+	}
+	teeOpts := targetOptions(target, opts)
+	bundled, resolveErr := ResolvePath(teeOpts)
+	if resolveErr != nil {
+		fmt.Fprintf(runner.Out, "bundled CLI not present, skipping tee install (%v)\n", resolveErr)
+		return nil
+	}
+	if _, statErr := os.Stat(bundled); statErr != nil {
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("stat bundled cli %s: %w", bundled, statErr)
+		}
+		fmt.Fprintf(runner.Out, "bundled CLI missing at %s, skipping tee install\n", bundled)
+		return nil
+	}
+	if _, realErr := os.Stat(bundled + ".real"); realErr == nil {
+		fmt.Fprintf(runner.Out, "bundled CLI already wrapped (.real present), skipping\n")
+		return nil
+	}
+	fmt.Fprintf(runner.Out, "install bundled CLI stdio tee at %s\n", bundled)
+	if opts.DryRun {
+		return nil
+	}
+	return Install(ctx, teeOpts)
+}
+
+// PreUnpatchHook removes the tee wrapper before the shared unpatch flow runs.
+func PreUnpatchHook(ctx context.Context, runner *patch.Runner, target targets.Target, opts patch.Options) error {
+	if target.Extensions.BundledCLITee == nil {
+		return nil
+	}
+	teeOpts := targetOptions(target, opts)
+	bundled, resolveErr := ResolvePath(teeOpts)
+	if resolveErr != nil {
+		fmt.Fprintf(runner.Out, "bundled CLI not present, skipping tee uninstall (%v)\n", resolveErr)
+		return nil
+	}
+	if _, statErr := os.Stat(bundled + ".real"); statErr != nil {
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("stat bundled cli real sibling %s.real: %w", bundled, statErr)
+		}
+		fmt.Fprintf(runner.Out, "no .real sibling at %s.real, nothing to uninstall\n", bundled)
+		return nil
+	}
+	fmt.Fprintf(runner.Out, "uninstall bundled CLI stdio tee at %s\n", bundled)
+	if opts.DryRun {
+		return nil
+	}
+	return Uninstall(ctx, teeOpts)
+}
+
 func toClaudeOptions(opts Options) claudetee.Options {
 	return claudetee.Options{
 		DryRun:                   opts.DryRun,
@@ -67,5 +146,21 @@ func toClaudeOptions(opts Options) claudetee.Options {
 		LogDir:                   "",
 		Out:                      opts.Out,
 		Trace:                    opts.Trace,
+	}
+}
+
+func targetOptions(target targets.Target, opts patch.Options) Options {
+	tee := target.Extensions.BundledCLITee
+	return Options{
+		DryRun:                   opts.DryRun,
+		AppSupportDir:            tee.AppSupportDir,
+		VersionDir:               tee.VersionDir,
+		BundledCLIRel:            tee.BundledCLIRel,
+		BundledCLIPath:           tee.BundledCLIPath,
+		TerminateProcessNames:    append([]string(nil), tee.TerminateProcessNames...),
+		TerminateProcessPatterns: append([]string(nil), tee.TerminateProcessPatterns...),
+		CompletionSteps:          append([]string(nil), tee.CompletionSteps...),
+		Out:                      opts.Out,
+		Trace:                    nil,
 	}
 }

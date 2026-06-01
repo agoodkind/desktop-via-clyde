@@ -9,15 +9,25 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
+	"sync"
 
 	"goodkind.io/desktop-via-clyde/internal/catalog"
-	"goodkind.io/desktop-via-clyde/internal/clihandlers"
-	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
-	"goodkind.io/desktop-via-clyde/internal/upgrade"
+	"howett.net/plist"
 )
+
+// Handler runs one configured operation capability.
+type Handler func(context.Context, Request) error
+
+var (
+	handlersMu sync.RWMutex
+	handlers   = map[string]Handler{}
+)
+
+const AppStatusCapability = "app.status"
 
 // FlagValues holds parsed command flag values keyed by flag name.
 type FlagValues struct {
@@ -65,92 +75,85 @@ type Request struct {
 // Run dispatches one operation capability with parsed flags and an optional
 // app or CLI declaration.
 func Run(ctx context.Context, req Request) error {
-	switch req.Capability {
-	case catalog.OperationAppPatch:
-		if req.App == nil {
-			return fmt.Errorf("%s requires an app target", req.Capability)
-		}
-		if err := patch.Patch(ctx, *req.App, patch.Options{
-			DryRun:            req.Flags.Bool("dry-run"),
-			NoMigrateKeychain: req.Flags.Bool("no-migrate-keychain"),
-			Out:               req.Out,
-			Trace:             nil,
-		}); err != nil {
-			return operationError(ctx, "operations.patch_failed", "patch app", err)
-		}
-		return nil
-	case catalog.OperationAppUnpatch:
-		if req.App == nil {
-			return fmt.Errorf("%s requires an app target", req.Capability)
-		}
-		if err := patch.Unpatch(ctx, *req.App, patch.Options{
-			DryRun:            req.Flags.Bool("dry-run"),
-			NoMigrateKeychain: false,
-			Out:               req.Out,
-			Trace:             nil,
-		}); err != nil {
-			return operationError(ctx, "operations.unpatch_failed", "restore app bundle", err)
-		}
-		return nil
-	case catalog.OperationAppUpgrade:
-		if req.App == nil {
-			return fmt.Errorf("%s requires an app target", req.Capability)
-		}
-		if err := upgrade.Run(ctx, *req.App, upgrade.Options{
-			Channel:           req.Flags.String("channel"),
-			DryRun:            req.Flags.Bool("dry-run"),
-			NoMigrateKeychain: req.Flags.Bool("no-migrate-keychain"),
-			Out:               req.Out,
-		}); err != nil {
-			return operationError(ctx, "operations.upgrade_failed", "upgrade app", err)
-		}
-		return nil
-	case catalog.OperationAppKeychainMigrate:
-		if req.App == nil {
-			return fmt.Errorf("%s requires an app target", req.Capability)
-		}
-		if err := patch.KeychainMigrate(ctx, *req.App, patch.Options{
-			DryRun:            req.Flags.Bool("dry-run"),
-			NoMigrateKeychain: false,
-			Out:               req.Out,
-			Trace:             nil,
-		}); err != nil {
-			return operationError(ctx, "operations.keychain_migrate_failed", "restore keychain access", err)
-		}
-		return nil
-	case catalog.OperationAppStatus:
-		if req.App == nil {
-			return fmt.Errorf("%s requires an app target", req.Capability)
-		}
-		if err := writeAppStatus(ctx, req.Out, *req.App); err != nil {
-			return operationError(ctx, "operations.app_status_failed", "print app status", err)
-		}
-		return nil
-	case catalog.OperationStandaloneInstall:
-		if err := clihandlers.InstallStandaloneCLI(ctx, clihandlers.Request{
-			Flags: req.Flags,
-			Out:   req.Out,
-		}); err != nil {
-			return operationError(ctx, "operations.standalone_install_failed", "install standalone cli", err)
-		}
-		return nil
-	case catalog.OperationStandaloneStatus:
-		if err := clihandlers.StatusStandaloneCLI(ctx, clihandlers.Request{
-			Flags: req.Flags,
-			Out:   req.Out,
-		}); err != nil {
-			return operationError(ctx, "operations.standalone_status_failed", "print standalone cli status", err)
-		}
-		return nil
-	default:
+	handler, ok := Lookup(req.Capability)
+	if !ok {
 		return fmt.Errorf("unknown operation capability %q", req.Capability)
 	}
+	return handler(ctx, req)
+}
+
+// Register links an operation capability to its runtime handler.
+func Register(capability string, handler Handler) error {
+	if !catalog.HasOperationCapability(capability) {
+		return fmt.Errorf("operation capability %q is not linked", capability)
+	}
+	if handler == nil {
+		return fmt.Errorf("operation capability %q handler is required", capability)
+	}
+	handlersMu.Lock()
+	defer handlersMu.Unlock()
+	if _, ok := handlers[capability]; ok {
+		return fmt.Errorf("operation capability %q handler is already registered", capability)
+	}
+	handlers[capability] = handler
+	return nil
+}
+
+// Lookup returns the registered handler for one operation capability.
+func Lookup(capability string) (Handler, bool) {
+	handlersMu.RLock()
+	defer handlersMu.RUnlock()
+	handler, ok := handlers[capability]
+	return handler, ok
+}
+
+// RegisteredCapabilities returns operation capabilities with runtime handlers.
+func RegisteredCapabilities() []string {
+	handlersMu.RLock()
+	defer handlersMu.RUnlock()
+	names := make([]string, 0, len(handlers))
+	for name := range handlers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// RegisterCoreHandlers links operation handlers owned by this package.
+func RegisterCoreHandlers() error {
+	if !catalog.HasOperationCapability(AppStatusCapability) {
+		if err := catalog.RegisterOperationCapability(AppStatusCapability); err != nil {
+			return err
+		}
+	}
+	return Register(AppStatusCapability, AppStatus)
+}
+
+func ensureOperationCapabilityRegistered(capability string) error {
+	if catalog.HasOperationCapability(capability) {
+		return nil
+	}
+	if err := catalog.RegisterOperationCapability(capability); err != nil {
+		return err
+	}
+	return nil
+}
+
+// AppStatus prints status for one configured desktop app.
+func AppStatus(ctx context.Context, req Request) error {
+	if req.App == nil {
+		return fmt.Errorf("%s requires an app target", req.Capability)
+	}
+	if err := writeAppStatus(ctx, req.Out, *req.App); err != nil {
+		return Error(ctx, "operations.app_status_failed", "print app status", err)
+	}
+	return nil
 }
 
 func writeAppStatus(ctx context.Context, out io.Writer, target targets.Target) error {
 	multiState, err := state.Load(paths.StateFile())
 	if err != nil {
-		return operationError(ctx, "operations.app_status_load_state_failed", "load state file "+paths.StateFile(), err)
+		return Error(ctx, "operations.app_status_load_state_failed", "load state file "+paths.StateFile(), err)
 	}
 	fmt.Fprintf(out, "state file: %s\n", paths.StateFile())
 	fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", "TARGET", "STATE", "VERSION", "NOTES")
@@ -158,7 +161,7 @@ func writeAppStatus(ctx context.Context, out io.Writer, target targets.Target) e
 	entry, hasState := multiState.Targets[target.ID]
 	appExists, appStatErr := pathExists(ctx, target.AppPath)
 	if appStatErr != nil {
-		return operationError(ctx, "operations.app_status_stat_app_failed", "stat app bundle "+target.AppPath, appStatErr)
+		return Error(ctx, "operations.app_status_stat_app_failed", "stat app bundle "+target.AppPath, appStatErr)
 	}
 	if !appExists {
 		fmt.Fprintf(out, "%-8s  %-9s  %-20s  bundle missing at %s\n", target.ID, "absent", "-", target.AppPath)
@@ -174,7 +177,7 @@ func writeAppStatus(ctx context.Context, out io.Writer, target targets.Target) e
 	notes := fmt.Sprintf("signed-as=%q", entry.SignIdentity)
 	realPathExists, realPathErr := pathExists(ctx, paths.RealBinaryPath(target))
 	if realPathErr != nil {
-		return operationError(ctx, "operations.app_status_stat_real_failed", "stat restored binary path "+paths.RealBinaryPath(target), realPathErr)
+		return Error(ctx, "operations.app_status_stat_real_failed", "stat restored binary path "+paths.RealBinaryPath(target), realPathErr)
 	}
 	if !realPathExists {
 		stateLabel = "drifted"
@@ -187,7 +190,8 @@ func writeAppStatus(ctx context.Context, out io.Writer, target targets.Target) e
 	return nil
 }
 
-func operationError(ctx context.Context, event string, message string, err error) error {
+// Error logs and wraps one operation failure.
+func Error(ctx context.Context, event string, message string, err error) error {
 	slog.Default().ErrorContext(ctx, event, "err", err)
 	return errors.New(message + ": " + err.Error())
 }
@@ -205,9 +209,23 @@ func pathExists(ctx context.Context, path string) (bool, error) {
 }
 
 func readBundleVersion(target targets.Target) string {
-	info, err := patch.ReadInfoPlist(paths.InfoPlistPath(target))
+	info, err := readInfoPlist(paths.InfoPlistPath(target))
 	if err != nil {
 		return ""
 	}
 	return info.CFBundleVersion
+}
+
+type infoPlist struct {
+	CFBundleVersion string `plist:"CFBundleVersion"`
+}
+
+func readInfoPlist(path string) (infoPlist, error) {
+	var info infoPlist
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return info, err
+	}
+	_, err = plist.Unmarshal(data, &info)
+	return info, err
 }

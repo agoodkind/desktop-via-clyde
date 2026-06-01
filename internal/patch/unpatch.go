@@ -2,12 +2,9 @@ package patch
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 
-	"goodkind.io/desktop-via-clyde/internal/bundledclitee"
-	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
@@ -24,12 +21,9 @@ func Unpatch(ctx context.Context, t targets.Target, opts Options) error {
 	r := NewRunner(ctx, opts.DryRun, opts.Out)
 	log.InfoContext(ctx, "unpatch.start", "app_path", t.AppPath, "dry_run", opts.DryRun)
 
-	if t.BundledCLITee != nil {
-		if t.BundledCLITee.Capability != catalog.PatchHookBundledCLITee {
-			return fmt.Errorf("unknown bundled CLI tee capability %q", t.BundledCLITee.Capability)
-		}
-		if err := stepUninstallBundledCLITee(ctx, r, t, opts); err != nil {
-			return logPatchError(ctx, "unpatch.uninstall_bundled_cli_tee_failed", fmt.Errorf("uninstall bundled cli tee: %w", err))
+	for _, capability := range t.PreUnpatchHookCapabilities() {
+		if err := runPreUnpatchHook(ctx, r, t, opts, capability); err != nil {
+			return logPatchError(ctx, "unpatch.pre_unpatch_hook_failed", fmt.Errorf("run pre-unpatch hook %q: %w", capability, err))
 		}
 	}
 
@@ -59,58 +53,6 @@ func Unpatch(ctx context.Context, t targets.Target, opts Options) error {
 	}
 
 	notef(r, fmt.Sprintf("target=%s unpatch complete", t.ID))
-	return nil
-}
-
-// stepUninstallBundledCLITee removes the declared bundled CLI stdio tee wrap.
-func stepUninstallBundledCLITee(ctx context.Context, r *Runner, t targets.Target, opts Options) error {
-	teeAppSupportDir := ""
-	teeVersionDir := ""
-	teeBundledCLIRel := ""
-	teeBundledCLIPath := ""
-	var teeTerminateProcessNames []string
-	var teeTerminateProcessPatterns []string
-	var teeCompletionSteps []string
-	if t.BundledCLITee != nil {
-		teeAppSupportDir = t.BundledCLITee.AppSupportDir
-		teeVersionDir = t.BundledCLITee.VersionDir
-		teeBundledCLIRel = t.BundledCLITee.BundledCLIRel
-		teeBundledCLIPath = t.BundledCLITee.BundledCLIPath
-		teeTerminateProcessNames = append([]string(nil), t.BundledCLITee.TerminateProcessNames...)
-		teeTerminateProcessPatterns = append([]string(nil), t.BundledCLITee.TerminateProcessPatterns...)
-		teeCompletionSteps = append([]string(nil), t.BundledCLITee.CompletionSteps...)
-	}
-	teeOpts := bundledclitee.Options{
-		DryRun:                   opts.DryRun,
-		AppSupportDir:            teeAppSupportDir,
-		VersionDir:               teeVersionDir,
-		BundledCLIRel:            teeBundledCLIRel,
-		BundledCLIPath:           teeBundledCLIPath,
-		TerminateProcessNames:    teeTerminateProcessNames,
-		TerminateProcessPatterns: teeTerminateProcessPatterns,
-		CompletionSteps:          teeCompletionSteps,
-		Out:                      opts.Out,
-		Trace:                    nil,
-	}
-	bundled, resolveErr := bundledclitee.ResolvePath(teeOpts)
-	if resolveErr != nil {
-		notef(r, fmt.Sprintf("target=%s bundled CLI not present, skipping tee uninstall (%v)", t.ID, resolveErr))
-		return nil
-	}
-	if _, statErr := os.Stat(bundled + ".real"); statErr != nil {
-		if !errors.Is(statErr, os.ErrNotExist) {
-			return logPatchError(ctx, "unpatch.bundled_cli_real_stat_failed", fmt.Errorf("stat bundled cli real sibling %s.real: %w", bundled, statErr))
-		}
-		notef(r, fmt.Sprintf("target=%s no .real sibling at %s.real, nothing to uninstall", t.ID, bundled))
-		return nil
-	}
-	notef(r, fmt.Sprintf("target=%s uninstall bundled CLI stdio tee at %s", t.ID, bundled))
-	if opts.DryRun {
-		return nil
-	}
-	if err := bundledclitee.Uninstall(ctx, teeOpts); err != nil {
-		return logPatchError(ctx, "unpatch.bundled_cli_tee_uninstall_failed", fmt.Errorf("uninstall bundled cli tee: %w", err))
-	}
 	return nil
 }
 

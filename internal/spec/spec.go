@@ -2,6 +2,8 @@
 // desktop-via-clyde apps, CLIs, launch policies, and capabilities.
 package spec
 
+import "goodkind.io/desktop-via-clyde/internal/extensions"
+
 // FlagType identifies one supported command flag type.
 type FlagType string
 
@@ -94,21 +96,19 @@ type FlagSpec struct {
 
 // AppSpec configures one patchable desktop application and its command shape.
 type AppSpec struct {
-	ID                            string                   `toml:"-"`
-	Command                       CommandSpec              `toml:"command"`
-	Operations                    map[string]OperationSpec `toml:"operations"`
-	AppPath                       string                   `toml:"app_path"`
-	BundleID                      string                   `toml:"bundle_id"`
-	ExecName                      string                   `toml:"exec_name"`
-	KeychainServices              []string                 `toml:"keychain_services"`
-	NestedSignPaths               []string                 `toml:"nested_sign_paths"`
-	PreservedNestedCodePaths      []string                 `toml:"preserved_nested_code_paths"`
-	Entitlements                  EntitlementsSpec         `toml:"entitlements"`
-	Updater                       UpdaterSpec              `toml:"updater"`
-	ComputerUse                   *ComputerUseSpec         `toml:"computer_use"`
-	BundledCLITee                 *BundledCLITeeSpec       `toml:"bundled_cli_tee"`
-	LaunchPolicy                  LaunchPolicySpec         `toml:"launch_policy"`
-	OriginalDRBootstrapCapability string                   `toml:"original_dr_bootstrap_capability"`
+	ID                       string                   `toml:"-"`
+	Command                  CommandSpec              `toml:"command"`
+	Operations               map[string]OperationSpec `toml:"operations"`
+	AppPath                  string                   `toml:"app_path"`
+	BundleID                 string                   `toml:"bundle_id"`
+	ExecName                 string                   `toml:"exec_name"`
+	KeychainServices         []string                 `toml:"keychain_services"`
+	NestedSignPaths          []string                 `toml:"nested_sign_paths"`
+	PreservedNestedCodePaths []string                 `toml:"preserved_nested_code_paths"`
+	Entitlements             EntitlementsSpec         `toml:"entitlements"`
+	Updater                  UpdaterSpec              `toml:"updater"`
+	LaunchPolicy             LaunchPolicySpec         `toml:"launch_policy"`
+	Extensions               extensions.AppSpec
 }
 
 // CLISpec configures one non-app CLI surface and its operations.
@@ -142,39 +142,6 @@ type UpdaterSpec struct {
 type UpdaterChannel struct {
 	Name string `toml:"name"`
 	URL  string `toml:"url"`
-}
-
-// ComputerUseSpec configures the local trust-policy repair surfaces for a
-// companion Computer Use bundle.
-type ComputerUseSpec struct {
-	HostAppPath           string                  `toml:"host_app_path"`
-	BundledAppPath        string                  `toml:"bundled_app_path"`
-	AppPathFromHome       string                  `toml:"app_path_from_home"`
-	CacheAppGlobsFromHome []string                `toml:"cache_app_globs_from_home"`
-	AuthPluginPath        string                  `toml:"auth_plugin_path"`
-	AuthPluginExecutable  string                  `toml:"auth_plugin_executable"`
-	UpstreamTrustedTeamID string                  `toml:"upstream_trusted_team_id"`
-	TeamPatchBinaries     []string                `toml:"team_patch_binaries"`
-	TeamRequirementPlists []string                `toml:"team_requirement_plists"`
-	SignTargets           []ComputerUseSignTarget `toml:"sign_targets"`
-}
-
-// ComputerUseSignTarget declares one helper bundle or binary to re-sign.
-type ComputerUseSignTarget struct {
-	Path         string           `toml:"path"`
-	Entitlements EntitlementsSpec `toml:"entitlements"`
-}
-
-// BundledCLITeeSpec configures a bundled CLI stdio tee selector.
-type BundledCLITeeSpec struct {
-	Capability               string   `toml:"capability"`
-	AppSupportDir            string   `toml:"app_support_dir"`
-	VersionDir               string   `toml:"version_dir"`
-	BundledCLIRel            string   `toml:"bundled_cli_rel"`
-	BundledCLIPath           string   `toml:"bundled_cli_path"`
-	TerminateProcessNames    []string `toml:"terminate_process_names"`
-	TerminateProcessPatterns []string `toml:"terminate_process_patterns"`
-	CompletionSteps          []string `toml:"completion_steps"`
 }
 
 // LaunchPolicySpec declares the installed shim policy data.
@@ -238,14 +205,7 @@ func cloneApp(app AppSpec) AppSpec {
 	cloned.PreservedNestedCodePaths = cloneStrings(app.PreservedNestedCodePaths)
 	cloned.Entitlements = cloneEntitlements(app.Entitlements)
 	cloned.Updater = cloneUpdater(app.Updater)
-	if app.ComputerUse != nil {
-		policy := cloneComputerUse(*app.ComputerUse)
-		cloned.ComputerUse = &policy
-	}
-	if app.BundledCLITee != nil {
-		tee := cloneBundledCLITee(*app.BundledCLITee)
-		cloned.BundledCLITee = &tee
-	}
+	cloned.Extensions = extensions.CloneAppSpec(app.Extensions)
 	cloned.LaunchPolicy = cloneLaunchPolicy(app.LaunchPolicy)
 	return cloned
 }
@@ -303,31 +263,6 @@ func cloneEntitlements(entitlements EntitlementsSpec) EntitlementsSpec {
 func cloneUpdater(updater UpdaterSpec) UpdaterSpec {
 	cloned := updater
 	cloned.Channels = append([]UpdaterChannel(nil), updater.Channels...)
-	return cloned
-}
-
-func cloneComputerUse(policy ComputerUseSpec) ComputerUseSpec {
-	cloned := policy
-	cloned.CacheAppGlobsFromHome = cloneStrings(policy.CacheAppGlobsFromHome)
-	cloned.TeamPatchBinaries = cloneStrings(policy.TeamPatchBinaries)
-	cloned.TeamRequirementPlists = cloneStrings(policy.TeamRequirementPlists)
-	if len(policy.SignTargets) > 0 {
-		cloned.SignTargets = make([]ComputerUseSignTarget, 0, len(policy.SignTargets))
-		for _, target := range policy.SignTargets {
-			cloned.SignTargets = append(cloned.SignTargets, ComputerUseSignTarget{
-				Path:         target.Path,
-				Entitlements: cloneEntitlements(target.Entitlements),
-			})
-		}
-	}
-	return cloned
-}
-
-func cloneBundledCLITee(tee BundledCLITeeSpec) BundledCLITeeSpec {
-	cloned := tee
-	cloned.TerminateProcessNames = cloneStrings(tee.TerminateProcessNames)
-	cloned.TerminateProcessPatterns = cloneStrings(tee.TerminateProcessPatterns)
-	cloned.CompletionSteps = cloneStrings(tee.CompletionSteps)
 	return cloned
 }
 

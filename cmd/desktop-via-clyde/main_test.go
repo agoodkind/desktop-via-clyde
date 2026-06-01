@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"goodkind.io/desktop-via-clyde/internal/composition"
 	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/spec"
@@ -396,6 +397,9 @@ func assertContainsOutput(t *testing.T, output string, want string) {
 
 func installFixture(t *testing.T) {
 	t.Helper()
+	if err := composition.Register(); err != nil {
+		t.Fatalf("composition.Register: %v", err)
+	}
 	cfg, err := config.LoadPath(filepath.Join("..", "..", "internal", "testconfig", "testdata", "current-config.toml"))
 	if err != nil {
 		t.Fatalf("LoadPath(current-config.toml): %v", err)

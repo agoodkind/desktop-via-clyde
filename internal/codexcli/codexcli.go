@@ -20,12 +20,37 @@ import (
 	"strings"
 	"time"
 
+	"goodkind.io/desktop-via-clyde/internal/catalog"
+	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/signing"
 )
 
 var codexcliLog = slog.With("component", "desktop-via-clyde", "subcomponent", "codex-cli")
+
+const (
+	StandaloneInstallCapability = "standalone-cli.install"
+	StandaloneStatusCapability  = "standalone-cli.status"
+)
+
+// RegisterOperations links Codex CLI operation capabilities.
+func RegisterOperations() error {
+	if !catalog.HasOperationCapability(StandaloneInstallCapability) {
+		if err := catalog.RegisterOperationCapability(StandaloneInstallCapability); err != nil {
+			return err
+		}
+	}
+	if err := operations.Register(StandaloneInstallCapability, InstallOperation); err != nil {
+		return err
+	}
+	if !catalog.HasOperationCapability(StandaloneStatusCapability) {
+		if err := catalog.RegisterOperationCapability(StandaloneStatusCapability); err != nil {
+			return err
+		}
+	}
+	return operations.Register(StandaloneStatusCapability, StatusOperation)
+}
 
 // BuildMode selects the Cargo profile tuning used for local Codex CLI builds.
 type BuildMode string
@@ -67,6 +92,45 @@ type StatusOptions struct {
 	CommandName       string
 	PackageBinaryPath string
 	Out               io.Writer
+}
+
+// InstallOperation installs the linked standalone CLI implementation.
+func InstallOperation(ctx context.Context, req operations.Request) error {
+	if err := Install(ctx, InstallOptions{
+		DryRun:            req.Flags.Bool("dry-run"),
+		Repo:              req.Flags.String("repo"),
+		SourceDir:         req.Flags.String("source-dir"),
+		Ref:               req.Flags.String("ref"),
+		PackageDir:        req.Flags.String("package-dir"),
+		PackageVariant:    req.Flags.String("package-variant"),
+		PackageBinaryPath: req.Flags.String("package-binary-path"),
+		CommandName:       req.Flags.String("command-name"),
+		InstallDir:        req.Flags.String("install-dir"),
+		PackageHome:       req.Flags.String("package-home"),
+		BuildMode:         req.Flags.String("build-mode"),
+		NoSccache:         req.Flags.Bool("no-sccache"),
+		ForceRebuild:      req.Flags.Bool("force-rebuild"),
+		Out:               req.Out,
+		Trace:             nil,
+	}); err != nil {
+		return operations.Error(ctx, "operations.standalone_install_failed", "install standalone cli", err)
+	}
+	return nil
+}
+
+// StatusOperation prints status for the linked standalone CLI implementation.
+func StatusOperation(ctx context.Context, req operations.Request) error {
+	if err := Status(ctx, StatusOptions{
+		SourceDir:         req.Flags.String("source-dir"),
+		InstallDir:        req.Flags.String("install-dir"),
+		PackageHome:       req.Flags.String("package-home"),
+		CommandName:       req.Flags.String("command-name"),
+		PackageBinaryPath: req.Flags.String("package-binary-path"),
+		Out:               req.Out,
+	}); err != nil {
+		return operations.Error(ctx, "operations.standalone_status_failed", "print standalone cli status", err)
+	}
+	return nil
 }
 
 type packageMetadata struct {

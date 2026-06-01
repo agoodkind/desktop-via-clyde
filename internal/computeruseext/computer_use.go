@@ -1,4 +1,4 @@
-package patch
+package computeruseext
 
 import (
 	"bytes"
@@ -10,12 +10,23 @@ import (
 	"regexp"
 	"sort"
 
+	"goodkind.io/desktop-via-clyde/internal/extensions"
+	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 	"howett.net/plist"
 )
 
 var signIdentityTeamRE = regexp.MustCompile(`\(([A-Za-z0-9]{10})\)\s*$`)
+
+const (
+	ActionRepairBundledComputerUse     patch.Action = "repair_bundled_computer_use"
+	ActionRepairComputerUseAuthPlugin  patch.Action = "repair_computer_use_auth_plugin"
+	ActionRepairComputerUseTrustedTeam patch.Action = "repair_computer_use_trusted_team"
+	ActionRepairComputerUseRequirement patch.Action = "repair_computer_use_requirement"
+	ActionScanComputerUseCache         patch.Action = "scan_computer_use_cache"
+	ActionSignComputerUseHelper        patch.Action = "sign_computer_use_helper"
+)
 
 type teamRequirementPlist struct {
 	TeamIdentifier string `plist:"team-identifier"`
@@ -27,18 +38,34 @@ type computerUseAuthPluginRepair struct {
 	Replacements int
 }
 
-func stepPatchBundledComputerUse(ctx context.Context, r *Runner, t targets.Target) error {
-	if t.ComputerUse == nil {
+func RegisterLifecycleHooks() error {
+	if err := patch.RegisterPreResignHook("computer-use-bundled", BundledLifecycleHook); err != nil {
+		return err
+	}
+	return patch.RegisterPostBundleHook("computer-use", LifecycleHook)
+}
+
+func RegisterValidators() error {
+	return extensions.RegisterAppValidator("computer_use", extensions.ValidateComputerUse)
+}
+
+func BundledLifecycleHook(
+	ctx context.Context,
+	r *patch.Runner,
+	t targets.Target,
+	_ patch.Options,
+) error {
+	if t.Extensions.ComputerUse == nil {
 		return nil
 	}
-	policy := *t.ComputerUse
+	policy := *t.Extensions.ComputerUse
 	localTeamID, err := validateComputerUsePolicy(policy)
 	if err != nil {
 		return err
 	}
 	appPath := bundledComputerUseAppPath(t.AppPath, policy)
-	traceAction(r, actionRepairBundledComputerUse, t.ID, appPath)
-	notef(r, fmt.Sprintf("target=%s repair bundled Computer Use helper at %s", t.ID, appPath))
+	patch.RecordTrace(r, ActionRepairBundledComputerUse, t.ID, appPath)
+	patch.Note(r, fmt.Sprintf("target=%s repair bundled Computer Use helper at %s", t.ID, appPath))
 	if !r.DryRun {
 		if err := ensureComputerUseAppPath(appPath); err != nil {
 			return err
@@ -47,49 +74,54 @@ func stepPatchBundledComputerUse(ctx context.Context, r *Runner, t targets.Targe
 	return patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID, false)
 }
 
-func stepPatchComputerUse(ctx context.Context, r *Runner, t targets.Target) error {
-	if t.ComputerUse == nil {
+func LifecycleHook(
+	ctx context.Context,
+	r *patch.Runner,
+	t targets.Target,
+	_ patch.Options,
+) error {
+	if t.Extensions.ComputerUse == nil {
 		return nil
 	}
-	policy := *t.ComputerUse
+	policy := *t.Extensions.ComputerUse
 	localTeamID, err := validateComputerUsePolicy(policy)
 	if err != nil {
 		return err
 	}
 	if filepath.Clean(t.AppPath) != filepath.Clean(policy.HostAppPath) {
-		notef(r, fmt.Sprintf("target=%s skipped helper repair for non-canonical app path %s", t.ID, t.AppPath))
+		patch.Note(r, fmt.Sprintf("target=%s skipped helper repair for non-canonical app path %s", t.ID, t.AppPath))
 		return nil
 	}
 	appPath := computerUseAppPath(policy)
-	traceAction(r, actionRepairBundledComputerUse, t.ID, appPath)
-	notef(r, fmt.Sprintf("target=%s repair Computer Use helper at %s", t.ID, appPath))
+	patch.RecordTrace(r, ActionRepairBundledComputerUse, t.ID, appPath)
+	patch.Note(r, fmt.Sprintf("target=%s repair Computer Use helper at %s", t.ID, appPath))
 	if r.DryRun {
 		if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID, true); err != nil {
 			return err
 		}
-		if err := stepPatchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
+		if err := patchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
 			return err
 		}
-		return stepPatchComputerUseAuthPlugin(ctx, r, t, policy, localTeamID)
+		return patchComputerUseAuthPluginStep(ctx, r, t, policy, localTeamID)
 	}
 
 	if err := ensureComputerUseAppPath(appPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			notef(r, fmt.Sprintf("target=%s helper bundle not found, skipping", t.ID))
-			if err := stepPatchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
+			patch.Note(r, fmt.Sprintf("target=%s helper bundle not found, skipping", t.ID))
+			if err := patchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
 				return err
 			}
-			return stepPatchComputerUseAuthPlugin(ctx, r, t, policy, localTeamID)
+			return patchComputerUseAuthPluginStep(ctx, r, t, policy, localTeamID)
 		}
 		return err
 	}
 	if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID, true); err != nil {
 		return err
 	}
-	if err := stepPatchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
+	if err := patchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
 		return err
 	}
-	return stepPatchComputerUseAuthPlugin(ctx, r, t, policy, localTeamID)
+	return patchComputerUseAuthPluginStep(ctx, r, t, policy, localTeamID)
 }
 
 func validateComputerUsePolicy(policy targets.ComputerUsePolicy) (string, error) {
@@ -123,31 +155,31 @@ func computerUseAppPath(policy targets.ComputerUsePolicy) string {
 	return filepath.Join(paths.Home(), filepath.FromSlash(policy.AppPathFromHome))
 }
 
-func stepPatchComputerUseCache(
+func patchComputerUseCache(
 	ctx context.Context,
-	r *Runner,
+	r *patch.Runner,
 	t targets.Target,
 	policy targets.ComputerUsePolicy,
 	localTeamID string,
 ) error {
 	for _, relGlob := range policy.CacheAppGlobsFromHome {
 		pattern := filepath.Join(paths.Home(), filepath.FromSlash(relGlob))
-		traceAction(r, actionScanComputerUseCache, t.ID, pattern)
-		notef(r, fmt.Sprintf("target=%s scan Computer Use cache helpers at %s", t.ID, pattern))
+		patch.RecordTrace(r, ActionScanComputerUseCache, t.ID, pattern)
+		patch.Note(r, fmt.Sprintf("target=%s scan Computer Use cache helpers at %s", t.ID, pattern))
 		if r.DryRun {
 			continue
 		}
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
-			return logPatchError(ctx, "patch.computer_use_cache_glob_failed", fmt.Errorf("glob helper cache %s: %w", pattern, err))
+			return patch.LogError(ctx, "patch.computer_use_cache_glob_failed", fmt.Errorf("glob helper cache %s: %w", pattern, err))
 		}
 		if len(matches) == 0 {
-			notef(r, fmt.Sprintf("target=%s no cached helper bundles matched %s", t.ID, pattern))
+			patch.Note(r, fmt.Sprintf("target=%s no cached helper bundles matched %s", t.ID, pattern))
 			continue
 		}
 		sort.Strings(matches)
 		for _, appPath := range matches {
-			notef(r, fmt.Sprintf("target=%s repair cached Computer Use helper at %s", t.ID, appPath))
+			patch.Note(r, fmt.Sprintf("target=%s repair cached Computer Use helper at %s", t.ID, appPath))
 			if err := ensureComputerUseAppPath(appPath); err != nil {
 				return err
 			}
@@ -159,9 +191,9 @@ func stepPatchComputerUseCache(
 	return nil
 }
 
-func stepPatchComputerUseAuthPlugin(
+func patchComputerUseAuthPluginStep(
 	ctx context.Context,
-	r *Runner,
+	r *patch.Runner,
 	t targets.Target,
 	policy targets.ComputerUsePolicy,
 	localTeamID string,
@@ -173,8 +205,8 @@ func stepPatchComputerUseAuthPlugin(
 		"plugin_path", pluginPath,
 		"executable_path", executablePath,
 		"dry_run", r.DryRun)
-	traceAction(r, actionRepairComputerUseAuthPlugin, t.ID, pluginPath)
-	notef(r, fmt.Sprintf("target=%s repair Computer Use authorization plugin at %s", t.ID, pluginPath))
+	patch.RecordTrace(r, ActionRepairComputerUseAuthPlugin, t.ID, pluginPath)
+	patch.Note(r, fmt.Sprintf("target=%s repair Computer Use authorization plugin at %s", t.ID, pluginPath))
 
 	if r.DryRun {
 		return dryRunPatchComputerUseAuthPlugin(ctx, r, t, pluginPath, executablePath, policy, localTeamID)
@@ -185,23 +217,23 @@ func stepPatchComputerUseAuthPlugin(
 
 func dryRunPatchComputerUseAuthPlugin(
 	ctx context.Context,
-	r *Runner,
+	r *patch.Runner,
 	t targets.Target,
 	pluginPath string,
 	executablePath string,
 	policy targets.ComputerUsePolicy,
 	localTeamID string,
 ) error {
-	traceAction(r, actionRepairComputerUseTrustedTeam, "", executablePath)
-	notef(r, "computer-use: repair login authorization trusted service team in "+executablePath)
+	patch.RecordTrace(r, ActionRepairComputerUseTrustedTeam, "", executablePath)
+	patch.Note(r, "computer-use: repair login authorization trusted service team in "+executablePath)
 	if err := backupComputerUseAuthPlugin(ctx, r, t, pluginPath); err != nil {
 		return err
 	}
 	stagingPath := computerUseAuthPluginDryRunStagingPath(pluginPath)
 	if err := r.Run(ctx, "/usr/bin/rsync", "-a", pluginPath+"/", stagingPath+"/"); err != nil {
-		return logPatchError(ctx, "patch.computer_use_auth_plugin_stage_failed", fmt.Errorf("stage authorization plugin: %w", err))
+		return patch.LogError(ctx, "patch.computer_use_auth_plugin_stage_failed", fmt.Errorf("stage authorization plugin: %w", err))
 	}
-	id, err := resolveSignIdentity(ctx, true)
+	id, err := patch.ResolveSignIdentity(ctx, true)
 	if err != nil {
 		return err
 	}
@@ -216,7 +248,7 @@ func dryRunPatchComputerUseAuthPlugin(
 
 func patchComputerUseAuthPlugin(
 	ctx context.Context,
-	r *Runner,
+	r *patch.Runner,
 	t targets.Target,
 	pluginPath string,
 	executablePath string,
@@ -226,10 +258,10 @@ func patchComputerUseAuthPlugin(
 	info, err := os.Stat(pluginPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			notef(r, fmt.Sprintf("target=%s authorization plugin not found at %s, skipping", t.ID, pluginPath))
+			patch.Note(r, fmt.Sprintf("target=%s authorization plugin not found at %s, skipping", t.ID, pluginPath))
 			return nil
 		}
-		return logPatchError(ctx, "patch.computer_use_auth_plugin_stat_failed", fmt.Errorf("stat authorization plugin %s: %w", pluginPath, err))
+		return patch.LogError(ctx, "patch.computer_use_auth_plugin_stat_failed", fmt.Errorf("stat authorization plugin %s: %w", pluginPath, err))
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("authorization plugin path is not a directory: %s", pluginPath)
@@ -256,11 +288,11 @@ func readComputerUseAuthPluginRepair(
 ) (computerUseAuthPluginRepair, error) {
 	executableInfo, err := os.Stat(executablePath)
 	if err != nil {
-		return computerUseAuthPluginRepair{}, logPatchError(ctx, "patch.computer_use_auth_plugin_executable_stat_failed", fmt.Errorf("stat authorization plugin executable %s: %w", executablePath, err))
+		return computerUseAuthPluginRepair{}, patch.LogError(ctx, "patch.computer_use_auth_plugin_executable_stat_failed", fmt.Errorf("stat authorization plugin executable %s: %w", executablePath, err))
 	}
 	data, err := os.ReadFile(executablePath)
 	if err != nil {
-		return computerUseAuthPluginRepair{}, logPatchError(ctx, "patch.computer_use_auth_plugin_executable_read_failed", fmt.Errorf("read authorization plugin executable %s: %w", executablePath, err))
+		return computerUseAuthPluginRepair{}, patch.LogError(ctx, "patch.computer_use_auth_plugin_executable_read_failed", fmt.Errorf("read authorization plugin executable %s: %w", executablePath, err))
 	}
 	updated, replacements, alreadyPatched, err := replaceStandaloneTeamID(
 		data,
@@ -268,7 +300,7 @@ func readComputerUseAuthPluginRepair(
 		localTeamID,
 	)
 	if err != nil {
-		return computerUseAuthPluginRepair{}, logPatchError(ctx, "patch.computer_use_auth_plugin_executable_repair_failed", fmt.Errorf("repair authorization plugin executable %s: %w", executablePath, err))
+		return computerUseAuthPluginRepair{}, patch.LogError(ctx, "patch.computer_use_auth_plugin_executable_repair_failed", fmt.Errorf("repair authorization plugin executable %s: %w", executablePath, err))
 	}
 	if replacements == 0 && !alreadyPatched {
 		return computerUseAuthPluginRepair{}, fmt.Errorf("authorization plugin executable %s contained neither trusted team %s nor %s",
@@ -283,7 +315,7 @@ func readComputerUseAuthPluginRepair(
 
 func stageInstallComputerUseAuthPlugin(
 	ctx context.Context,
-	r *Runner,
+	r *patch.Runner,
 	pluginPath string,
 	executablePath string,
 	policy targets.ComputerUsePolicy,
@@ -295,25 +327,25 @@ func stageInstallComputerUseAuthPlugin(
 		"replacements", repair.Replacements)
 	tempDir, err := os.MkdirTemp("", "desktop-via-clyde-auth-plugin-*")
 	if err != nil {
-		return logPatchError(ctx, "patch.computer_use_auth_plugin_temp_dir_failed", fmt.Errorf("create authorization plugin staging dir: %w", err))
+		return patch.LogError(ctx, "patch.computer_use_auth_plugin_temp_dir_failed", fmt.Errorf("create authorization plugin staging dir: %w", err))
 	}
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	stagingPath := filepath.Join(tempDir, filepath.Base(pluginPath))
 	if err := r.Run(ctx, "/usr/bin/rsync", "-a", pluginPath+"/", stagingPath+"/"); err != nil {
-		return logPatchError(ctx, "patch.computer_use_auth_plugin_stage_failed", fmt.Errorf("stage authorization plugin: %w", err))
+		return patch.LogError(ctx, "patch.computer_use_auth_plugin_stage_failed", fmt.Errorf("stage authorization plugin: %w", err))
 	}
 	stagedExecutablePath := filepath.Join(stagingPath, filepath.FromSlash(policy.AuthPluginExecutable))
 	if err := writeExistingFile(stagedExecutablePath, repair.Permissions, repair.Updated); err != nil {
-		return logPatchError(ctx, "patch.computer_use_auth_plugin_executable_write_failed", fmt.Errorf("write authorization plugin executable %s: %w", stagedExecutablePath, err))
+		return patch.LogError(ctx, "patch.computer_use_auth_plugin_executable_write_failed", fmt.Errorf("write authorization plugin executable %s: %w", stagedExecutablePath, err))
 	}
 	if repair.Replacements > 0 {
-		notef(r, fmt.Sprintf("computer-use: replaced %d login authorization trusted service team occurrence(s) in %s", repair.Replacements, executablePath))
+		patch.Note(r, fmt.Sprintf("computer-use: replaced %d login authorization trusted service team occurrence(s) in %s", repair.Replacements, executablePath))
 	} else {
-		notef(r, "computer-use: "+executablePath+" already trusts login authorization service team; refreshing signature")
+		patch.Note(r, "computer-use: "+executablePath+" already trusts login authorization service team; refreshing signature")
 	}
 
-	id, err := resolveSignIdentity(ctx, false)
+	id, err := patch.ResolveSignIdentity(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -323,37 +355,37 @@ func stageInstallComputerUseAuthPlugin(
 	return installComputerUseAuthPlugin(ctx, r, stagingPath, pluginPath)
 }
 
-func signAndVerifyComputerUseAuthPlugin(ctx context.Context, r *Runner, stagingPath string, id string) error {
-	notef(r, "computer-use: sign authorization plugin "+stagingPath)
-	if err := r.Run(ctx, "/usr/bin/codesign", codesignRuntimeArgs(id, stagingPath)...); err != nil {
-		return logPatchError(ctx, "patch.computer_use_auth_plugin_sign_failed", fmt.Errorf("sign authorization plugin: %w", err))
+func signAndVerifyComputerUseAuthPlugin(ctx context.Context, r *patch.Runner, stagingPath string, id string) error {
+	patch.Note(r, "computer-use: sign authorization plugin "+stagingPath)
+	if err := r.Run(ctx, "/usr/bin/codesign", patch.CodesignRuntimeArgs(id, stagingPath)...); err != nil {
+		return patch.LogError(ctx, "patch.computer_use_auth_plugin_sign_failed", fmt.Errorf("sign authorization plugin: %w", err))
 	}
 	if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", stagingPath); err != nil {
-		return logPatchError(ctx, "patch.computer_use_auth_plugin_stage_verify_failed", fmt.Errorf("verify staged authorization plugin: %w", err))
+		return patch.LogError(ctx, "patch.computer_use_auth_plugin_stage_verify_failed", fmt.Errorf("verify staged authorization plugin: %w", err))
 	}
 	return nil
 }
 
-func installComputerUseAuthPlugin(ctx context.Context, r *Runner, stagingPath string, pluginPath string) error {
-	notef(r, fmt.Sprintf("computer-use: install authorization plugin %s -> %s with sudo", stagingPath, pluginPath))
+func installComputerUseAuthPlugin(ctx context.Context, r *patch.Runner, stagingPath string, pluginPath string) error {
+	patch.Note(r, fmt.Sprintf("computer-use: install authorization plugin %s -> %s with sudo", stagingPath, pluginPath))
 	if err := r.Run(ctx, "/usr/bin/sudo", "/usr/bin/rsync", "-rltp", "--delete", stagingPath+"/", pluginPath+"/"); err != nil {
-		return logPatchError(ctx, "patch.computer_use_auth_plugin_install_failed", fmt.Errorf("install authorization plugin: %w", err))
+		return patch.LogError(ctx, "patch.computer_use_auth_plugin_install_failed", fmt.Errorf("install authorization plugin: %w", err))
 	}
 	return nil
 }
 
-func backupComputerUseAuthPlugin(ctx context.Context, r *Runner, t targets.Target, pluginPath string) error {
+func backupComputerUseAuthPlugin(ctx context.Context, r *patch.Runner, t targets.Target, pluginPath string) error {
 	backup := computerUseAuthPluginBackupBundle(t, pluginPath)
 	if !r.DryRun {
 		if _, err := os.Stat(backup); err == nil {
-			notef(r, fmt.Sprintf("target=%s authorization plugin backup exists at %s, skipping", t.ID, backup))
+			patch.Note(r, fmt.Sprintf("target=%s authorization plugin backup exists at %s, skipping", t.ID, backup))
 			return nil
 		}
 		if err := os.MkdirAll(filepath.Dir(backup), 0o755); err != nil {
-			return logPatchError(ctx, "patch.computer_use_auth_plugin_backup_dir_failed", fmt.Errorf("create authorization plugin backup dir %s: %w", filepath.Dir(backup), err))
+			return patch.LogError(ctx, "patch.computer_use_auth_plugin_backup_dir_failed", fmt.Errorf("create authorization plugin backup dir %s: %w", filepath.Dir(backup), err))
 		}
 	}
-	notef(r, fmt.Sprintf("target=%s backup authorization plugin %s -> %s", t.ID, pluginPath, backup))
+	patch.Note(r, fmt.Sprintf("target=%s backup authorization plugin %s -> %s", t.ID, pluginPath, backup))
 	return r.Run(ctx, "/usr/bin/rsync", "-a", pluginPath+"/", backup+"/")
 }
 
@@ -368,7 +400,7 @@ func computerUseAuthPluginDryRunStagingPath(pluginPath string) string {
 func ensureComputerUseAppPath(appPath string) error {
 	info, err := os.Stat(appPath)
 	if err != nil {
-		return logPatchErrorNoContext("patch.computer_use_app_stat_failed", fmt.Errorf("stat helper bundle %s: %w", appPath, err))
+		return patch.LogErrorNoContext("patch.computer_use_app_stat_failed", fmt.Errorf("stat helper bundle %s: %w", appPath, err))
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("helper path is not a directory: %s", appPath)
@@ -378,7 +410,7 @@ func ensureComputerUseAppPath(appPath string) error {
 
 func verifyComputerUseAuthPlugin(
 	ctx context.Context,
-	r *Runner,
+	r *patch.Runner,
 	pluginPath string,
 	policy targets.ComputerUsePolicy,
 	localTeamID string,
@@ -386,14 +418,14 @@ func verifyComputerUseAuthPlugin(
 	if r.DryRun {
 		return nil
 	}
-	notef(r, "computer-use: verify authorization plugin signature")
+	patch.Note(r, "computer-use: verify authorization plugin signature")
 	if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", pluginPath); err != nil {
-		return logPatchError(ctx, "patch.computer_use_auth_plugin_verify_failed", fmt.Errorf("verify authorization plugin: %w", err))
+		return patch.LogError(ctx, "patch.computer_use_auth_plugin_verify_failed", fmt.Errorf("verify authorization plugin: %w", err))
 	}
 	executablePath := filepath.Join(pluginPath, filepath.FromSlash(policy.AuthPluginExecutable))
 	data, err := os.ReadFile(executablePath)
 	if err != nil {
-		return logPatchError(ctx, "patch.computer_use_auth_plugin_verify_read_failed", fmt.Errorf("read authorization plugin executable %s: %w", executablePath, err))
+		return patch.LogError(ctx, "patch.computer_use_auth_plugin_verify_read_failed", fmt.Errorf("read authorization plugin executable %s: %w", executablePath, err))
 	}
 	if countStandaloneToken(data, policy.UpstreamTrustedTeamID) > 0 {
 		return fmt.Errorf("%s still contains upstream trusted team %s", executablePath, policy.UpstreamTrustedTeamID)
@@ -406,7 +438,7 @@ func verifyComputerUseAuthPlugin(
 
 func patchComputerUseBundle(
 	ctx context.Context,
-	r *Runner,
+	r *patch.Runner,
 	t targets.Target,
 	appPath string,
 	policy targets.ComputerUsePolicy,
@@ -424,7 +456,7 @@ func patchComputerUseBundle(
 	if err := patchComputerUseTeamRequirements(ctx, r, appPath, policy, localTeamID); err != nil {
 		return err
 	}
-	id, err := resolveSignIdentity(ctx, r.DryRun)
+	id, err := patch.ResolveSignIdentity(ctx, r.DryRun)
 	if err != nil {
 		return err
 	}
@@ -437,18 +469,18 @@ func patchComputerUseBundle(
 	return nil
 }
 
-func backupComputerUseHelper(ctx context.Context, r *Runner, t targets.Target, appPath string) error {
+func backupComputerUseHelper(ctx context.Context, r *patch.Runner, t targets.Target, appPath string) error {
 	backup := computerUseBackupBundle(t, appPath)
 	if !r.DryRun {
 		if _, err := os.Stat(backup); err == nil {
-			notef(r, fmt.Sprintf("target=%s helper backup exists at %s, skipping", t.ID, backup))
+			patch.Note(r, fmt.Sprintf("target=%s helper backup exists at %s, skipping", t.ID, backup))
 			return nil
 		}
 		if err := os.MkdirAll(filepath.Dir(backup), 0o755); err != nil {
-			return logPatchError(ctx, "patch.computer_use_backup_dir_failed", fmt.Errorf("create helper backup dir %s: %w", filepath.Dir(backup), err))
+			return patch.LogError(ctx, "patch.computer_use_backup_dir_failed", fmt.Errorf("create helper backup dir %s: %w", filepath.Dir(backup), err))
 		}
 	}
-	notef(r, fmt.Sprintf("target=%s backup helper %s -> %s", t.ID, appPath, backup))
+	patch.Note(r, fmt.Sprintf("target=%s backup helper %s -> %s", t.ID, appPath, backup))
 	return r.Run(ctx, "/usr/bin/rsync", "-a", appPath+"/", backup+"/")
 }
 
@@ -458,25 +490,25 @@ func computerUseBackupBundle(t targets.Target, appPath string) string {
 
 func patchComputerUseTrustedTeam(
 	ctx context.Context,
-	r *Runner,
+	r *patch.Runner,
 	appPath string,
 	policy targets.ComputerUsePolicy,
 	localTeamID string,
 ) error {
 	for _, relPath := range policy.TeamPatchBinaries {
 		binaryPath := filepath.Join(appPath, filepath.FromSlash(relPath))
-		traceAction(r, actionRepairComputerUseTrustedTeam, "", binaryPath)
-		notef(r, "computer-use: repair trusted sender team in "+binaryPath)
+		patch.RecordTrace(r, ActionRepairComputerUseTrustedTeam, "", binaryPath)
+		patch.Note(r, "computer-use: repair trusted sender team in "+binaryPath)
 		if r.DryRun {
 			continue
 		}
 		info, err := os.Stat(binaryPath)
 		if err != nil {
-			return logPatchError(ctx, "patch.computer_use_binary_stat_failed", fmt.Errorf("stat helper binary %s: %w", binaryPath, err))
+			return patch.LogError(ctx, "patch.computer_use_binary_stat_failed", fmt.Errorf("stat helper binary %s: %w", binaryPath, err))
 		}
 		data, err := os.ReadFile(binaryPath)
 		if err != nil {
-			return logPatchError(ctx, "patch.computer_use_binary_read_failed", fmt.Errorf("read helper binary %s: %w", binaryPath, err))
+			return patch.LogError(ctx, "patch.computer_use_binary_read_failed", fmt.Errorf("read helper binary %s: %w", binaryPath, err))
 		}
 		updated, replacements, alreadyPatched, err := replaceStandaloneTeamID(
 			data,
@@ -484,10 +516,10 @@ func patchComputerUseTrustedTeam(
 			localTeamID,
 		)
 		if err != nil {
-			return logPatchError(ctx, "patch.computer_use_binary_repair_failed", fmt.Errorf("repair helper binary %s: %w", binaryPath, err))
+			return patch.LogError(ctx, "patch.computer_use_binary_repair_failed", fmt.Errorf("repair helper binary %s: %w", binaryPath, err))
 		}
 		if replacements == 0 && alreadyPatched {
-			notef(r, fmt.Sprintf("computer-use: %s already trusts team %s", binaryPath, localTeamID))
+			patch.Note(r, fmt.Sprintf("computer-use: %s already trusts team %s", binaryPath, localTeamID))
 			continue
 		}
 		if replacements == 0 {
@@ -495,34 +527,34 @@ func patchComputerUseTrustedTeam(
 				binaryPath, policy.UpstreamTrustedTeamID, localTeamID)
 		}
 		if err := writeExistingFile(binaryPath, info.Mode().Perm(), updated); err != nil {
-			return logPatchError(ctx, "patch.computer_use_binary_write_failed", fmt.Errorf("write helper binary %s: %w", binaryPath, err))
+			return patch.LogError(ctx, "patch.computer_use_binary_write_failed", fmt.Errorf("write helper binary %s: %w", binaryPath, err))
 		}
-		notef(r, fmt.Sprintf("computer-use: replaced %d trusted sender team occurrence(s) in %s", replacements, binaryPath))
+		patch.Note(r, fmt.Sprintf("computer-use: replaced %d trusted sender team occurrence(s) in %s", replacements, binaryPath))
 	}
 	return nil
 }
 
 func patchComputerUseTeamRequirements(
 	ctx context.Context,
-	r *Runner,
+	r *patch.Runner,
 	appPath string,
 	policy targets.ComputerUsePolicy,
 	localTeamID string,
 ) error {
 	for _, relPath := range policy.TeamRequirementPlists {
 		plistPath := filepath.Join(appPath, filepath.FromSlash(relPath))
-		traceAction(r, actionRepairComputerUseRequirement, "", plistPath)
-		notef(r, "computer-use: repair trusted parent team in "+plistPath)
+		patch.RecordTrace(r, ActionRepairComputerUseRequirement, "", plistPath)
+		patch.Note(r, "computer-use: repair trusted parent team in "+plistPath)
 		if r.DryRun {
 			continue
 		}
 		info, err := os.Stat(plistPath)
 		if err != nil {
-			return logPatchError(ctx, "patch.computer_use_requirement_plist_stat_failed", fmt.Errorf("stat helper requirement plist %s: %w", plistPath, err))
+			return patch.LogError(ctx, "patch.computer_use_requirement_plist_stat_failed", fmt.Errorf("stat helper requirement plist %s: %w", plistPath, err))
 		}
 		data, err := os.ReadFile(plistPath)
 		if err != nil {
-			return logPatchError(ctx, "patch.computer_use_requirement_plist_read_failed", fmt.Errorf("read helper requirement plist %s: %w", plistPath, err))
+			return patch.LogError(ctx, "patch.computer_use_requirement_plist_read_failed", fmt.Errorf("read helper requirement plist %s: %w", plistPath, err))
 		}
 		updated, changed, alreadyPatched, err := replaceTeamRequirementPlist(
 			data,
@@ -530,10 +562,10 @@ func patchComputerUseTeamRequirements(
 			localTeamID,
 		)
 		if err != nil {
-			return logPatchError(ctx, "patch.computer_use_requirement_plist_repair_failed", fmt.Errorf("repair helper requirement plist %s: %w", plistPath, err))
+			return patch.LogError(ctx, "patch.computer_use_requirement_plist_repair_failed", fmt.Errorf("repair helper requirement plist %s: %w", plistPath, err))
 		}
 		if !changed && alreadyPatched {
-			notef(r, fmt.Sprintf("computer-use: %s already trusts parent team %s", plistPath, localTeamID))
+			patch.Note(r, fmt.Sprintf("computer-use: %s already trusts parent team %s", plistPath, localTeamID))
 			continue
 		}
 		if !changed {
@@ -541,48 +573,51 @@ func patchComputerUseTeamRequirements(
 				plistPath, policy.UpstreamTrustedTeamID, localTeamID)
 		}
 		if err := writeExistingFile(plistPath, info.Mode().Perm(), updated); err != nil {
-			return logPatchError(ctx, "patch.computer_use_requirement_plist_write_failed", fmt.Errorf("write helper requirement plist %s: %w", plistPath, err))
+			return patch.LogError(ctx, "patch.computer_use_requirement_plist_write_failed", fmt.Errorf("write helper requirement plist %s: %w", plistPath, err))
 		}
-		notef(r, "computer-use: replaced trusted parent team in "+plistPath)
+		patch.Note(r, "computer-use: replaced trusted parent team in "+plistPath)
 	}
 	return nil
 }
 
 func signComputerUseHelper(
 	ctx context.Context,
-	r *Runner,
+	r *patch.Runner,
 	appPath string,
 	policy targets.ComputerUsePolicy,
 	id string,
 ) error {
 	for _, target := range policy.SignTargets {
 		codePath := computerUseSignTargetPath(appPath, target.Path)
-		traceAction(r, actionSignComputerUseHelper, "", codePath)
+		patch.RecordTrace(r, ActionSignComputerUseHelper, "", codePath)
 		if !r.DryRun {
 			if _, err := os.Stat(codePath); err != nil {
-				return logPatchError(ctx, "patch.computer_use_sign_target_stat_failed", fmt.Errorf("stat helper code target %s: %w", codePath, err))
+				return patch.LogError(ctx, "patch.computer_use_sign_target_stat_failed", fmt.Errorf("stat helper code target %s: %w", codePath, err))
 			}
 		}
 		if target.Entitlements == nil {
-			notef(r, fmt.Sprintf("computer-use: sign %s without entitlements", codePath))
-			if err := r.Run(ctx, "/usr/bin/codesign", codesignRuntimeArgs(id, codePath)...); err != nil {
-				return logPatchError(ctx, "patch.computer_use_sign_target_failed", fmt.Errorf("sign helper code target %s: %w", codePath, err))
+			patch.Note(r, fmt.Sprintf("computer-use: sign %s without entitlements", codePath))
+			if err := r.Run(ctx, "/usr/bin/codesign", patch.CodesignRuntimeArgs(id, codePath)...); err != nil {
+				return patch.LogError(ctx, "patch.computer_use_sign_target_failed", fmt.Errorf("sign helper code target %s: %w", codePath, err))
 			}
 			continue
 		}
-		entFile, err := writeAugmentedEntitlementsFileAllowEmpty(
+		entFile, err := patch.WriteAugmentedEntitlementsFileAllowEmpty(
 			ctx,
 			r,
 			"computer-use-"+target.Path,
 			codePath,
-			*target.Entitlements,
+			targets.EntitlementsPolicy{
+				Strip:                       append([]string(nil), target.Entitlements.Strip...),
+				RequiredBooleanEntitlements: append([]string(nil), target.Entitlements.RequiredBooleanEntitlements...),
+			},
 		)
 		if err != nil {
-			return logPatchError(ctx, "patch.computer_use_entitlements_failed", fmt.Errorf("helper entitlements for %s: %w", codePath, err))
+			return patch.LogError(ctx, "patch.computer_use_entitlements_failed", fmt.Errorf("helper entitlements for %s: %w", codePath, err))
 		}
-		notef(r, fmt.Sprintf("computer-use: sign %s with repaired entitlements", codePath))
-		if err := r.Run(ctx, "/usr/bin/codesign", codesignRuntimeEntitlementsArgs(id, entFile, codePath)...); err != nil {
-			return logPatchError(ctx, "patch.computer_use_sign_target_failed", fmt.Errorf("sign helper code target %s: %w", codePath, err))
+		patch.Note(r, fmt.Sprintf("computer-use: sign %s with repaired entitlements", codePath))
+		if err := r.Run(ctx, "/usr/bin/codesign", patch.CodesignRuntimeEntitlementsArgs(id, entFile, codePath)...); err != nil {
+			return patch.LogError(ctx, "patch.computer_use_sign_target_failed", fmt.Errorf("sign helper code target %s: %w", codePath, err))
 		}
 	}
 	return nil
@@ -597,7 +632,7 @@ func computerUseSignTargetPath(appPath string, relPath string) string {
 
 func verifyComputerUseHelper(
 	ctx context.Context,
-	r *Runner,
+	r *patch.Runner,
 	appPath string,
 	policy targets.ComputerUsePolicy,
 	localTeamID string,
@@ -605,19 +640,19 @@ func verifyComputerUseHelper(
 	if r.DryRun {
 		return nil
 	}
-	notef(r, "computer-use: verify helper signature")
+	patch.Note(r, "computer-use: verify helper signature")
 	if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", appPath); err != nil {
-		return logPatchError(ctx, "patch.computer_use_verify_bundle_failed", fmt.Errorf("verify helper bundle: %w", err))
+		return patch.LogError(ctx, "patch.computer_use_verify_bundle_failed", fmt.Errorf("verify helper bundle: %w", err))
 	}
 	for _, target := range policy.SignTargets {
 		if target.Entitlements == nil {
 			continue
 		}
 		codePath := computerUseSignTargetPath(appPath, target.Path)
-		if err := verifyBooleanEntitlements(ctx, r, codePath, target.Entitlements.RequiredBooleanEntitlements); err != nil {
+		if err := patch.VerifyBooleanEntitlements(ctx, r, codePath, target.Entitlements.RequiredBooleanEntitlements); err != nil {
 			return err
 		}
-		if err := verifyAbsentEntitlements(ctx, r, codePath, target.Entitlements.Strip); err != nil {
+		if err := patch.VerifyAbsentEntitlements(ctx, r, codePath, target.Entitlements.Strip); err != nil {
 			return err
 		}
 	}
@@ -625,7 +660,7 @@ func verifyComputerUseHelper(
 		binaryPath := filepath.Join(appPath, filepath.FromSlash(relPath))
 		data, err := os.ReadFile(binaryPath)
 		if err != nil {
-			return logPatchError(ctx, "patch.computer_use_verify_binary_read_failed", fmt.Errorf("read helper binary %s: %w", binaryPath, err))
+			return patch.LogError(ctx, "patch.computer_use_verify_binary_read_failed", fmt.Errorf("read helper binary %s: %w", binaryPath, err))
 		}
 		if countStandaloneToken(data, policy.UpstreamTrustedTeamID) > 0 {
 			return fmt.Errorf("%s still contains upstream trusted team %s", binaryPath, policy.UpstreamTrustedTeamID)
@@ -638,11 +673,11 @@ func verifyComputerUseHelper(
 		plistPath := filepath.Join(appPath, filepath.FromSlash(relPath))
 		data, err := os.ReadFile(plistPath)
 		if err != nil {
-			return logPatchError(ctx, "patch.computer_use_verify_requirement_plist_read_failed", fmt.Errorf("read helper requirement plist %s: %w", plistPath, err))
+			return patch.LogError(ctx, "patch.computer_use_verify_requirement_plist_read_failed", fmt.Errorf("read helper requirement plist %s: %w", plistPath, err))
 		}
 		teamID, err := teamRequirementPlistTeamID(data)
 		if err != nil {
-			return logPatchError(ctx, "patch.computer_use_verify_requirement_team_read_failed", fmt.Errorf("read helper requirement plist team %s: %w", plistPath, err))
+			return patch.LogError(ctx, "patch.computer_use_verify_requirement_team_read_failed", fmt.Errorf("read helper requirement plist team %s: %w", plistPath, err))
 		}
 		if teamID != localTeamID {
 			return fmt.Errorf("%s trusts parent team %s, want %s", plistPath, teamID, localTeamID)
@@ -716,7 +751,7 @@ func replaceTeamRequirementPlist(data []byte, oldID string, newID string) ([]byt
 	}
 	var requirement teamRequirementPlist
 	if _, err := plist.Unmarshal(data, &requirement); err != nil {
-		return nil, false, false, logPatchErrorNoContext("patch.computer_use_requirement_plist_unmarshal_failed", fmt.Errorf("unmarshal requirement plist: %w", err))
+		return nil, false, false, patch.LogErrorNoContext("patch.computer_use_requirement_plist_unmarshal_failed", fmt.Errorf("unmarshal requirement plist: %w", err))
 	}
 	if requirement.TeamIdentifier == newID {
 		return data, false, true, nil
@@ -728,7 +763,7 @@ func replaceTeamRequirementPlist(data []byte, oldID string, newID string) ([]byt
 	requirement.TeamIdentifier = newID
 	out, err := plist.MarshalIndent(requirement, plist.XMLFormat, "\t")
 	if err != nil {
-		return nil, false, false, logPatchErrorNoContext("patch.computer_use_requirement_plist_marshal_failed", fmt.Errorf("marshal requirement plist: %w", err))
+		return nil, false, false, patch.LogErrorNoContext("patch.computer_use_requirement_plist_marshal_failed", fmt.Errorf("marshal requirement plist: %w", err))
 	}
 	return out, true, false, nil
 }
@@ -736,7 +771,7 @@ func replaceTeamRequirementPlist(data []byte, oldID string, newID string) ([]byt
 func teamRequirementPlistTeamID(data []byte) (string, error) {
 	var requirement teamRequirementPlist
 	if _, err := plist.Unmarshal(data, &requirement); err != nil {
-		return "", logPatchErrorNoContext("patch.computer_use_requirement_team_unmarshal_failed", fmt.Errorf("unmarshal requirement plist: %w", err))
+		return "", patch.LogErrorNoContext("patch.computer_use_requirement_team_unmarshal_failed", fmt.Errorf("unmarshal requirement plist: %w", err))
 	}
 	if requirement.TeamIdentifier == "" {
 		return "", fmt.Errorf("missing team-identifier")
@@ -747,12 +782,12 @@ func teamRequirementPlistTeamID(data []byte) (string, error) {
 func writeExistingFile(path string, permissions os.FileMode, data []byte) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, permissions)
 	if err != nil {
-		return logPatchErrorNoContext("patch.write_existing_file_open_failed", fmt.Errorf("open %s for rewrite: %w", path, err))
+		return patch.LogErrorNoContext("patch.write_existing_file_open_failed", fmt.Errorf("open %s for rewrite: %w", path, err))
 	}
 	defer func() { _ = file.Close() }()
 
 	if _, err := file.Write(data); err != nil {
-		return logPatchErrorNoContext("patch.write_existing_file_write_failed", fmt.Errorf("write %s: %w", path, err))
+		return patch.LogErrorNoContext("patch.write_existing_file_write_failed", fmt.Errorf("write %s: %w", path, err))
 	}
 	return nil
 }

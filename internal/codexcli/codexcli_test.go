@@ -12,6 +12,7 @@ import (
 
 	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/patch"
+	"goodkind.io/desktop-via-clyde/internal/testsupport"
 )
 
 func TestInstallDryRunUsesShallowGhCloneAndOriginMain(t *testing.T) {
@@ -334,6 +335,9 @@ func equalStrings(left []string, right []string) bool {
 
 func installFixture(t *testing.T) {
 	t.Helper()
+	if err := testsupport.RegisterFixtureCapabilities(); err != nil {
+		t.Fatalf("RegisterFixtureCapabilities(): %v", err)
+	}
 	cfg, err := config.LoadPath(filepath.Join("..", "testconfig", "testdata", "current-config.toml"))
 	if err != nil {
 		t.Fatalf("LoadPath(current-config.toml): %v", err)

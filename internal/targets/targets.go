@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"goodkind.io/desktop-via-clyde/internal/config"
+	"goodkind.io/desktop-via-clyde/internal/extensions"
 	"goodkind.io/desktop-via-clyde/internal/spec"
 )
 
@@ -87,43 +88,27 @@ type EntitlementsPolicy struct {
 	RequiredBooleanEntitlements []string
 }
 
-// ComputerUseSignTarget describes one helper that must be re-signed.
-type ComputerUseSignTarget struct {
-	Path         string
-	Entitlements *EntitlementsPolicy
-}
+// ComputerUseSignTarget aliases extension-owned runtime helper metadata.
+type ComputerUseSignTarget = extensions.ComputerUseRuntimeSignTarget
 
-// ComputerUsePolicy describes the companion helper repair settings for one app.
-type ComputerUsePolicy struct {
-	HostAppPath           string
-	BundledAppPath        string
-	AppPathFromHome       string
-	CacheAppGlobsFromHome []string
-	AuthPluginPath        string
-	AuthPluginExecutable  string
-	UpstreamTrustedTeamID string
-	TeamPatchBinaries     []string
-	TeamRequirementPlists []string
-	SignTargets           []ComputerUseSignTarget
-}
+// ComputerUsePolicy aliases extension-owned companion helper settings.
+type ComputerUsePolicy = extensions.ComputerUsePolicy
 
 // Target is the runtime app target derived from validated config declarations.
 type Target struct {
-	ID                            string
-	Command                       spec.CommandSpec
-	Operations                    map[string]spec.OperationSpec
-	AppPath                       string
-	BundleID                      string
-	ExecName                      string
-	KeychainServices              []string
-	NestedSignPaths               []string
-	PreservedNestedCodePaths      []string
-	Entitlements                  *EntitlementsPolicy
-	Updater                       Updater
-	ComputerUse                   *ComputerUsePolicy
-	BundledCLITee                 *spec.BundledCLITeeSpec
-	LaunchPolicy                  spec.LaunchPolicySpec
-	OriginalDRBootstrapCapability string
+	ID                       string
+	Command                  spec.CommandSpec
+	Operations               map[string]spec.OperationSpec
+	AppPath                  string
+	BundleID                 string
+	ExecName                 string
+	KeychainServices         []string
+	NestedSignPaths          []string
+	PreservedNestedCodePaths []string
+	Entitlements             *EntitlementsPolicy
+	Updater                  Updater
+	Extensions               extensions.Target
+	LaunchPolicy             spec.LaunchPolicySpec
 }
 
 // CLIProgram is the runtime non-app CLI declaration derived from config.
@@ -178,26 +163,33 @@ func AllCLIs() []CLIProgram {
 
 func buildTarget(app spec.AppSpec) Target {
 	target := Target{
-		ID:                            app.ID,
-		Command:                       app.Command,
-		Operations:                    cloneOperations(app.Operations),
-		AppPath:                       app.AppPath,
-		BundleID:                      app.BundleID,
-		ExecName:                      app.ExecName,
-		KeychainServices:              cloneStrings(app.KeychainServices),
-		NestedSignPaths:               cloneStrings(app.NestedSignPaths),
-		PreservedNestedCodePaths:      cloneStrings(app.PreservedNestedCodePaths),
-		Entitlements:                  buildEntitlements(app.Entitlements),
-		Updater:                       buildUpdater(app.Updater),
-		BundledCLITee:                 cloneBundledCLITee(app.BundledCLITee),
-		LaunchPolicy:                  app.LaunchPolicy,
-		ComputerUse:                   nil,
-		OriginalDRBootstrapCapability: app.OriginalDRBootstrapCapability,
-	}
-	if app.ComputerUse != nil {
-		target.ComputerUse = buildComputerUse(*app.ComputerUse)
+		ID:                       app.ID,
+		Command:                  app.Command,
+		Operations:               cloneOperations(app.Operations),
+		AppPath:                  app.AppPath,
+		BundleID:                 app.BundleID,
+		ExecName:                 app.ExecName,
+		KeychainServices:         cloneStrings(app.KeychainServices),
+		NestedSignPaths:          cloneStrings(app.NestedSignPaths),
+		PreservedNestedCodePaths: cloneStrings(app.PreservedNestedCodePaths),
+		Entitlements:             buildEntitlements(app.Entitlements),
+		Updater:                  buildUpdater(app.Updater),
+		Extensions:               extensions.BuildTarget(app.Extensions),
+		LaunchPolicy:             app.LaunchPolicy,
 	}
 	return target
+}
+
+func (t Target) PostPatchHookCapabilities() []string {
+	return t.Extensions.PostPatchHookCapabilities()
+}
+
+func (t Target) PreUnpatchHookCapabilities() []string {
+	return t.Extensions.PreUnpatchHookCapabilities()
+}
+
+func (t Target) BootstrapCapability() string {
+	return t.Extensions.BootstrapCapability()
 }
 
 func buildUpdater(updater spec.UpdaterSpec) Updater {
@@ -220,36 +212,6 @@ func buildEntitlements(entitlements spec.EntitlementsSpec) *EntitlementsPolicy {
 		Strip:                       cloneStrings(entitlements.Strip),
 		RequiredBooleanEntitlements: cloneStrings(entitlements.RequiredBoolean),
 	}
-}
-
-func buildComputerUse(policy spec.ComputerUseSpec) *ComputerUsePolicy {
-	signTargets := make([]ComputerUseSignTarget, 0, len(policy.SignTargets))
-	for _, target := range policy.SignTargets {
-		signTargets = append(signTargets, ComputerUseSignTarget{
-			Path:         target.Path,
-			Entitlements: buildEntitlements(target.Entitlements),
-		})
-	}
-	return &ComputerUsePolicy{
-		HostAppPath:           policy.HostAppPath,
-		BundledAppPath:        policy.BundledAppPath,
-		AppPathFromHome:       policy.AppPathFromHome,
-		CacheAppGlobsFromHome: cloneStrings(policy.CacheAppGlobsFromHome),
-		AuthPluginPath:        policy.AuthPluginPath,
-		AuthPluginExecutable:  policy.AuthPluginExecutable,
-		UpstreamTrustedTeamID: policy.UpstreamTrustedTeamID,
-		TeamPatchBinaries:     cloneStrings(policy.TeamPatchBinaries),
-		TeamRequirementPlists: cloneStrings(policy.TeamRequirementPlists),
-		SignTargets:           signTargets,
-	}
-}
-
-func cloneBundledCLITee(tee *spec.BundledCLITeeSpec) *spec.BundledCLITeeSpec {
-	if tee == nil {
-		return nil
-	}
-	cloned := *tee
-	return &cloned
 }
 
 func cloneOperations(operations map[string]spec.OperationSpec) map[string]spec.OperationSpec {

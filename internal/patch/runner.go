@@ -28,12 +28,6 @@ type Runner struct {
 type Action string
 
 const (
-	actionRepairBundledComputerUse     Action = "repair_bundled_computer_use"
-	actionRepairComputerUseAuthPlugin  Action = "repair_computer_use_auth_plugin"
-	actionRepairComputerUseTrustedTeam Action = "repair_computer_use_trusted_team"
-	actionRepairComputerUseRequirement Action = "repair_computer_use_requirement"
-	actionScanComputerUseCache         Action = "scan_computer_use_cache"
-	actionSignComputerUseHelper        Action = "sign_computer_use_helper"
 	actionRestorePreservedNestedCode   Action = "restore_preserved_nested_code"
 	actionSignBundle                   Action = "sign_bundle"
 	actionSignNestedCode               Action = "sign_nested_code"

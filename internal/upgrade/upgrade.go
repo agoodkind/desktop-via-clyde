@@ -21,16 +21,93 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/clock"
+	"goodkind.io/desktop-via-clyde/internal/extensions"
+	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
+
+// BootstrapStrategy recovers an upstream designated requirement when state is missing.
+type BootstrapStrategy func(context.Context, targets.Target) (string, error)
+
+var (
+	bootstrapStrategiesMu sync.RWMutex
+	bootstrapStrategies   = map[string]BootstrapStrategy{}
+)
+
+const (
+	AppUpgradeCapability               = "app.upgrade"
+	CleanMainBinaryBootstrapCapability = "clean-main-binary"
+)
+
+// RegisterOperations links upgrade-owned operation capabilities.
+func RegisterOperations() error {
+	if !catalog.HasOperationCapability(AppUpgradeCapability) {
+		if err := catalog.RegisterOperationCapability(AppUpgradeCapability); err != nil {
+			return err
+		}
+	}
+	return operations.Register(AppUpgradeCapability, Operation)
+}
+
+// RegisterBootstrapStrategies links upgrade bootstrap strategies.
+func RegisterBootstrapStrategies() error {
+	if !catalog.HasBootstrapCapability(CleanMainBinaryBootstrapCapability) {
+		if err := catalog.RegisterBootstrapCapability(CleanMainBinaryBootstrapCapability); err != nil {
+			return err
+		}
+	}
+	return RegisterBootstrapStrategy(CleanMainBinaryBootstrapCapability, bootstrapOriginalDRFromCleanMainBinary)
+}
+
+func RegisterValidators() error {
+	return extensions.RegisterAppValidator("original_dr_bootstrap_capability", extensions.ValidateOriginalDRBootstrapCapability)
+}
+
+// RegisterBootstrapStrategy links one bootstrap capability to its strategy.
+func RegisterBootstrapStrategy(capability string, strategy BootstrapStrategy) error {
+	if !catalog.HasBootstrapCapability(capability) {
+		return fmt.Errorf("bootstrap capability %q is not linked", capability)
+	}
+	if strategy == nil {
+		return fmt.Errorf("bootstrap capability %q strategy is required", capability)
+	}
+	bootstrapStrategiesMu.Lock()
+	defer bootstrapStrategiesMu.Unlock()
+	if _, ok := bootstrapStrategies[capability]; ok {
+		return fmt.Errorf("bootstrap capability %q strategy is already registered", capability)
+	}
+	bootstrapStrategies[capability] = strategy
+	return nil
+}
+
+// RegisteredBootstrapStrategies returns bootstrap capabilities with strategies.
+func RegisteredBootstrapStrategies() []string {
+	bootstrapStrategiesMu.RLock()
+	defer bootstrapStrategiesMu.RUnlock()
+	names := make([]string, 0, len(bootstrapStrategies))
+	for name := range bootstrapStrategies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func lookupBootstrapStrategy(capability string) (BootstrapStrategy, bool) {
+	bootstrapStrategiesMu.RLock()
+	defer bootstrapStrategiesMu.RUnlock()
+	strategy, ok := bootstrapStrategies[capability]
+	return strategy, ok
+}
 
 // Options controls one upgrade invocation.
 type Options struct {
@@ -43,6 +120,22 @@ type Options struct {
 	NoMigrateKeychain bool
 	// Out receives progress output. Defaults to os.Stdout.
 	Out io.Writer
+}
+
+// Operation runs the app upgrade operation for one configured target.
+func Operation(ctx context.Context, req operations.Request) error {
+	if req.App == nil {
+		return fmt.Errorf("%s requires an app target", req.Capability)
+	}
+	if err := Run(ctx, *req.App, Options{
+		Channel:           req.Flags.String("channel"),
+		DryRun:            req.Flags.Bool("dry-run"),
+		NoMigrateKeychain: req.Flags.Bool("no-migrate-keychain"),
+		Out:               req.Out,
+	}); err != nil {
+		return operations.Error(ctx, "operations.upgrade_failed", "upgrade app", err)
+	}
+	return nil
 }
 
 type updateManifest struct {
@@ -405,14 +498,15 @@ func loadOriginalDR(ctx context.Context, t targets.Target, dryRun bool) (string,
 	if !errors.Is(err, patch.ErrMissingStateEntry) {
 		return "", logUpgradeError(ctx, "upgrade.original_dr_load_failed", fmt.Errorf("load original designated requirement: %w", err))
 	}
-	switch t.OriginalDRBootstrapCapability {
-	case "":
+	capability := t.BootstrapCapability()
+	if capability == "" {
 		return "", logUpgradeError(ctx, "upgrade.original_dr_load_failed", fmt.Errorf("load original designated requirement: %w", err))
-	case catalog.OriginalDRBootstrapCleanMainBinary:
-		return bootstrapOriginalDRFromCleanMainBinary(ctx, t)
-	default:
-		return "", logUpgradeError(ctx, "upgrade.original_dr_bootstrap_capability_unknown", fmt.Errorf("unknown original DR bootstrap capability %q", t.OriginalDRBootstrapCapability))
 	}
+	strategy, ok := lookupBootstrapStrategy(capability)
+	if !ok {
+		return "", logUpgradeError(ctx, "upgrade.original_dr_bootstrap_capability_unknown", fmt.Errorf("unknown original DR bootstrap capability %q", capability))
+	}
+	return strategy(ctx, t)
 }
 
 func bootstrapOriginalDRFromCleanMainBinary(ctx context.Context, t targets.Target) (string, error) {

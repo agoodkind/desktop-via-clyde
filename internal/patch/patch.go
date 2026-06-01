@@ -14,10 +14,10 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
-	"goodkind.io/desktop-via-clyde/internal/bundledclitee"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/clock"
 	shimembed "goodkind.io/desktop-via-clyde/internal/embed"
+	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/signing"
 	"goodkind.io/desktop-via-clyde/internal/spec"
@@ -28,6 +28,38 @@ import (
 
 // ErrMissingStateEntry reports that the requested target has no persisted patch state.
 var ErrMissingStateEntry = errors.New("missing target state entry")
+
+const (
+	AppPatchCapability           = "app.patch"
+	AppUnpatchCapability         = "app.unpatch"
+	AppKeychainMigrateCapability = "app.keychain-migrate"
+)
+
+// RegisterOperations links patch-owned operation capabilities.
+func RegisterOperations() error {
+	if !catalog.HasOperationCapability(AppPatchCapability) {
+		if err := catalog.RegisterOperationCapability(AppPatchCapability); err != nil {
+			return err
+		}
+	}
+	if err := operations.Register(AppPatchCapability, PatchOperation); err != nil {
+		return err
+	}
+	if !catalog.HasOperationCapability(AppUnpatchCapability) {
+		if err := catalog.RegisterOperationCapability(AppUnpatchCapability); err != nil {
+			return err
+		}
+	}
+	if err := operations.Register(AppUnpatchCapability, UnpatchOperation); err != nil {
+		return err
+	}
+	if !catalog.HasOperationCapability(AppKeychainMigrateCapability) {
+		if err := catalog.RegisterOperationCapability(AppKeychainMigrateCapability); err != nil {
+			return err
+		}
+	}
+	return operations.Register(AppKeychainMigrateCapability, KeychainMigrateOperation)
+}
 
 // MissingStateEntryError names the missing target when state is absent.
 type MissingStateEntryError struct {
@@ -50,6 +82,54 @@ type Options struct {
 	NoMigrateKeychain bool
 	Out               io.Writer
 	Trace             *Trace
+}
+
+// PatchOperation runs the app patch operation for one configured target.
+func PatchOperation(ctx context.Context, req operations.Request) error {
+	if req.App == nil {
+		return fmt.Errorf("%s requires an app target", req.Capability)
+	}
+	if err := Patch(ctx, *req.App, Options{
+		DryRun:            req.Flags.Bool("dry-run"),
+		NoMigrateKeychain: req.Flags.Bool("no-migrate-keychain"),
+		Out:               req.Out,
+		Trace:             nil,
+	}); err != nil {
+		return operations.Error(ctx, "operations.patch_failed", "patch app", err)
+	}
+	return nil
+}
+
+// UnpatchOperation runs the app unpatch operation for one configured target.
+func UnpatchOperation(ctx context.Context, req operations.Request) error {
+	if req.App == nil {
+		return fmt.Errorf("%s requires an app target", req.Capability)
+	}
+	if err := Unpatch(ctx, *req.App, Options{
+		DryRun:            req.Flags.Bool("dry-run"),
+		NoMigrateKeychain: false,
+		Out:               req.Out,
+		Trace:             nil,
+	}); err != nil {
+		return operations.Error(ctx, "operations.unpatch_failed", "restore app bundle", err)
+	}
+	return nil
+}
+
+// KeychainMigrateOperation runs the keychain repair operation for one target.
+func KeychainMigrateOperation(ctx context.Context, req operations.Request) error {
+	if req.App == nil {
+		return fmt.Errorf("%s requires an app target", req.Capability)
+	}
+	if err := KeychainMigrate(ctx, *req.App, Options{
+		DryRun:            req.Flags.Bool("dry-run"),
+		NoMigrateKeychain: false,
+		Out:               req.Out,
+		Trace:             nil,
+	}); err != nil {
+		return operations.Error(ctx, "operations.keychain_migrate_failed", "restore keychain access", err)
+	}
+	return nil
 }
 
 // Patch performs the full patch flow for one target.
@@ -97,8 +177,8 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 		return err
 	}
 
-	if err := stepPatchComputerUse(ctx, r, t); err != nil {
-		return logPatchError(ctx, "patch.computer_use_failed", fmt.Errorf("patch computer use helper: %w", err))
+	if err := runPostBundleHooks(ctx, r, t, opts); err != nil {
+		return logPatchError(ctx, "patch.post_bundle_hook_failed", fmt.Errorf("run post-bundle hooks: %w", err))
 	}
 
 	switch {
@@ -124,72 +204,13 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 		return logPatchError(ctx, "patch.verify_failed", fmt.Errorf("verify: %w", err))
 	}
 
-	if t.BundledCLITee != nil {
-		if t.BundledCLITee.Capability != catalog.PatchHookBundledCLITee {
-			return fmt.Errorf("unknown bundled CLI tee capability %q", t.BundledCLITee.Capability)
-		}
-		if err := stepInstallBundledCLITee(ctx, r, t, opts); err != nil {
-			return logPatchError(ctx, "patch.install_bundled_cli_tee_failed", fmt.Errorf("install bundled cli tee: %w", err))
+	for _, capability := range t.PostPatchHookCapabilities() {
+		if err := runPostPatchHook(ctx, r, t, opts, capability); err != nil {
+			return logPatchError(ctx, "patch.post_patch_hook_failed", fmt.Errorf("run post-patch hook %q: %w", capability, err))
 		}
 	}
 
 	notef(r, fmt.Sprintf("target=%s patch complete", t.ID))
-	return nil
-}
-
-// stepInstallBundledCLITee wraps a declared bundled CLI with the stdio tee shim.
-func stepInstallBundledCLITee(ctx context.Context, r *Runner, t targets.Target, opts Options) error {
-	teeAppSupportDir := ""
-	teeVersionDir := ""
-	teeBundledCLIRel := ""
-	teeBundledCLIPath := ""
-	var teeTerminateProcessNames []string
-	var teeTerminateProcessPatterns []string
-	var teeCompletionSteps []string
-	if t.BundledCLITee != nil {
-		teeAppSupportDir = t.BundledCLITee.AppSupportDir
-		teeVersionDir = t.BundledCLITee.VersionDir
-		teeBundledCLIRel = t.BundledCLITee.BundledCLIRel
-		teeBundledCLIPath = t.BundledCLITee.BundledCLIPath
-		teeTerminateProcessNames = append([]string(nil), t.BundledCLITee.TerminateProcessNames...)
-		teeTerminateProcessPatterns = append([]string(nil), t.BundledCLITee.TerminateProcessPatterns...)
-		teeCompletionSteps = append([]string(nil), t.BundledCLITee.CompletionSteps...)
-	}
-	teeOpts := bundledclitee.Options{
-		DryRun:                   opts.DryRun,
-		AppSupportDir:            teeAppSupportDir,
-		VersionDir:               teeVersionDir,
-		BundledCLIRel:            teeBundledCLIRel,
-		BundledCLIPath:           teeBundledCLIPath,
-		TerminateProcessNames:    teeTerminateProcessNames,
-		TerminateProcessPatterns: teeTerminateProcessPatterns,
-		CompletionSteps:          teeCompletionSteps,
-		Out:                      opts.Out,
-		Trace:                    nil,
-	}
-	bundled, resolveErr := bundledclitee.ResolvePath(teeOpts)
-	if resolveErr != nil {
-		notef(r, fmt.Sprintf("target=%s bundled CLI not present, skipping tee install (%v)", t.ID, resolveErr))
-		return nil
-	}
-	if _, statErr := os.Stat(bundled); statErr != nil {
-		if !errors.Is(statErr, os.ErrNotExist) {
-			return logPatchError(ctx, "patch.bundled_cli_stat_failed", fmt.Errorf("stat bundled cli %s: %w", bundled, statErr))
-		}
-		notef(r, fmt.Sprintf("target=%s bundled CLI missing at %s, skipping tee install", t.ID, bundled))
-		return nil
-	}
-	if _, realErr := os.Stat(bundled + ".real"); realErr == nil {
-		notef(r, fmt.Sprintf("target=%s bundled CLI already wrapped (.real present), skipping", t.ID))
-		return nil
-	}
-	notef(r, fmt.Sprintf("target=%s install bundled CLI stdio tee at %s", t.ID, bundled))
-	if opts.DryRun {
-		return nil
-	}
-	if err := bundledclitee.Install(ctx, teeOpts); err != nil {
-		return logPatchError(ctx, "patch.bundled_cli_tee_install_failed", fmt.Errorf("install bundled cli tee: %w", err))
-	}
 	return nil
 }
 
@@ -211,8 +232,8 @@ func patchBundleSteps(ctx context.Context, r *Runner, t targets.Target) error {
 	if err := stepInstallShim(ctx, r, t); err != nil {
 		return logPatchError(ctx, "patch.install_shim_failed", fmt.Errorf("install shim: %w", err))
 	}
-	if err := stepPatchBundledComputerUse(ctx, r, t); err != nil {
-		return logPatchError(ctx, "patch.bundled_computer_use_failed", fmt.Errorf("patch bundled computer use helper: %w", err))
+	if err := runPreResignHooks(ctx, r, t, Options{DryRun: r.DryRun, Out: r.Out, Trace: r.Trace}); err != nil {
+		return logPatchError(ctx, "patch.pre_resign_hook_failed", fmt.Errorf("run pre-resign hooks: %w", err))
 	}
 	if err := stepRestorePreservedNestedCode(ctx, r, t); err != nil {
 		return logPatchError(ctx, "patch.restore_preserved_nested_code_failed", fmt.Errorf("restore preserved nested code: %w", err))

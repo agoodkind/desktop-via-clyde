@@ -6,9 +6,17 @@ import (
 	"strings"
 	"testing"
 
+	"goodkind.io/desktop-via-clyde/internal/composition"
 	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/spec"
 )
+
+func TestMain(m *testing.M) {
+	if err := composition.Register(); err != nil {
+		panic(err)
+	}
+	os.Exit(m.Run())
+}
 
 func TestLoadRequiredMissingFile(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -35,13 +43,13 @@ func TestLoadPathLoadsDeclaredConfig(t *testing.T) {
 	}
 
 	claude := cfg.Apps["claude"]
-	if claude.BundledCLITee == nil {
+	if claude.Extensions.BundledCLITee == nil {
 		t.Fatal("fixture missing bundled CLI tee config")
 	}
-	if len(claude.BundledCLITee.TerminateProcessNames) != 1 || claude.BundledCLITee.TerminateProcessNames[0] != "Claude" {
-		t.Fatalf("bundled CLI tee process names = %#v", claude.BundledCLITee.TerminateProcessNames)
+	if len(claude.Extensions.BundledCLITee.TerminateProcessNames) != 1 || claude.Extensions.BundledCLITee.TerminateProcessNames[0] != "Claude" {
+		t.Fatalf("bundled CLI tee process names = %#v", claude.Extensions.BundledCLITee.TerminateProcessNames)
 	}
-	if len(claude.BundledCLITee.CompletionSteps) == 0 {
+	if len(claude.Extensions.BundledCLITee.CompletionSteps) == 0 {
 		t.Fatal("fixture bundled CLI tee completion steps are empty")
 	}
 

@@ -1,4 +1,4 @@
-package patch
+package patch_test
 
 import (
 	"context"
@@ -6,12 +6,20 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
+	"goodkind.io/desktop-via-clyde/internal/bundledclitee"
+	"goodkind.io/desktop-via-clyde/internal/computeruseext"
 	"goodkind.io/desktop-via-clyde/internal/config"
+	patch "goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/targets"
+	"goodkind.io/desktop-via-clyde/internal/testsupport"
 )
+
+var bundleStepsRegisterOnce sync.Once
+var bundleStepsRegisterErr error
 
 func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
 	tg, err := lookupTarget(t, "codex")
@@ -20,8 +28,8 @@ func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
 	}
 	tg.AppPath = filepath.Join(t.TempDir(), "Codex.app")
 
-	trace := &Trace{}
-	if err := Patch(context.Background(), tg, Options{
+	trace := &patch.Trace{}
+	if err := patch.Patch(context.Background(), tg, patch.Options{
 		DryRun:            true,
 		NoMigrateKeychain: true,
 		Out:               io.Discard,
@@ -29,17 +37,17 @@ func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Patch dry-run: %v", err)
 	}
-	bundledHelperPath := filepath.Join(tg.AppPath, filepath.FromSlash(tg.ComputerUse.BundledAppPath))
+	bundledHelperPath := filepath.Join(tg.AppPath, filepath.FromSlash(tg.Extensions.ComputerUse.BundledAppPath))
 	senderPath := filepath.Join(bundledHelperPath, "Contents/MacOS/SkyComputerUseService")
 	requirementPath := filepath.Join(bundledHelperPath, "Contents/SharedSupport/SkyComputerUseClient.app/Contents/Resources/SkyComputerUseClient_Parent.coderequirement")
 
-	requireTraceAction(t, trace, actionRepairBundledComputerUse, bundledHelperPath)
-	requireTraceAction(t, trace, actionRepairComputerUseTrustedTeam, senderPath)
-	requireTraceAction(t, trace, actionRepairComputerUseRequirement, requirementPath)
-	requireTraceAction(t, trace, actionSignComputerUseHelper, bundledHelperPath)
+	requireTraceAction(t, trace, computeruseext.ActionRepairBundledComputerUse, bundledHelperPath)
+	requireTraceAction(t, trace, computeruseext.ActionRepairComputerUseTrustedTeam, senderPath)
+	requireTraceAction(t, trace, computeruseext.ActionRepairComputerUseRequirement, requirementPath)
+	requireTraceAction(t, trace, computeruseext.ActionSignComputerUseHelper, bundledHelperPath)
 
-	helperRepairIdx := traceActionIndex(trace, actionRepairBundledComputerUse, bundledHelperPath)
-	resignIdx := traceActionIndex(trace, actionSignBundle, tg.AppPath)
+	helperRepairIdx := traceActionIndex(trace, computeruseext.ActionRepairBundledComputerUse, bundledHelperPath)
+	resignIdx := traceActionIndex(trace, patch.ActionSignBundle, tg.AppPath)
 	if helperRepairIdx < 0 || resignIdx < 0 {
 		t.Fatalf("expected helper repair and bundle signing in trace: %#v", trace.Events)
 	}
@@ -74,8 +82,8 @@ func TestPatchDryRunScansComputerUseCacheHelpers(t *testing.T) {
 		t.Fatalf("Lookup(codex): %v", err)
 	}
 
-	trace := &Trace{}
-	if err := Patch(context.Background(), tg, Options{
+	trace := &patch.Trace{}
+	if err := patch.Patch(context.Background(), tg, patch.Options{
 		DryRun:            true,
 		NoMigrateKeychain: true,
 		Out:               io.Discard,
@@ -84,8 +92,8 @@ func TestPatchDryRunScansComputerUseCacheHelpers(t *testing.T) {
 		t.Fatalf("Patch dry-run: %v", err)
 	}
 
-	pattern := filepath.Join(paths.Home(), filepath.FromSlash(tg.ComputerUse.CacheAppGlobsFromHome[0]))
-	requireTraceAction(t, trace, actionScanComputerUseCache, pattern)
+	pattern := filepath.Join(paths.Home(), filepath.FromSlash(tg.Extensions.ComputerUse.CacheAppGlobsFromHome[0]))
+	requireTraceAction(t, trace, computeruseext.ActionScanComputerUseCache, pattern)
 }
 
 func TestPatchDryRunRepairsComputerUseAuthPlugin(t *testing.T) {
@@ -94,8 +102,8 @@ func TestPatchDryRunRepairsComputerUseAuthPlugin(t *testing.T) {
 		t.Fatalf("Lookup(codex): %v", err)
 	}
 
-	trace := &Trace{}
-	if err := Patch(context.Background(), tg, Options{
+	trace := &patch.Trace{}
+	if err := patch.Patch(context.Background(), tg, patch.Options{
 		DryRun:            true,
 		NoMigrateKeychain: true,
 		Out:               io.Discard,
@@ -104,11 +112,11 @@ func TestPatchDryRunRepairsComputerUseAuthPlugin(t *testing.T) {
 		t.Fatalf("Patch dry-run: %v", err)
 	}
 
-	pluginPath := tg.ComputerUse.AuthPluginPath
+	pluginPath := tg.Extensions.ComputerUse.AuthPluginPath
 	stagingPath := filepath.Join(os.TempDir(), "desktop-via-clyde-auth-plugin", filepath.Base(pluginPath))
-	executablePath := filepath.Join(pluginPath, filepath.FromSlash(tg.ComputerUse.AuthPluginExecutable))
-	requireTraceAction(t, trace, actionRepairComputerUseAuthPlugin, pluginPath)
-	requireTraceAction(t, trace, actionRepairComputerUseTrustedTeam, executablePath)
+	executablePath := filepath.Join(pluginPath, filepath.FromSlash(tg.Extensions.ComputerUse.AuthPluginExecutable))
+	requireTraceAction(t, trace, computeruseext.ActionRepairComputerUseAuthPlugin, pluginPath)
+	requireTraceAction(t, trace, computeruseext.ActionRepairComputerUseTrustedTeam, executablePath)
 	requireTraceCommand(t, trace, "/usr/bin/sudo", []string{"/usr/bin/rsync", "-rltp", "--delete", stagingPath + "/", pluginPath + "/"})
 }
 
@@ -118,8 +126,8 @@ func TestClaudePatchRestoresSquirrelInsteadOfResigningIt(t *testing.T) {
 		t.Fatalf("Lookup(claude): %v", err)
 	}
 
-	trace := &Trace{}
-	if err := Patch(context.Background(), tg, Options{
+	trace := &patch.Trace{}
+	if err := patch.Patch(context.Background(), tg, patch.Options{
 		DryRun:            true,
 		NoMigrateKeychain: true,
 		Out:               io.Discard,
@@ -129,8 +137,8 @@ func TestClaudePatchRestoresSquirrelInsteadOfResigningIt(t *testing.T) {
 	}
 
 	restorePath := filepath.Join(tg.AppPath, "Contents", "Frameworks", "Squirrel.framework")
-	requireTraceAction(t, trace, actionRestorePreservedNestedCode, restorePath)
-	if traceActionIndex(trace, actionSignNestedCode, restorePath) >= 0 {
+	requireTraceAction(t, trace, patch.ActionRestorePreservedNestedCode, restorePath)
+	if traceActionIndex(trace, patch.ActionSignNestedCode, restorePath) >= 0 {
 		t.Fatalf("Patch dry-run trace re-signs preserved nested code: %#v", trace.Events)
 	}
 }
@@ -144,14 +152,14 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func requireTraceAction(t *testing.T, trace *Trace, action Action, path string) {
+func requireTraceAction(t *testing.T, trace *patch.Trace, action patch.Action, path string) {
 	t.Helper()
 	if traceActionIndex(trace, action, path) < 0 {
 		t.Fatalf("trace missing action=%s path=%s events=%#v", action, path, trace.Events)
 	}
 }
 
-func traceActionIndex(trace *Trace, action Action, path string) int {
+func traceActionIndex(trace *patch.Trace, action patch.Action, path string) int {
 	for i, event := range trace.Events {
 		if event.Action == action && event.Path == path {
 			return i
@@ -160,10 +168,10 @@ func traceActionIndex(trace *Trace, action Action, path string) int {
 	return -1
 }
 
-func requireTraceCommand(t *testing.T, trace *Trace, command string, args []string) {
+func requireTraceCommand(t *testing.T, trace *patch.Trace, command string, args []string) {
 	t.Helper()
 	for _, event := range trace.Events {
-		if event.Action != actionRunCommand || event.Command != command {
+		if event.Action != "run_command" || event.Command != command {
 			continue
 		}
 		if equalStrings(event.Args, args) {
@@ -198,6 +206,20 @@ func lookupTarget(t *testing.T, id string) (targets.Target, error) {
 
 func installFixture(t *testing.T) {
 	t.Helper()
+	bundleStepsRegisterOnce.Do(func() {
+		if err := testsupport.RegisterFixtureCapabilities(); err != nil {
+			bundleStepsRegisterErr = err
+			return
+		}
+		if err := computeruseext.RegisterLifecycleHooks(); err != nil {
+			bundleStepsRegisterErr = err
+			return
+		}
+		bundleStepsRegisterErr = bundledclitee.RegisterPatchHooks()
+	})
+	if bundleStepsRegisterErr != nil {
+		t.Fatalf("register fixture hooks: %v", bundleStepsRegisterErr)
+	}
 	cfg, err := config.LoadPath(filepath.Join("..", "testconfig", "testdata", "current-config.toml"))
 	if err != nil {
 		t.Fatalf("LoadPath(current-config.toml): %v", err)

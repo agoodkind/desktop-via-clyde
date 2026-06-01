@@ -7,6 +7,7 @@ import (
 
 	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/spec"
+	"goodkind.io/desktop-via-clyde/internal/testsupport"
 )
 
 func TestAllHasThreeTargets(t *testing.T) {
@@ -184,15 +185,15 @@ func TestComputerUsePolicyPerTarget(t *testing.T) {
 	installFixture(t)
 	for _, tg := range All() {
 		if tg.ID != "codex" {
-			if tg.ComputerUse != nil {
+			if tg.Extensions.ComputerUse != nil {
 				t.Errorf("target %s must not declare a Computer Use policy", tg.ID)
 			}
 			continue
 		}
-		if tg.ComputerUse == nil {
+		if tg.Extensions.ComputerUse == nil {
 			t.Fatal("codex must declare a Computer Use policy")
 		}
-		policy := tg.ComputerUse
+		policy := tg.Extensions.ComputerUse
 		if policy.HostAppPath != "/Applications/Codex.app" {
 			t.Errorf("Codex Computer Use host app path mismatch: got %q", policy.HostAppPath)
 		}
@@ -255,15 +256,15 @@ func TestCodexComputerUseTeamRequirementPlists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lookup(%q) returned error: %v", "codex", err)
 	}
-	if tg.ComputerUse == nil {
+	if tg.Extensions.ComputerUse == nil {
 		t.Fatal("codex must declare a Computer Use policy")
 	}
 	want := []string{
 		"Contents/SharedSupport/SkyComputerUseClient.app/Contents/Resources/SkyComputerUseClient_Parent.coderequirement",
 		"Contents/SharedSupport/CUALockScreenGuardian.app/Contents/Resources/CUALockScreenGuardian_Parent.coderequirement",
 	}
-	if !stringSlicesEqual(tg.ComputerUse.TeamRequirementPlists, want) {
-		t.Errorf("Codex Computer Use requirement plists mismatch: got %v want %v", tg.ComputerUse.TeamRequirementPlists, want)
+	if !stringSlicesEqual(tg.Extensions.ComputerUse.TeamRequirementPlists, want) {
+		t.Errorf("Codex Computer Use requirement plists mismatch: got %v want %v", tg.Extensions.ComputerUse.TeamRequirementPlists, want)
 	}
 }
 
@@ -347,6 +348,9 @@ func lookupTarget(id string) (Target, error) {
 
 func installFixture(t *testing.T) {
 	t.Helper()
+	if err := testsupport.RegisterFixtureCapabilities(); err != nil {
+		t.Fatalf("RegisterFixtureCapabilities(): %v", err)
+	}
 	cfg, err := config.LoadPath(filepath.Join("..", "testconfig", "testdata", "current-config.toml"))
 	if err != nil {
 		t.Fatalf("LoadPath(current-config.toml): %v", err)

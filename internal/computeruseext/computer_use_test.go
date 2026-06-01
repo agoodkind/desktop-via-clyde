@@ -1,15 +1,12 @@
-package patch
+package computeruseext
 
 import (
 	"bytes"
 	"testing"
-
-	"goodkind.io/desktop-via-clyde/internal/paths"
 )
 
 func TestTeamIDFromSignIdentity(t *testing.T) {
-	installFixture(t)
-	got, err := teamIDFromSignIdentity(paths.SignIdentity())
+	got, err := teamIDFromSignIdentity("Developer ID Application: Alex Goodkind (H3BMXM4W7H)")
 	if err != nil {
 		t.Fatalf("teamIDFromSignIdentity: %v", err)
 	}

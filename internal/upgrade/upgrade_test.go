@@ -14,16 +14,28 @@ import (
 	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/config"
+	"goodkind.io/desktop-via-clyde/internal/extensions"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
+	"goodkind.io/desktop-via-clyde/internal/testsupport"
 )
 
 const (
 	anthropicRequirement = `identifier "com.anthropic.claudefordesktop" and anchor apple generic and certificate leaf[subject.OU] = Q6L2SF6YDW`
 	goodkindRequirement  = `identifier "com.anthropic.claudefordesktop" and anchor apple generic and certificate leaf[subject.OU] = H3BMXM4W7H`
 )
+
+func TestMain(m *testing.M) {
+	if err := testsupport.RegisterFixtureCapabilities(); err != nil {
+		panic(err)
+	}
+	if err := RegisterBootstrapStrategies(); err != nil {
+		panic(err)
+	}
+	os.Exit(m.Run())
+}
 
 func TestParseHTTPPathJSONManifest(t *testing.T) {
 	body := []byte(`{"url":"https://downloads.cursor.com/production/abc/darwin/arm64/Cursor-darwin-arm64.zip","name":"3.5.30"}`)
@@ -273,10 +285,12 @@ func testClaudeTarget(t *testing.T) targets.Target {
 		t.Fatalf("MkdirAll MacOS: %v", err)
 	}
 	tg := targets.Target{
-		ID:                            "claude",
-		AppPath:                       appPath,
-		ExecName:                      "Claude",
-		OriginalDRBootstrapCapability: "clean-main-binary",
+		ID:       "claude",
+		AppPath:  appPath,
+		ExecName: "Claude",
+		Extensions: extensions.Target{
+			OriginalDRBootstrapCapability: "clean-main-binary",
+		},
 	}
 	if err := os.WriteFile(paths.MainBinaryPath(tg), []byte("clean"), 0o755); err != nil {
 		t.Fatalf("WriteFile main binary: %v", err)
@@ -395,6 +409,9 @@ func TestExtractZipFindsTargetAppRootInTempDir(t *testing.T) {
 
 func installFixture(t *testing.T) {
 	t.Helper()
+	if err := testsupport.RegisterFixtureCapabilities(); err != nil {
+		t.Fatalf("RegisterFixtureCapabilities(): %v", err)
+	}
 	cfg, err := config.LoadPath(filepath.Join("..", "testconfig", "testdata", "current-config.toml"))
 	if err != nil {
 		t.Fatalf("LoadPath(current-config.toml): %v", err)

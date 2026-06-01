@@ -11,10 +11,32 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 
 	"goodkind.io/desktop-via-clyde/internal/catalog"
+	"goodkind.io/desktop-via-clyde/internal/extensions"
 	"goodkind.io/desktop-via-clyde/internal/spec"
 )
 
 var configLog = slog.With("component", "desktop-via-clyde", "subcomponent", "config")
+
+type decodedConfig struct {
+	Signing spec.SigningSpec          `toml:"signing"`
+	Apps    map[string]decodedAppSpec `toml:"apps"`
+	CLIs    map[string]spec.CLISpec   `toml:"clis"`
+}
+
+type decodedAppSpec struct {
+	Command                  spec.CommandSpec              `toml:"command"`
+	Operations               map[string]spec.OperationSpec `toml:"operations"`
+	AppPath                  string                        `toml:"app_path"`
+	BundleID                 string                        `toml:"bundle_id"`
+	ExecName                 string                        `toml:"exec_name"`
+	KeychainServices         []string                      `toml:"keychain_services"`
+	NestedSignPaths          []string                      `toml:"nested_sign_paths"`
+	PreservedNestedCodePaths []string                      `toml:"preserved_nested_code_paths"`
+	Entitlements             spec.EntitlementsSpec         `toml:"entitlements"`
+	Updater                  spec.UpdaterSpec              `toml:"updater"`
+	LaunchPolicy             spec.LaunchPolicySpec         `toml:"launch_policy"`
+	extensions.DecodedAppSpec
+}
 
 // LoadPath reads and validates a config file at an explicit path.
 func LoadPath(path string) (*spec.Config, error) {
@@ -24,16 +46,46 @@ func LoadPath(path string) (*spec.Config, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	var cfg spec.Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	var decoded decodedConfig
+	if err := toml.Unmarshal(data, &decoded); err != nil {
 		configLog.Error("config.load.parse_failed", "path", path, "err", err)
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	cfg := convertDecodedConfig(decoded)
 	if err := normalizeAndValidate(&cfg); err != nil {
 		configLog.Error("config.load.validate_failed", "path", path, "err", err)
 		return nil, fmt.Errorf("invalid %s: %w", path, err)
 	}
 	return cfg.Clone(), nil
+}
+
+func convertDecodedConfig(decoded decodedConfig) spec.Config {
+	cfg := spec.Config{
+		Signing: decoded.Signing,
+		Apps:    make(map[string]spec.AppSpec, len(decoded.Apps)),
+		CLIs:    make(map[string]spec.CLISpec, len(decoded.CLIs)),
+	}
+	for id, app := range decoded.Apps {
+		cfg.Apps[id] = spec.AppSpec{
+			ID:                       id,
+			Command:                  app.Command,
+			Operations:               app.Operations,
+			AppPath:                  app.AppPath,
+			BundleID:                 app.BundleID,
+			ExecName:                 app.ExecName,
+			KeychainServices:         app.KeychainServices,
+			NestedSignPaths:          app.NestedSignPaths,
+			PreservedNestedCodePaths: app.PreservedNestedCodePaths,
+			Entitlements:             app.Entitlements,
+			Updater:                  app.Updater,
+			LaunchPolicy:             app.LaunchPolicy,
+			Extensions:               app.DecodedAppSpec.ToAppSpec(),
+		}
+	}
+	for id, cli := range decoded.CLIs {
+		cfg.CLIs[id] = cli
+	}
+	return cfg
 }
 
 func normalizeAndValidate(cfg *spec.Config) error {
@@ -100,7 +152,6 @@ func normalizeAndValidateApp(id string, app *spec.AppSpec) error {
 	app.PreservedNestedCodePaths = normalizeStringSlice(app.PreservedNestedCodePaths)
 	app.Entitlements.Strip = normalizeStringSlice(app.Entitlements.Strip)
 	app.Entitlements.RequiredBoolean = normalizeStringSlice(app.Entitlements.RequiredBoolean)
-	app.OriginalDRBootstrapCapability = strings.TrimSpace(app.OriginalDRBootstrapCapability)
 
 	if app.AppPath == "" {
 		return fmt.Errorf("apps.%s.app_path is required", app.ID)
@@ -114,18 +165,9 @@ func normalizeAndValidateApp(id string, app *spec.AppSpec) error {
 	if err := normalizeAndValidateUpdater("apps."+app.ID+".updater", &app.Updater); err != nil {
 		return err
 	}
-	if app.OriginalDRBootstrapCapability != "" && !catalog.HasBootstrapCapability(app.OriginalDRBootstrapCapability) {
-		return fmt.Errorf("apps.%s.original_dr_bootstrap_capability %q is unknown", app.ID, app.OriginalDRBootstrapCapability)
-	}
-	if app.ComputerUse != nil {
-		if err := normalizeAndValidateComputerUse("apps."+app.ID+".computer_use", app.ComputerUse); err != nil {
-			return err
-		}
-	}
-	if app.BundledCLITee != nil {
-		if err := normalizeAndValidateBundledCLITee("apps."+app.ID+".bundled_cli_tee", app.BundledCLITee); err != nil {
-			return err
-		}
+	extensions.NormalizeAppSpec(&app.Extensions, cleanExpandedPath, renderPathTokens, normalizeStringSlice)
+	if err := extensions.ValidateApp("apps."+app.ID, &app.Extensions); err != nil {
+		return err
 	}
 	if err := normalizeAndValidateLaunchPolicy("apps."+app.ID+".launch_policy", &app.LaunchPolicy); err != nil {
 		return err
@@ -282,90 +324,6 @@ func normalizeAndValidateUpdater(path string, updater *spec.UpdaterSpec) error {
 
 	if updater.DefaultChannel != "" && !seen[updater.DefaultChannel] {
 		return fmt.Errorf("%s.default_channel %q is not declared in channels", path, updater.DefaultChannel)
-	}
-	return nil
-}
-
-func normalizeAndValidateComputerUse(path string, policy *spec.ComputerUseSpec) error {
-	policy.HostAppPath = cleanExpandedPath(strings.TrimSpace(policy.HostAppPath))
-	policy.BundledAppPath = strings.TrimSpace(policy.BundledAppPath)
-	policy.AppPathFromHome = strings.TrimSpace(policy.AppPathFromHome)
-	policy.CacheAppGlobsFromHome = normalizeStringSlice(policy.CacheAppGlobsFromHome)
-	policy.AuthPluginPath = cleanExpandedPath(strings.TrimSpace(policy.AuthPluginPath))
-	policy.AuthPluginExecutable = strings.TrimSpace(policy.AuthPluginExecutable)
-	policy.UpstreamTrustedTeamID = strings.TrimSpace(policy.UpstreamTrustedTeamID)
-	policy.TeamPatchBinaries = normalizeStringSlice(policy.TeamPatchBinaries)
-	policy.TeamRequirementPlists = normalizeStringSlice(policy.TeamRequirementPlists)
-
-	if policy.HostAppPath == "" {
-		return fmt.Errorf("%s.host_app_path is required", path)
-	}
-	if policy.BundledAppPath == "" {
-		return fmt.Errorf("%s.bundled_app_path is required", path)
-	}
-	if policy.AppPathFromHome == "" {
-		return fmt.Errorf("%s.app_path_from_home is required", path)
-	}
-	if policy.AuthPluginPath == "" {
-		return fmt.Errorf("%s.auth_plugin_path is required", path)
-	}
-	if !filepath.IsAbs(policy.AuthPluginPath) {
-		return fmt.Errorf("%s.auth_plugin_path must be an absolute path", path)
-	}
-	if policy.AuthPluginExecutable == "" {
-		return fmt.Errorf("%s.auth_plugin_executable is required", path)
-	}
-	if policy.UpstreamTrustedTeamID == "" {
-		return fmt.Errorf("%s.upstream_trusted_team_id is required", path)
-	}
-	normalizedTargets := make([]spec.ComputerUseSignTarget, 0, len(policy.SignTargets))
-	for index, target := range policy.SignTargets {
-		target.Path = strings.TrimSpace(target.Path)
-		target.Entitlements.Strip = normalizeStringSlice(target.Entitlements.Strip)
-		target.Entitlements.RequiredBoolean = normalizeStringSlice(target.Entitlements.RequiredBoolean)
-		if target.Path == "" {
-			return fmt.Errorf("%s.sign_targets[%d].path is required", path, index)
-		}
-		normalizedTargets = append(normalizedTargets, target)
-	}
-	policy.SignTargets = normalizedTargets
-	return nil
-}
-
-func normalizeAndValidateBundledCLITee(path string, tee *spec.BundledCLITeeSpec) error {
-	tee.Capability = strings.TrimSpace(tee.Capability)
-	tee.AppSupportDir = cleanExpandedPath(renderPathTokens(strings.TrimSpace(tee.AppSupportDir)))
-	tee.VersionDir = strings.TrimSpace(tee.VersionDir)
-	tee.BundledCLIRel = strings.TrimSpace(tee.BundledCLIRel)
-	tee.BundledCLIPath = cleanExpandedPath(renderPathTokens(strings.TrimSpace(tee.BundledCLIPath)))
-	tee.TerminateProcessNames = normalizeStringSlice(tee.TerminateProcessNames)
-	tee.TerminateProcessPatterns = normalizeStringSlice(tee.TerminateProcessPatterns)
-	tee.CompletionSteps = normalizeStringSlice(tee.CompletionSteps)
-
-	if tee.Capability == "" {
-		return fmt.Errorf("%s.capability is required", path)
-	}
-	if !catalog.HasPatchHookCapability(tee.Capability) {
-		return fmt.Errorf("%s.capability %q is unknown", path, tee.Capability)
-	}
-	if err := validateBundledCLITeePaths(path, tee); err != nil {
-		return err
-	}
-	return nil
-}
-
-func validateBundledCLITeePaths(path string, tee *spec.BundledCLITeeSpec) error {
-	if tee.BundledCLIPath == "" && tee.AppSupportDir == "" {
-		return fmt.Errorf("%s.app_support_dir is required when bundled_cli_path is empty", path)
-	}
-	if tee.BundledCLIPath == "" && tee.BundledCLIRel == "" {
-		return fmt.Errorf("%s.bundled_cli_rel is required when bundled_cli_path is empty", path)
-	}
-	if tee.AppSupportDir != "" && !filepath.IsAbs(tee.AppSupportDir) {
-		return fmt.Errorf("%s.app_support_dir must be an absolute path", path)
-	}
-	if tee.BundledCLIPath != "" && !filepath.IsAbs(tee.BundledCLIPath) {
-		return fmt.Errorf("%s.bundled_cli_path must be an absolute path", path)
 	}
 	return nil
 }
