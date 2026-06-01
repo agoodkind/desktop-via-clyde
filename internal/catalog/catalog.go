@@ -8,10 +8,11 @@ import (
 )
 
 var (
-	capabilitiesMu        sync.RWMutex
-	operationCapabilities = map[string]struct{}{}
-	bootstrapCapabilities = map[string]struct{}{}
-	patchHookCapabilities = map[string]struct{}{}
+	capabilitiesMu                  sync.RWMutex
+	operationCapabilities           = map[string]struct{}{}
+	bootstrapCapabilities           = map[string]struct{}{}
+	patchHookCapabilities           = map[string]struct{}{}
+	preLaunchPolicyHookCapabilities = map[string]struct{}{}
 )
 
 // RegisterOperationCapability records one linked operation capability.
@@ -27,6 +28,11 @@ func RegisterBootstrapCapability(name string) error {
 // RegisterPatchHookCapability records one linked patch hook capability.
 func RegisterPatchHookCapability(name string) error {
 	return registerCapability("patch hook", name, patchHookCapabilities)
+}
+
+// RegisterPreLaunchPolicyHookCapability records one linked pre-launch-policy hook capability.
+func RegisterPreLaunchPolicyHookCapability(name string) error {
+	return registerCapability("pre-launch-policy hook", name, preLaunchPolicyHookCapabilities)
 }
 
 // HasOperationCapability reports whether the operation capability is linked
@@ -56,6 +62,15 @@ func HasPatchHookCapability(name string) bool {
 	return ok
 }
 
+// HasPreLaunchPolicyHookCapability reports whether the pre-launch-policy hook capability is linked
+// into this binary.
+func HasPreLaunchPolicyHookCapability(name string) bool {
+	capabilitiesMu.RLock()
+	defer capabilitiesMu.RUnlock()
+	_, ok := preLaunchPolicyHookCapabilities[name]
+	return ok
+}
+
 // OperationCapabilities returns linked operation capabilities in stable order.
 func OperationCapabilities() []string {
 	return capabilityNames(operationCapabilities)
@@ -69,6 +84,11 @@ func BootstrapCapabilities() []string {
 // PatchHookCapabilities returns linked patch hook capabilities in stable order.
 func PatchHookCapabilities() []string {
 	return capabilityNames(patchHookCapabilities)
+}
+
+// PreLaunchPolicyHookCapabilities returns linked pre-launch-policy hook capabilities in stable order.
+func PreLaunchPolicyHookCapabilities() []string {
+	return capabilityNames(preLaunchPolicyHookCapabilities)
 }
 
 func registerCapability(kind string, name string, capabilities map[string]struct{}) error {

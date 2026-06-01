@@ -3,60 +3,77 @@ package composition
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"goodkind.io/desktop-via-clyde/internal/bundledclitee"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/codexcli"
+	"goodkind.io/desktop-via-clyde/internal/codexclishim"
 	"goodkind.io/desktop-via-clyde/internal/computeruseext"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/patch"
+	"goodkind.io/desktop-via-clyde/internal/stdioteeshim"
 	"goodkind.io/desktop-via-clyde/internal/upgrade"
 )
 
+var compositionLog = slog.With("component", "desktop-via-clyde", "subcomponent", "composition")
+
 var (
 	registerOnce sync.Once
-	registerErr  error
+	errRegister  error
 )
 
 // Register links every extension and core capability compiled into this binary.
 func Register() error {
 	registerOnce.Do(func() {
-		registerErr = register()
+		errRegister = register()
 	})
-	return registerErr
+	return errRegister
 }
 
 func register() error {
+	if err := stdioteeshim.RegisterHelper(); err != nil {
+		return logCompositionRegistrationError("register stdio tee helper", err)
+	}
+	if err := codexclishim.RegisterHelper(); err != nil {
+		return logCompositionRegistrationError("register Codex CLI helper", err)
+	}
 	if err := computeruseext.RegisterValidators(); err != nil {
-		return err
+		return logCompositionRegistrationError("register computer use validators", err)
+	}
+	if err := codexclishim.RegisterValidators(); err != nil {
+		return logCompositionRegistrationError("register Codex CLI shim validators", err)
 	}
 	if err := bundledclitee.RegisterValidators(); err != nil {
-		return err
+		return logCompositionRegistrationError("register bundled CLI tee validators", err)
 	}
 	if err := upgrade.RegisterValidators(); err != nil {
-		return err
+		return logCompositionRegistrationError("register upgrade validators", err)
 	}
 	if err := operations.RegisterCoreHandlers(); err != nil {
-		return err
+		return logCompositionRegistrationError("register core operation handlers", err)
 	}
 	if err := patch.RegisterOperations(); err != nil {
-		return err
+		return logCompositionRegistrationError("register patch operations", err)
 	}
 	if err := computeruseext.RegisterLifecycleHooks(); err != nil {
-		return err
+		return logCompositionRegistrationError("register computer use lifecycle hooks", err)
+	}
+	if err := codexclishim.RegisterPreLaunchPolicyHooks(); err != nil {
+		return logCompositionRegistrationError("register Codex CLI pre-launch-policy hooks", err)
 	}
 	if err := upgrade.RegisterOperations(); err != nil {
-		return err
+		return logCompositionRegistrationError("register upgrade operations", err)
 	}
 	if err := upgrade.RegisterBootstrapStrategies(); err != nil {
-		return err
+		return logCompositionRegistrationError("register upgrade bootstrap strategies", err)
 	}
 	if err := codexcli.RegisterOperations(); err != nil {
-		return err
+		return logCompositionRegistrationError("register Codex CLI operations", err)
 	}
 	if err := bundledclitee.RegisterPatchHooks(); err != nil {
-		return err
+		return logCompositionRegistrationError("register bundled CLI tee patch hooks", err)
 	}
 	return validateLinkedCapabilities()
 }
@@ -92,5 +109,19 @@ func validateLinkedCapabilities() error {
 			return fmt.Errorf("patch hook capability %q has no pre-unpatch hook", capability)
 		}
 	}
+	registeredPreLaunchPolicy := map[string]bool{}
+	for _, capability := range patch.RegisteredPreLaunchPolicyHooks() {
+		registeredPreLaunchPolicy[capability] = true
+	}
+	for _, capability := range catalog.PreLaunchPolicyHookCapabilities() {
+		if !registeredPreLaunchPolicy[capability] {
+			return fmt.Errorf("pre-launch-policy hook capability %q has no hook", capability)
+		}
+	}
 	return nil
+}
+
+func logCompositionRegistrationError(message string, err error) error {
+	compositionLog.Error("composition.registration_failed", "message", message, "err", err)
+	return fmt.Errorf("%s: %w", message, err)
 }

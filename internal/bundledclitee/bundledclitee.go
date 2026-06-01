@@ -18,23 +18,31 @@ import (
 
 var bundledCLITeeLog = slog.With("component", "desktop-via-clyde", "subcomponent", "bundled-cli-tee")
 
+// HookCapability is the config capability name for bundled CLI tee hooks.
 const HookCapability = "bundled-cli-tee"
 
 // RegisterPatchHooks links bundled CLI tee lifecycle hooks.
 func RegisterPatchHooks() error {
 	if !catalog.HasPatchHookCapability(HookCapability) {
 		if err := catalog.RegisterPatchHookCapability(HookCapability); err != nil {
-			return err
+			return logBundledCLITeeRegistrationError("register bundled CLI tee capability", err)
 		}
 	}
 	if err := patch.RegisterPostPatchHook(HookCapability, PostPatchHook); err != nil {
-		return err
+		return logBundledCLITeeRegistrationError("register bundled CLI tee post-patch hook", err)
 	}
-	return patch.RegisterPreUnpatchHook(HookCapability, PreUnpatchHook)
+	if err := patch.RegisterPreUnpatchHook(HookCapability, PreUnpatchHook); err != nil {
+		return logBundledCLITeeRegistrationError("register bundled CLI tee pre-unpatch hook", err)
+	}
+	return nil
 }
 
+// RegisterValidators links bundled CLI tee config validation.
 func RegisterValidators() error {
-	return extensions.RegisterAppValidator("bundled_cli_tee", extensions.ValidateBundledCLITee)
+	if err := extensions.RegisterAppValidator("bundled_cli_tee", extensions.ValidateBundledCLITee); err != nil {
+		return logBundledCLITeeRegistrationError("register bundled CLI tee validator", err)
+	}
+	return nil
 }
 
 // Options carries one bundled CLI tee hook invocation.
@@ -92,6 +100,7 @@ func PostPatchHook(ctx context.Context, runner *patch.Runner, target targets.Tar
 	}
 	if _, statErr := os.Stat(bundled); statErr != nil {
 		if !errors.Is(statErr, os.ErrNotExist) {
+			bundledCLITeeLog.ErrorContext(ctx, "bundledclitee.post_patch_stat_failed", "path", bundled, "err", statErr)
 			return fmt.Errorf("stat bundled cli %s: %w", bundled, statErr)
 		}
 		fmt.Fprintf(runner.Out, "bundled CLI missing at %s, skipping tee install\n", bundled)
@@ -105,7 +114,10 @@ func PostPatchHook(ctx context.Context, runner *patch.Runner, target targets.Tar
 	if opts.DryRun {
 		return nil
 	}
-	return Install(ctx, teeOpts)
+	if err := Install(ctx, teeOpts); err != nil {
+		return err
+	}
+	return nil
 }
 
 // PreUnpatchHook removes the tee wrapper before the shared unpatch flow runs.
@@ -121,6 +133,7 @@ func PreUnpatchHook(ctx context.Context, runner *patch.Runner, target targets.Ta
 	}
 	if _, statErr := os.Stat(bundled + ".real"); statErr != nil {
 		if !errors.Is(statErr, os.ErrNotExist) {
+			bundledCLITeeLog.ErrorContext(ctx, "bundledclitee.pre_unpatch_stat_real_failed", "path", bundled+".real", "err", statErr)
 			return fmt.Errorf("stat bundled cli real sibling %s.real: %w", bundled, statErr)
 		}
 		fmt.Fprintf(runner.Out, "no .real sibling at %s.real, nothing to uninstall\n", bundled)
@@ -130,7 +143,15 @@ func PreUnpatchHook(ctx context.Context, runner *patch.Runner, target targets.Ta
 	if opts.DryRun {
 		return nil
 	}
-	return Uninstall(ctx, teeOpts)
+	if err := Uninstall(ctx, teeOpts); err != nil {
+		return err
+	}
+	return nil
+}
+
+func logBundledCLITeeRegistrationError(message string, err error) error {
+	bundledCLITeeLog.Error("bundledclitee.registration_failed", "message", message, "err", err)
+	return fmt.Errorf("%s: %w", message, err)
 }
 
 func toClaudeOptions(opts Options) claudetee.Options {

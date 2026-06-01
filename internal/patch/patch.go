@@ -30,8 +30,11 @@ import (
 var ErrMissingStateEntry = errors.New("missing target state entry")
 
 const (
-	AppPatchCapability           = "app.patch"
-	AppUnpatchCapability         = "app.unpatch"
+	// AppPatchCapability is the operation capability for app patching.
+	AppPatchCapability = "app.patch"
+	// AppUnpatchCapability is the operation capability for app unpatching.
+	AppUnpatchCapability = "app.unpatch"
+	// AppKeychainMigrateCapability is the operation capability for keychain migration.
 	AppKeychainMigrateCapability = "app.keychain-migrate"
 )
 
@@ -39,26 +42,29 @@ const (
 func RegisterOperations() error {
 	if !catalog.HasOperationCapability(AppPatchCapability) {
 		if err := catalog.RegisterOperationCapability(AppPatchCapability); err != nil {
-			return err
+			return logPatchRegistrationError("register patch capability", err)
 		}
 	}
-	if err := operations.Register(AppPatchCapability, PatchOperation); err != nil {
-		return err
+	if err := operations.Register(AppPatchCapability, Operation); err != nil {
+		return logPatchRegistrationError("register patch operation", err)
 	}
 	if !catalog.HasOperationCapability(AppUnpatchCapability) {
 		if err := catalog.RegisterOperationCapability(AppUnpatchCapability); err != nil {
-			return err
+			return logPatchRegistrationError("register unpatch capability", err)
 		}
 	}
 	if err := operations.Register(AppUnpatchCapability, UnpatchOperation); err != nil {
-		return err
+		return logPatchRegistrationError("register unpatch operation", err)
 	}
 	if !catalog.HasOperationCapability(AppKeychainMigrateCapability) {
 		if err := catalog.RegisterOperationCapability(AppKeychainMigrateCapability); err != nil {
-			return err
+			return logPatchRegistrationError("register keychain migrate capability", err)
 		}
 	}
-	return operations.Register(AppKeychainMigrateCapability, KeychainMigrateOperation)
+	if err := operations.Register(AppKeychainMigrateCapability, KeychainMigrateOperation); err != nil {
+		return logPatchRegistrationError("register keychain migrate operation", err)
+	}
+	return nil
 }
 
 // MissingStateEntryError names the missing target when state is absent.
@@ -84,8 +90,8 @@ type Options struct {
 	Trace             *Trace
 }
 
-// PatchOperation runs the app patch operation for one configured target.
-func PatchOperation(ctx context.Context, req operations.Request) error {
+// Operation runs the app patch operation for one configured target.
+func Operation(ctx context.Context, req operations.Request) error {
 	if req.App == nil {
 		return fmt.Errorf("%s requires an app target", req.Capability)
 	}
@@ -95,7 +101,9 @@ func PatchOperation(ctx context.Context, req operations.Request) error {
 		Out:               req.Out,
 		Trace:             nil,
 	}); err != nil {
-		return operations.Error(ctx, "operations.patch_failed", "patch app", err)
+		patchLog.ErrorContext(ctx, "patch.operation_failed", "err", err)
+		return fmt.Errorf("patch operation: %w",
+			operations.Error(ctx, "operations.patch_failed", "patch app", err))
 	}
 	return nil
 }
@@ -111,7 +119,9 @@ func UnpatchOperation(ctx context.Context, req operations.Request) error {
 		Out:               req.Out,
 		Trace:             nil,
 	}); err != nil {
-		return operations.Error(ctx, "operations.unpatch_failed", "restore app bundle", err)
+		patchLog.ErrorContext(ctx, "patch.unpatch_operation_failed", "err", err)
+		return fmt.Errorf("unpatch operation: %w",
+			operations.Error(ctx, "operations.unpatch_failed", "restore app bundle", err))
 	}
 	return nil
 }
@@ -127,9 +137,16 @@ func KeychainMigrateOperation(ctx context.Context, req operations.Request) error
 		Out:               req.Out,
 		Trace:             nil,
 	}); err != nil {
-		return operations.Error(ctx, "operations.keychain_migrate_failed", "restore keychain access", err)
+		patchLog.ErrorContext(ctx, "patch.keychain_migrate_operation_failed", "err", err)
+		return fmt.Errorf("keychain migrate operation: %w",
+			operations.Error(ctx, "operations.keychain_migrate_failed", "restore keychain access", err))
 	}
 	return nil
+}
+
+func logPatchRegistrationError(message string, err error) error {
+	patchLog.Error("patch.registration_failed", "message", message, "err", err)
+	return fmt.Errorf("%s: %w", message, err)
 }
 
 // Patch performs the full patch flow for one target.
@@ -173,7 +190,7 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 		notef(r, fmt.Sprintf("target=%s found %d keychain items", t.ID, len(captured)))
 	}
 
-	if err := patchBundleSteps(ctx, r, t); err != nil {
+	if err := patchBundleSteps(ctx, r, &t, opts); err != nil {
 		return err
 	}
 
@@ -216,32 +233,40 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 
 // patchBundleSteps runs the bundle-mutation steps (2 through 7) on
 // the bundle at t.AppPath using the supplied Runner.
-func patchBundleSteps(ctx context.Context, r *Runner, t targets.Target) error {
+func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Options) error {
 	if t.Entitlements == nil {
 		return logPatchError(ctx, "patch.entitlement_policy_missing", fmt.Errorf("target %s has no entitlement policy", t.ID))
 	}
-	entFile, err := stepExtractEntitlements(ctx, r, t)
+	entFile, err := stepExtractEntitlements(ctx, r, *t)
 	if err != nil {
 		return logPatchError(ctx, "patch.extract_entitlements_failed", fmt.Errorf("extract entitlements: %w", err))
 	}
 	notef(r, fmt.Sprintf("target=%s augment entitlements (strip=%v required=%v)",
 		t.ID, t.Entitlements.Strip, t.Entitlements.RequiredBooleanEntitlements))
-	if err := stepMoveToReal(ctx, r, t); err != nil {
+	if err := stepMoveToReal(ctx, r, *t); err != nil {
 		return logPatchError(ctx, "patch.move_binary_failed", fmt.Errorf("move binary to .real: %w", err))
 	}
-	if err := stepInstallShim(ctx, r, t); err != nil {
+	if err := stepPreLaunchPolicy(ctx, r, t, opts); err != nil {
+		return logPatchError(ctx, "patch.pre_launch_policy_hook_failed", fmt.Errorf("run pre-launch-policy hooks: %w", err))
+	}
+	if err := stepInstallShim(ctx, r, *t); err != nil {
 		return logPatchError(ctx, "patch.install_shim_failed", fmt.Errorf("install shim: %w", err))
 	}
-	if err := runPreResignHooks(ctx, r, t, Options{DryRun: r.DryRun, Out: r.Out, Trace: r.Trace}); err != nil {
+	if err := runPreResignHooks(ctx, r, *t, Options{
+		DryRun:            r.DryRun,
+		NoMigrateKeychain: opts.NoMigrateKeychain,
+		Out:               r.Out,
+		Trace:             r.Trace,
+	}); err != nil {
 		return logPatchError(ctx, "patch.pre_resign_hook_failed", fmt.Errorf("run pre-resign hooks: %w", err))
 	}
-	if err := stepRestorePreservedNestedCode(ctx, r, t); err != nil {
+	if err := stepRestorePreservedNestedCode(ctx, r, *t); err != nil {
 		return logPatchError(ctx, "patch.restore_preserved_nested_code_failed", fmt.Errorf("restore preserved nested code: %w", err))
 	}
-	if err := stepResign(ctx, r, t, entFile); err != nil {
+	if err := stepResign(ctx, r, *t, entFile); err != nil {
 		return logPatchError(ctx, "patch.resign_failed", fmt.Errorf("re-sign: %w", err))
 	}
-	stepStripQuarantine(ctx, r, t)
+	stepStripQuarantine(ctx, r, *t)
 	return nil
 }
 
@@ -333,6 +358,16 @@ func stepMoveToReal(ctx context.Context, r *Runner, t targets.Target) error {
 	}
 	if err := os.Rename(main, realPath); err != nil {
 		return logPatchError(ctx, "patch.rename_real_failed", fmt.Errorf("rename %s -> %s: %w", main, realPath, err))
+	}
+	return nil
+}
+
+func stepPreLaunchPolicy(ctx context.Context, r *Runner, t *targets.Target, opts Options) error {
+	for _, capability := range t.PreLaunchPolicyHookCapabilities() {
+		if err := runPreLaunchPolicyHook(ctx, r, t, opts, capability); err != nil {
+			patchLog.ErrorContext(ctx, "patch.pre_launch_policy_hook_failed", "capability", capability, "err", err)
+			return fmt.Errorf("run pre-launch-policy hook %q: %w", capability, err)
+		}
 	}
 	return nil
 }

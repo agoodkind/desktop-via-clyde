@@ -238,8 +238,8 @@ name = "beta"
 url = "https://persistent.oaistatic.com/codex-app-beta/appcast.xml"
 
 [apps.codex.launch_policy]
-proxy_host = "::1"
-proxy_port = 48723
+proxy_host = "localhost"
+proxy_port = 48727
 ca_certificate = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
 no_proxy = "localhost,127.0.0.1,::1,[::1]"
 launch_working_directory = "/Users/agoodkind"
@@ -267,17 +267,17 @@ value = "0"
 [[apps.codex.launch_policy.environment]]
 action = "set"
 key = "HTTPS_PROXY"
-value = "http://[::1]:48723"
+value = "http://localhost:48727"
 
 [[apps.codex.launch_policy.environment]]
 action = "set"
 key = "HTTP_PROXY"
-value = "http://[::1]:48723"
+value = "http://localhost:48727"
 
 [[apps.codex.launch_policy.environment]]
 action = "set"
 key = "ALL_PROXY"
-value = "http://[::1]:48723"
+value = "http://localhost:48727"
 
 [[apps.codex.launch_policy.environment]]
 action = "set"
@@ -299,17 +299,21 @@ path = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
 
 [[apps.codex.launch_policy.preflights]]
 kind = "tcp_reachable"
-host = "::1"
-port = 48723
+host = "localhost"
+port = 48727
 timeout_ms = 1000
 
 [[apps.codex.launch_policy.arguments]]
 action = "append"
-value = "--proxy-server=http://[::1]:48723"
+value = "--proxy-server=http://localhost:48727"
 
 [[apps.codex.launch_policy.arguments]]
 action = "append"
 value = "--ignore-certificate-errors"
+
+[apps.codex.codex_cli_shim]
+capability = "codex-cli-shim"
+chatgpt_base_url = "http://localhost:48730/backend-api"
 
 [apps.codex.computer_use]
 host_app_path = "/Applications/Codex.app"

@@ -5,12 +5,11 @@ import (
 	"testing"
 
 	"goodkind.io/desktop-via-clyde/internal/config"
-	"goodkind.io/desktop-via-clyde/internal/testsupport"
 )
 
 func installFixture(t *testing.T) {
 	t.Helper()
-	if err := testsupport.RegisterFixtureCapabilities(); err != nil {
+	if err := registerFixtureCapabilities(); err != nil {
 		t.Fatalf("RegisterFixtureCapabilities(): %v", err)
 	}
 	cfg, err := config.LoadPath(filepath.Join("..", "testconfig", "testdata", "current-config.toml"))

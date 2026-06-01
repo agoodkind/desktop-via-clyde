@@ -3,7 +3,7 @@
 // stdio protocol bytes that the parent app and bundled CLI exchange.
 //
 // Install moves the bundled CLI to a .real sibling and writes the universal
-// Mach-O tee shim embedded in shimembed at the original path. Uninstall
+// desktop-via-clyde monolith at the original path. Uninstall
 // restores the .real binary in place. Status reports which version is
 // installed, whether the shim is in place, and where the tee logs land.
 package claudetee
@@ -21,7 +21,7 @@ import (
 	"sort"
 	"strings"
 
-	shimembed "goodkind.io/desktop-via-clyde/internal/embed"
+	"goodkind.io/desktop-via-clyde/internal/monolith"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/signing"
 )
@@ -278,7 +278,7 @@ func resolveInstallTarget(ctx context.Context, opts Options, log *slog.Logger) (
 	event := newTraceEvent(actionResolveInstallTarget)
 	event.Path = bundled
 	event.LogDir = logDirForDisplay
-	event.Size = len(shimembed.StdioTeeShim)
+	event.Size = int(monolith.Size())
 	traceEvent(opts, event)
 	return bundled, realPath, logDirForDisplay, nil
 }
@@ -306,15 +306,10 @@ func performInstall(ctx context.Context, opts Options, out io.Writer, bundled, r
 	}
 
 	fmt.Fprintf(out, "writing shim to %s\n", bundled)
-	if err := os.WriteFile(bundled, shimembed.StdioTeeShim, 0o600); err != nil {
+	if err := monolith.CopyTo(bundled); err != nil {
 		rollbackInstall(ctx, log, bundled, realPath)
 		log.ErrorContext(ctx, "claudetee.install.write_shim_failed", "path", bundled, "err", err)
 		return fmt.Errorf("write shim: %w", err)
-	}
-	if err := os.Chmod(bundled, 0o755); err != nil {
-		rollbackInstall(ctx, log, bundled, realPath)
-		log.ErrorContext(ctx, "claudetee.install.chmod_shim_failed", "path", bundled, "err", err)
-		return fmt.Errorf("chmod shim: %w", err)
 	}
 
 	identity, err := signing.ResolveIdentity(ctx, false)
@@ -374,7 +369,7 @@ func Install(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	printInstallHeader(out, bundled, realPath, len(shimembed.StdioTeeShim), logDirForDisplay)
+	printInstallHeader(out, bundled, realPath, int(monolith.Size()), logDirForDisplay)
 	if opts.DryRun {
 		traceConfiguredProcessStops(opts)
 		renameEvent := newTraceEvent(actionRenameBundledCLI)
@@ -383,7 +378,7 @@ func Install(ctx context.Context, opts Options) error {
 		traceEvent(opts, renameEvent)
 		writeEvent := newTraceEvent(actionWriteShim)
 		writeEvent.Path = bundled
-		writeEvent.Size = len(shimembed.StdioTeeShim)
+		writeEvent.Size = int(monolith.Size())
 		traceEvent(opts, writeEvent)
 		fmt.Fprintln(out, "dry-run: configured process stops would happen here")
 		fmt.Fprintf(out, "dry-run: %s would be renamed to %s\n", bundled, realPath)

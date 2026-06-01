@@ -15,6 +15,7 @@ import (
 
 	"goodkind.io/desktop-via-clyde/internal/composition"
 	"goodkind.io/desktop-via-clyde/internal/config"
+	"goodkind.io/desktop-via-clyde/internal/helperdispatch"
 	"goodkind.io/desktop-via-clyde/internal/logging"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/patch"
@@ -59,6 +60,10 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		_ = closer.Close()
 		return 1
+	}
+	if code, ok := helperdispatch.RunIfMatched(); ok {
+		_ = closer.Close()
+		return code
 	}
 
 	loadedConfig, err := config.LoadRequired()

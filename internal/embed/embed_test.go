@@ -28,6 +28,48 @@ func TestCodexShimDryRunUsesCodexCAWithoutSSLCertFile(t *testing.T) {
 	assertNotContains(t, output, "env SSL_CERT_FILE=/")
 }
 
+func TestCodexShimDryRunPrintsCLIWrapperEnvironment(t *testing.T) {
+	listener, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen localhost: %v", err)
+	}
+	defer listener.Close()
+	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener addr = %T, want *net.TCPAddr", listener.Addr())
+	}
+
+	tempDir := t.TempDir()
+	shimPath := filepath.Join(tempDir, "Codex")
+	if err := os.WriteFile(shimPath, ShimBinary, 0o755); err != nil {
+		t.Fatalf("write shim fixture: %v", err)
+	}
+
+	homeDir := t.TempDir()
+	caPath := filepath.Join(t.TempDir(), "clyde-mitm-ca.crt")
+	if err := os.WriteFile(caPath, []byte("fake-ca"), 0o644); err != nil {
+		t.Fatalf("write fake ca: %v", err)
+	}
+	policy := codexPolicyForTest(caPath, homeDir, "localhost", tcpAddr.Port, "http://localhost:"+strconv.Itoa(tcpAddr.Port))
+	policy.Environment = append(policy.Environment,
+		spec.EnvActionSpec{Action: "set", Key: "CODEX_CLI_PATH", Value: "/tmp/dvc-codex-cli-shim"},
+		spec.EnvActionSpec{Action: "set", Key: "DVC_CODEX_REAL_CLI", Value: "/tmp/Codex.app/Contents/Resources/codex"},
+		spec.EnvActionSpec{Action: "set", Key: "DVC_CODEX_CHATGPT_BASE_URL", Value: "http://localhost:48730/backend-api"},
+	)
+	writeLaunchPolicy(t, shimPath, policy)
+
+	command := exec.Command(shimPath, "--clyde-dry-run")
+	command.Env = envWithOverrides(os.Environ(), "HOME="+homeDir)
+	outputBytes, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shim dry-run failed: %v\n%s", err, outputBytes)
+	}
+	output := string(outputBytes)
+	assertContains(t, output, "env CODEX_CLI_PATH=/tmp/dvc-codex-cli-shim")
+	assertContains(t, output, "env DVC_CODEX_REAL_CLI=/tmp/Codex.app/Contents/Resources/codex")
+	assertContains(t, output, "env DVC_CODEX_CHATGPT_BASE_URL=http://localhost:48730/backend-api")
+}
+
 func TestDefaultShimDryRunKeepsSSLCertFile(t *testing.T) {
 	output := runShimDryRun(t, "Cursor")
 
@@ -279,6 +321,48 @@ func writeShimConfigWithProxy(
 		}
 	}
 
+	writeLaunchPolicy(t, shimPath, policy)
+}
+
+func codexPolicyForTest(
+	caPath string,
+	launchWorkingDirectory string,
+	proxyHost string,
+	proxyPort int,
+	proxyURL string,
+) spec.LaunchPolicySpec {
+	noProxy := "localhost,127.0.0.1,::1,[::1]"
+	return spec.LaunchPolicySpec{
+		ProxyHost:              proxyHost,
+		ProxyPort:              proxyPort,
+		CACertificate:          caPath,
+		NoProxy:                noProxy,
+		LaunchWorkingDirectory: launchWorkingDirectory,
+		Environment: []spec.EnvActionSpec{
+			{Action: "set", Key: "CODEX_CA_CERTIFICATE", Value: caPath},
+			{Action: "set", Key: "NODE_EXTRA_CA_CERTS", Value: caPath},
+			{Action: "set", Key: "NODE_OPTIONS", Value: "--use-openssl-ca"},
+			{Action: "set", Key: "NODE_TLS_REJECT_UNAUTHORIZED", Value: "0"},
+			{Action: "set", Key: "HTTPS_PROXY", Value: proxyURL},
+			{Action: "set", Key: "HTTP_PROXY", Value: proxyURL},
+			{Action: "set", Key: "ALL_PROXY", Value: proxyURL},
+			{Action: "set", Key: "NO_PROXY", Value: noProxy},
+			{Action: "set", Key: "no_proxy", Value: noProxy},
+			{Action: "unset", Key: "SSL_CERT_FILE"},
+		},
+		Arguments: []spec.ArgActionSpec{
+			{Action: "append", Value: "--proxy-server=" + proxyURL},
+			{Action: "append", Value: "--ignore-certificate-errors"},
+		},
+		Preflights: []spec.PreflightSpec{
+			{Kind: "file_exists", Path: caPath},
+			{Kind: "tcp_reachable", Host: proxyHost, Port: proxyPort, Timeout: 1000},
+		},
+	}
+}
+
+func writeLaunchPolicy(t *testing.T, shimPath string, policy spec.LaunchPolicySpec) {
+	t.Helper()
 	data, err := json.MarshalIndent(policy, "", "  ")
 	if err != nil {
 		t.Fatalf("Marshal launch policy: %v", err)

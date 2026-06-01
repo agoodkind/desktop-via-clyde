@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -79,12 +80,10 @@ func convertDecodedConfig(decoded decodedConfig) spec.Config {
 			Entitlements:             app.Entitlements,
 			Updater:                  app.Updater,
 			LaunchPolicy:             app.LaunchPolicy,
-			Extensions:               app.DecodedAppSpec.ToAppSpec(),
+			Extensions:               app.ToAppSpec(),
 		}
 	}
-	for id, cli := range decoded.CLIs {
-		cfg.CLIs[id] = cli
-	}
+	maps.Copy(cfg.CLIs, decoded.CLIs)
 	return cfg
 }
 
@@ -167,7 +166,8 @@ func normalizeAndValidateApp(id string, app *spec.AppSpec) error {
 	}
 	extensions.NormalizeAppSpec(&app.Extensions, cleanExpandedPath, renderPathTokens, normalizeStringSlice)
 	if err := extensions.ValidateApp("apps."+app.ID, &app.Extensions); err != nil {
-		return err
+		configLog.Error("config.app_extension_validate_failed", "app", app.ID, "err", err)
+		return fmt.Errorf("validate app extensions: %w", err)
 	}
 	if err := normalizeAndValidateLaunchPolicy("apps."+app.ID+".launch_policy", &app.LaunchPolicy); err != nil {
 		return err

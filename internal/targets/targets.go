@@ -180,14 +180,22 @@ func buildTarget(app spec.AppSpec) Target {
 	return target
 }
 
+// PostPatchHookCapabilities returns optional post-patch hook capabilities.
 func (t Target) PostPatchHookCapabilities() []string {
 	return t.Extensions.PostPatchHookCapabilities()
 }
 
+// PreUnpatchHookCapabilities returns optional pre-unpatch hook capabilities.
 func (t Target) PreUnpatchHookCapabilities() []string {
 	return t.Extensions.PreUnpatchHookCapabilities()
 }
 
+// PreLaunchPolicyHookCapabilities returns optional pre-launch-policy hook capabilities.
+func (t Target) PreLaunchPolicyHookCapabilities() []string {
+	return t.Extensions.PreLaunchPolicyHookCapabilities()
+}
+
+// BootstrapCapability returns the optional bootstrap strategy capability.
 func (t Target) BootstrapCapability() string {
 	return t.Extensions.BootstrapCapability()
 }

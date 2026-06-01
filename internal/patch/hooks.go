@@ -13,12 +13,16 @@ import (
 // LifecycleHook runs optional extension behavior at one lifecycle point.
 type LifecycleHook func(context.Context, *Runner, targets.Target, Options) error
 
+// PreLaunchPolicyHook runs extension behavior that can mutate launch policy before serialization.
+type PreLaunchPolicyHook func(context.Context, *Runner, *targets.Target, Options) error
+
 var (
-	hooksMu         sync.RWMutex
-	postPatchHooks  = map[string]LifecycleHook{}
-	preUnpatchHooks = map[string]LifecycleHook{}
-	preResignHooks  = map[string]LifecycleHook{}
-	postBundleHooks = map[string]LifecycleHook{}
+	hooksMu              sync.RWMutex
+	postPatchHooks       = map[string]LifecycleHook{}
+	preUnpatchHooks      = map[string]LifecycleHook{}
+	preResignHooks       = map[string]LifecycleHook{}
+	postBundleHooks      = map[string]LifecycleHook{}
+	preLaunchPolicyHooks = map[string]PreLaunchPolicyHook{}
 )
 
 // RegisterPostPatchHook links one patch hook capability to post-patch behavior.
@@ -31,6 +35,23 @@ func RegisterPreUnpatchHook(capability string, hook LifecycleHook) error {
 	return registerLifecycleHook(capability, hook, preUnpatchHooks)
 }
 
+// RegisterPreLaunchPolicyHook links one hook before launch policy serialization.
+func RegisterPreLaunchPolicyHook(capability string, hook PreLaunchPolicyHook) error {
+	if !catalog.HasPreLaunchPolicyHookCapability(capability) {
+		return fmt.Errorf("pre-launch-policy hook capability %q is not linked", capability)
+	}
+	if hook == nil {
+		return fmt.Errorf("pre-launch-policy hook capability %q handler is required", capability)
+	}
+	hooksMu.Lock()
+	defer hooksMu.Unlock()
+	if _, ok := preLaunchPolicyHooks[capability]; ok {
+		return fmt.Errorf("pre-launch-policy hook capability %q handler is already registered", capability)
+	}
+	preLaunchPolicyHooks[capability] = hook
+	return nil
+}
+
 // RegisteredPostPatchHooks returns post-patch hook capabilities in stable order.
 func RegisteredPostPatchHooks() []string {
 	return registeredHookNames(postPatchHooks)
@@ -41,6 +62,18 @@ func RegisteredPreUnpatchHooks() []string {
 	return registeredHookNames(preUnpatchHooks)
 }
 
+// RegisteredPreLaunchPolicyHooks returns pre-launch-policy hook capabilities in stable order.
+func RegisteredPreLaunchPolicyHooks() []string {
+	hooksMu.RLock()
+	defer hooksMu.RUnlock()
+	names := make([]string, 0, len(preLaunchPolicyHooks))
+	for name := range preLaunchPolicyHooks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // RegisterPreResignHook links extension behavior before shared re-signing.
 func RegisterPreResignHook(name string, hook LifecycleHook) error {
 	return registerNamedHook(name, hook, preResignHooks)
@@ -49,16 +82,6 @@ func RegisterPreResignHook(name string, hook LifecycleHook) error {
 // RegisterPostBundleHook links extension behavior after shared bundle mutation.
 func RegisterPostBundleHook(name string, hook LifecycleHook) error {
 	return registerNamedHook(name, hook, postBundleHooks)
-}
-
-// RegisteredPreResignHooks returns pre-resign hook names in stable order.
-func RegisteredPreResignHooks() []string {
-	return registeredHookNames(preResignHooks)
-}
-
-// RegisteredPostBundleHooks returns post-bundle hook names in stable order.
-func RegisteredPostBundleHooks() []string {
-	return registeredHookNames(postBundleHooks)
 }
 
 func runPostPatchHook(
@@ -85,6 +108,22 @@ func runPreUnpatchHook(
 	hook, ok := lookupLifecycleHook(preUnpatchHooks, capability)
 	if !ok {
 		return fmt.Errorf("pre-unpatch hook %q is not registered", capability)
+	}
+	return hook(ctx, r, t, opts)
+}
+
+func runPreLaunchPolicyHook(
+	ctx context.Context,
+	r *Runner,
+	t *targets.Target,
+	opts Options,
+	capability string,
+) error {
+	hooksMu.RLock()
+	hook, ok := preLaunchPolicyHooks[capability]
+	hooksMu.RUnlock()
+	if !ok {
+		return fmt.Errorf("pre-launch-policy hook %q is not registered", capability)
 	}
 	return hook(ctx, r, t, opts)
 }
@@ -184,6 +223,7 @@ func runNamedHooks(
 	sort.Strings(names)
 	for _, name := range names {
 		if err := hooks[name](ctx, r, t, opts); err != nil {
+			patchLog.ErrorContext(ctx, "patch.lifecycle_hook_failed", "hook", name, "err", err)
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}

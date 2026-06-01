@@ -10,16 +10,18 @@ import (
 	"testing"
 
 	"goodkind.io/desktop-via-clyde/internal/bundledclitee"
+	"goodkind.io/desktop-via-clyde/internal/codexclishim"
 	"goodkind.io/desktop-via-clyde/internal/computeruseext"
 	"goodkind.io/desktop-via-clyde/internal/config"
 	patch "goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/targets"
-	"goodkind.io/desktop-via-clyde/internal/testsupport"
 )
 
-var bundleStepsRegisterOnce sync.Once
-var bundleStepsRegisterErr error
+var (
+	bundleStepsRegisterOnce sync.Once
+	bundleStepsRegisterErr  error
+)
 
 func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
 	tg, err := lookupTarget(t, "codex")
@@ -207,11 +209,15 @@ func lookupTarget(t *testing.T, id string) (targets.Target, error) {
 func installFixture(t *testing.T) {
 	t.Helper()
 	bundleStepsRegisterOnce.Do(func() {
-		if err := testsupport.RegisterFixtureCapabilities(); err != nil {
+		if err := registerFixtureCapabilities(); err != nil {
 			bundleStepsRegisterErr = err
 			return
 		}
 		if err := computeruseext.RegisterLifecycleHooks(); err != nil {
+			bundleStepsRegisterErr = err
+			return
+		}
+		if err := codexclishim.RegisterPreLaunchPolicyHooks(); err != nil {
 			bundleStepsRegisterErr = err
 			return
 		}

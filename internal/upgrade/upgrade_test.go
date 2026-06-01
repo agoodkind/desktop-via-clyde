@@ -19,7 +19,6 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
-	"goodkind.io/desktop-via-clyde/internal/testsupport"
 )
 
 const (
@@ -28,7 +27,7 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	if err := testsupport.RegisterFixtureCapabilities(); err != nil {
+	if err := registerFixtureCapabilities(); err != nil {
 		panic(err)
 	}
 	if err := RegisterBootstrapStrategies(); err != nil {
@@ -409,7 +408,7 @@ func TestExtractZipFindsTargetAppRootInTempDir(t *testing.T) {
 
 func installFixture(t *testing.T) {
 	t.Helper()
-	if err := testsupport.RegisterFixtureCapabilities(); err != nil {
+	if err := registerFixtureCapabilities(); err != nil {
 		t.Fatalf("RegisterFixtureCapabilities(): %v", err)
 	}
 	cfg, err := config.LoadPath(filepath.Join("..", "testconfig", "testdata", "current-config.toml"))

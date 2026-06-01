@@ -6,9 +6,7 @@
 # staticcheck-extra). Refresh baselines via the matching *-baseline target.
 #
 # desktop-via-clyde Makefile.
-# Build and lint now run through go-makefile, while the two embedded shim
-# binaries remain project-local prerequisites because the Go binary will not
-# even load its embed package cleanly unless those artifacts already exist.
+# The Swift launch shim is the only project-local generated prerequisite.
 
 # Identity.
 BINARY     := desktop-via-clyde
@@ -43,35 +41,19 @@ include bootstrap.mk
 
 REPO_ROOT            := $(CURDIR)
 SHIM_OUT             := $(REPO_ROOT)/internal/embed/shim
-STDIO_TEE_SHIM_OUT   := $(REPO_ROOT)/internal/embed/dvc-stdio-tee-shim
-STDIO_TEE_SHIM_BUILD := $(REPO_ROOT)/bin/dvc-stdio-tee-shim-build
 
-.PHONY: shim stdio-tee-shim generated-shims clean-generated
+.PHONY: shim generated-shims clean-generated
 
-generated-shims: shim stdio-tee-shim
+generated-shims: shim
 
-# Package loading, vet, test, and the shared analyzers all need the embedded
-# binaries present first because go:embed validates the files during load.
+# Package loading, vet, test, and the shared analyzers need the embedded Swift
+# shim present because go:embed validates the file during load.
 build build-check check lint lint-golangci lint-files lint-diff staticcheck-extra vet test govulncheck: generated-shims
 
 shim:
 	$(MAKE) -C $(REPO_ROOT)/shim SWIFT_MK_DEV_DIR=$(HOME)/Sites/swift-makefile SWIFT_MK_NOTICES_FILE=/dev/null LINT_GATES='lint-swiftlint lint-format lint-complexity lint-deadcode swiftcheck-extra' build
 
-# stdio-tee-shim is a Go program. It builds a universal Mach-O via two arch
-# passes plus lipo so the embedded binary runs on both arm64 and x86_64 Macs.
-# The output lands in internal/embed/ so go:embed picks it up at main-binary
-# build time.
-stdio-tee-shim:
-	mkdir -p $(STDIO_TEE_SHIM_BUILD)
-	GOOS=darwin GOARCH=arm64 go build -trimpath -o $(STDIO_TEE_SHIM_BUILD)/arm64 ./cmd/dvc-stdio-tee-shim
-	GOOS=darwin GOARCH=amd64 go build -trimpath -o $(STDIO_TEE_SHIM_BUILD)/amd64 ./cmd/dvc-stdio-tee-shim
-	/usr/bin/lipo -create -output $(STDIO_TEE_SHIM_OUT) $(STDIO_TEE_SHIM_BUILD)/arm64 $(STDIO_TEE_SHIM_BUILD)/amd64
-	rm -rf $(STDIO_TEE_SHIM_BUILD)
-	/usr/bin/codesign --force --sign - --options runtime $(STDIO_TEE_SHIM_OUT)
-	/usr/bin/file $(STDIO_TEE_SHIM_OUT)
-
 clean-generated:
-	rm -rf $(STDIO_TEE_SHIM_BUILD)
-	rm -f $(SHIM_OUT) $(STDIO_TEE_SHIM_OUT)
+	rm -f $(SHIM_OUT)
 
 clean: clean-dist clean-generated

@@ -1,8 +1,8 @@
-// Package main is a self-locating stdio-tee shim. It replaces a binary that
-// the parent process spawns over stdio, runs the original binary (renamed to
-// <name>.real next to the shim) as a child, and tees the parent's stdin,
-// the child's stdout, and the child's stderr to time-stamped log files. The
-// shim forwards SIGINT, SIGTERM, SIGHUP, SIGUSR1, and SIGUSR2 to the child
+// Package stdioteeshim is a self-locating stdio-tee helper. It replaces a
+// binary that the parent process spawns over stdio, runs the original binary
+// (renamed to <name>.real next to the shim) as a child, and tees the parent's
+// stdin, the child's stdout, and the child's stderr to time-stamped log files.
+// The shim forwards SIGINT, SIGTERM, SIGHUP, SIGUSR1, and SIGUSR2 to the child
 // and exits with the child's termination status.
 //
 // Logs land under $HOME/.local/state/desktop-via-clyde/stdio-tee/ unless
@@ -15,8 +15,8 @@
 // confuses shim chatter with the child's output.
 //
 // Drop-in install path: rename the target binary to <name>.real and place
-// the shim at <name>.
-package main
+// the desktop-via-clyde monolith at <name>.
+package stdioteeshim
 
 import (
 	"context"
@@ -34,6 +34,8 @@ import (
 	"syscall"
 	"time"
 
+	"goodkind.io/desktop-via-clyde/internal/clock"
+	"goodkind.io/desktop-via-clyde/internal/helperdispatch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 )
 
@@ -41,7 +43,31 @@ const (
 	logDirPerms    = 0o700
 	logFilePerms   = 0o600
 	signalForwards = "SIGINT SIGTERM SIGHUP SIGUSR1 SIGUSR2"
+	helperName     = "stdio-tee"
+	mainBinaryName = "desktop-via-clyde"
 )
+
+// RegisterHelper links the stdio tee helper entrypoint into the monolith.
+func RegisterHelper() error {
+	if err := helperdispatch.Register(helperName, func() (int, bool) {
+		selfPath, err := resolveSelfRealPath()
+		if err != nil {
+			return 0, false
+		}
+		if filepath.Base(selfPath) == mainBinaryName {
+			return 0, false
+		}
+		info, statErr := os.Stat(selfPath + ".real")
+		if statErr != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			return 0, false
+		}
+		return Run(), true
+	}); err != nil {
+		stdioTeeLog.Error("stdioteeshim.registration_failed", "err", err)
+		return fmt.Errorf("register stdio tee helper: %w", err)
+	}
+	return nil
+}
 
 type invocationLogs struct {
 	stdinLog  *os.File
@@ -79,8 +105,8 @@ func resolveSelfRealPath() (string, error) {
 // shim.jsonl file. It is initialised after the log directory exists and
 // the file can be opened; before that, errors flow through failFastInit.
 var (
-	shimLog      *slog.Logger
-	bootstrapLog = slog.New(slog.DiscardHandler)
+	shimLog     *slog.Logger
+	stdioTeeLog = slog.With("component", "desktop-via-clyde", "subcomponent", "stdio-tee")
 )
 
 // failFastInit handles bootstrap errors that happen before the shim log
@@ -94,7 +120,7 @@ func failFastInit(msg string, code int) int {
 }
 
 func timestampForFilename() string {
-	return time.Now().UTC().Format("20060102T150405.000000000")
+	return clock.Now().UTC().Format("20060102T150405.000000000")
 }
 
 func writeMeta(w io.Writer, selfPath, realPath string, args []string) error {
@@ -107,7 +133,7 @@ func writeMeta(w io.Writer, selfPath, realPath string, args []string) error {
 		fmt.Sprintf("ppid:  %d", os.Getppid()),
 		"cwd:   " + cwd,
 		"args:  " + strings.Join(args, " "),
-		"start: " + time.Now().Format(time.RFC3339Nano),
+		"start: " + clock.Now().Format(time.RFC3339Nano),
 		"signals_forwarded: " + signalForwards,
 		"",
 	}
@@ -168,7 +194,12 @@ func openLog(path string) (*os.File, error) {
 }
 
 func openInvocationLogs(base, selfPath, realPath string) (invocationLogs, error) {
-	logs := invocationLogs{}
+	logs := invocationLogs{
+		stdinLog:  nil,
+		stdoutLog: nil,
+		stderrLog: nil,
+		metaLog:   nil,
+	}
 
 	var err error
 	logs.stdinLog, err = openLog(base + ".stdin.jsonl")
@@ -289,12 +320,8 @@ func startPumpGroup(
 	return &pumpWg
 }
 
-func main() {
-	bootstrapLog.Info("shim.main")
-	os.Exit(run())
-}
-
-func run() int {
+// Run executes the stdio tee helper entrypoint.
+func Run() int {
 	selfPath, err := resolveSelfRealPath()
 	if err != nil {
 		return failFastInit(fmt.Sprintf("resolve self: %v", err), 14)

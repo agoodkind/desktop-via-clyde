@@ -2,6 +2,7 @@ package upgrade
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 )
 
@@ -15,4 +16,9 @@ func logUpgradeError(ctx context.Context, event string, err error) error {
 func logUpgradeErrorNoContext(event string, err error) error {
 	upgradeLog.Error(event, "err", err)
 	return err
+}
+
+func logUpgradeRegistrationError(message string, err error) error {
+	upgradeLog.Error("upgrade.registration_failed", "message", message, "err", err)
+	return fmt.Errorf("%s: %w", message, err)
 }

@@ -45,7 +45,9 @@ var (
 )
 
 const (
-	AppUpgradeCapability               = "app.upgrade"
+	// AppUpgradeCapability is the operation capability for app upgrades.
+	AppUpgradeCapability = "app.upgrade"
+	// CleanMainBinaryBootstrapCapability recovers original requirements from a clean main binary.
 	CleanMainBinaryBootstrapCapability = "clean-main-binary"
 )
 
@@ -53,24 +55,34 @@ const (
 func RegisterOperations() error {
 	if !catalog.HasOperationCapability(AppUpgradeCapability) {
 		if err := catalog.RegisterOperationCapability(AppUpgradeCapability); err != nil {
-			return err
+			return logUpgradeRegistrationError("register upgrade capability", err)
 		}
 	}
-	return operations.Register(AppUpgradeCapability, Operation)
+	if err := operations.Register(AppUpgradeCapability, Operation); err != nil {
+		return logUpgradeRegistrationError("register upgrade operation", err)
+	}
+	return nil
 }
 
 // RegisterBootstrapStrategies links upgrade bootstrap strategies.
 func RegisterBootstrapStrategies() error {
 	if !catalog.HasBootstrapCapability(CleanMainBinaryBootstrapCapability) {
 		if err := catalog.RegisterBootstrapCapability(CleanMainBinaryBootstrapCapability); err != nil {
-			return err
+			return logUpgradeRegistrationError("register clean-main-binary bootstrap capability", err)
 		}
 	}
-	return RegisterBootstrapStrategy(CleanMainBinaryBootstrapCapability, bootstrapOriginalDRFromCleanMainBinary)
+	if err := RegisterBootstrapStrategy(CleanMainBinaryBootstrapCapability, bootstrapOriginalDRFromCleanMainBinary); err != nil {
+		return logUpgradeRegistrationError("register clean-main-binary bootstrap strategy", err)
+	}
+	return nil
 }
 
+// RegisterValidators links upgrade config validation.
 func RegisterValidators() error {
-	return extensions.RegisterAppValidator("original_dr_bootstrap_capability", extensions.ValidateOriginalDRBootstrapCapability)
+	if err := extensions.RegisterAppValidator("original_dr_bootstrap_capability", extensions.ValidateOriginalDRBootstrapCapability); err != nil {
+		return logUpgradeRegistrationError("register original DR bootstrap validator", err)
+	}
+	return nil
 }
 
 // RegisterBootstrapStrategy links one bootstrap capability to its strategy.
@@ -133,7 +145,9 @@ func Operation(ctx context.Context, req operations.Request) error {
 		NoMigrateKeychain: req.Flags.Bool("no-migrate-keychain"),
 		Out:               req.Out,
 	}); err != nil {
-		return operations.Error(ctx, "operations.upgrade_failed", "upgrade app", err)
+		upgradeLog.ErrorContext(ctx, "upgrade.operation_failed", "err", err)
+		return fmt.Errorf("upgrade operation: %w",
+			operations.Error(ctx, "operations.upgrade_failed", "upgrade app", err))
 	}
 	return nil
 }

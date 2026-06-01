@@ -1,3 +1,5 @@
+// Package extensions models optional provider-owned target behavior loaded from
+// runtime config.
 package extensions
 
 import (
@@ -14,6 +16,7 @@ import (
 type AppSpec struct {
 	ComputerUse                   *ComputerUseSpec
 	BundledCLITee                 *BundledCLITeeSpec
+	CodexCLIShim                  *CodexCLIShimSpec
 	OriginalDRBootstrapCapability string
 }
 
@@ -21,6 +24,7 @@ type AppSpec struct {
 type DecodedAppSpec struct {
 	ComputerUse                   *ComputerUseSpec   `toml:"computer_use"`
 	BundledCLITee                 *BundledCLITeeSpec `toml:"bundled_cli_tee"`
+	CodexCLIShim                  *CodexCLIShimSpec  `toml:"codex_cli_shim"`
 	OriginalDRBootstrapCapability string             `toml:"original_dr_bootstrap_capability"`
 }
 
@@ -62,10 +66,17 @@ type BundledCLITeeSpec struct {
 	CompletionSteps          []string `toml:"completion_steps"`
 }
 
+// CodexCLIShimSpec configures the bundled Codex CLI app-server wrapper.
+type CodexCLIShimSpec struct {
+	Capability     string `toml:"capability"`
+	ChatGPTBaseURL string `toml:"chatgpt_base_url"`
+}
+
 // Target stores runtime optional behavior owned by extension packages.
 type Target struct {
 	ComputerUse                   *ComputerUsePolicy
 	BundledCLITee                 *BundledCLITeeSpec
+	CodexCLIShim                  *CodexCLIShimSpec
 	OriginalDRBootstrapCapability string
 }
 
@@ -85,6 +96,14 @@ func (t Target) PreUnpatchHookCapabilities() []string {
 	return []string{t.BundledCLITee.Capability}
 }
 
+// PreLaunchPolicyHookCapabilities returns optional pre-launch-policy hook capabilities.
+func (t Target) PreLaunchPolicyHookCapabilities() []string {
+	if t.CodexCLIShim == nil || t.CodexCLIShim.Capability == "" {
+		return nil
+	}
+	return []string{t.CodexCLIShim.Capability}
+}
+
 // BootstrapCapability returns the optional bootstrap strategy capability.
 func (t Target) BootstrapCapability() string {
 	return t.OriginalDRBootstrapCapability
@@ -92,11 +111,7 @@ func (t Target) BootstrapCapability() string {
 
 // ToAppSpec converts one decoded extension block into the app extension model.
 func (d DecodedAppSpec) ToAppSpec() AppSpec {
-	return AppSpec{
-		ComputerUse:                   d.ComputerUse,
-		BundledCLITee:                 d.BundledCLITee,
-		OriginalDRBootstrapCapability: d.OriginalDRBootstrapCapability,
-	}
+	return AppSpec(d)
 }
 
 // EntitlementsPolicy describes runtime entitlement mutations.
@@ -152,12 +167,8 @@ func RegisterAppValidator(name string, validator AppValidator) error {
 
 // ValidateApp runs registered app extension validators in stable order.
 func ValidateApp(path string, app *AppSpec) error {
+	names := RegisteredAppValidators()
 	validatorsMu.RLock()
-	names := make([]string, 0, len(validators))
-	for name := range validators {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	items := make([]AppValidator, 0, len(names))
 	for _, name := range names {
 		items = append(items, validators[name])
@@ -200,6 +211,9 @@ func NormalizeAppSpec(
 	if app.BundledCLITee != nil {
 		normalizeBundledCLITee(app.BundledCLITee, cleanPath, renderTokens, normalizeStrings)
 	}
+	if app.CodexCLIShim != nil {
+		normalizeCodexCLIShim(app.CodexCLIShim)
+	}
 }
 
 // BuildTarget converts app extension declarations into runtime extension data.
@@ -207,6 +221,7 @@ func BuildTarget(app AppSpec) Target {
 	target := Target{
 		ComputerUse:                   nil,
 		BundledCLITee:                 cloneBundledCLITee(app.BundledCLITee),
+		CodexCLIShim:                  cloneCodexCLIShim(app.CodexCLIShim),
 		OriginalDRBootstrapCapability: app.OriginalDRBootstrapCapability,
 	}
 	if app.ComputerUse != nil {
@@ -225,6 +240,10 @@ func CloneAppSpec(app AppSpec) AppSpec {
 	if app.BundledCLITee != nil {
 		tee := cloneBundledCLITee(app.BundledCLITee)
 		cloned.BundledCLITee = tee
+	}
+	if app.CodexCLIShim != nil {
+		shim := cloneCodexCLIShim(app.CodexCLIShim)
+		cloned.CodexCLIShim = shim
 	}
 	return cloned
 }
@@ -254,6 +273,14 @@ func cloneBundledCLITee(tee *BundledCLITeeSpec) *BundledCLITeeSpec {
 	cloned.TerminateProcessNames = cloneStrings(tee.TerminateProcessNames)
 	cloned.TerminateProcessPatterns = cloneStrings(tee.TerminateProcessPatterns)
 	cloned.CompletionSteps = cloneStrings(tee.CompletionSteps)
+	return &cloned
+}
+
+func cloneCodexCLIShim(shim *CodexCLIShimSpec) *CodexCLIShimSpec {
+	if shim == nil {
+		return nil
+	}
+	cloned := *shim
 	return &cloned
 }
 
@@ -325,6 +352,27 @@ func ValidateBundledCLITee(path string, app *AppSpec) error {
 	return nil
 }
 
+// ValidateCodexCLIShim validates bundled Codex CLI shim declarations.
+func ValidateCodexCLIShim(path string, app *AppSpec) error {
+	shim := app.CodexCLIShim
+	if shim == nil {
+		return nil
+	}
+	if shim.Capability == "" {
+		return fmt.Errorf("%s.codex_cli_shim.capability is required", path)
+	}
+	if !catalog.HasPreLaunchPolicyHookCapability(shim.Capability) {
+		return fmt.Errorf("%s.codex_cli_shim.capability %q is unknown", path, shim.Capability)
+	}
+	if shim.ChatGPTBaseURL == "" {
+		return fmt.Errorf("%s.codex_cli_shim.chatgpt_base_url is required", path)
+	}
+	if strings.Contains(shim.ChatGPTBaseURL, "{") || strings.Contains(shim.ChatGPTBaseURL, "}") {
+		return fmt.Errorf("%s.codex_cli_shim.chatgpt_base_url must be fully resolved", path)
+	}
+	return nil
+}
+
 // ValidateComputerUse validates Computer Use declarations.
 func ValidateComputerUse(path string, app *AppSpec) error {
 	policy := app.ComputerUse
@@ -361,21 +409,6 @@ func ValidateComputerUse(path string, app *AppSpec) error {
 	}
 	policy.SignTargets = normalizedTargets
 	return nil
-}
-
-func normalizeStringSlice(values []string) []string {
-	normalized := make([]string, 0, len(values))
-	for _, value := range values {
-		trimmed := trimSpace(value)
-		if trimmed == "" {
-			continue
-		}
-		normalized = append(normalized, trimmed)
-	}
-	if len(normalized) == 0 {
-		return nil
-	}
-	return normalized
 }
 
 func cloneStrings(values []string) []string {
@@ -423,6 +456,11 @@ func normalizeBundledCLITee(
 	tee.TerminateProcessNames = normalizeStrings(tee.TerminateProcessNames)
 	tee.TerminateProcessPatterns = normalizeStrings(tee.TerminateProcessPatterns)
 	tee.CompletionSteps = normalizeStrings(tee.CompletionSteps)
+}
+
+func normalizeCodexCLIShim(shim *CodexCLIShimSpec) {
+	shim.Capability = trimSpace(shim.Capability)
+	shim.ChatGPTBaseURL = trimSpace(shim.ChatGPTBaseURL)
 }
 
 func trimSpace(value string) string {

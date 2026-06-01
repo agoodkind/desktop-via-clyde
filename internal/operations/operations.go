@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"sort"
 	"sync"
 
 	"goodkind.io/desktop-via-clyde/internal/catalog"
@@ -27,6 +26,9 @@ var (
 	handlers   = map[string]Handler{}
 )
 
+var operationsLog = slog.With("component", "desktop-via-clyde", "subcomponent", "operations")
+
+// AppStatusCapability is the operation capability for app status output.
 const AppStatusCapability = "app.status"
 
 // FlagValues holds parsed command flag values keyed by flag name.
@@ -107,34 +109,15 @@ func Lookup(capability string) (Handler, bool) {
 	return handler, ok
 }
 
-// RegisteredCapabilities returns operation capabilities with runtime handlers.
-func RegisteredCapabilities() []string {
-	handlersMu.RLock()
-	defer handlersMu.RUnlock()
-	names := make([]string, 0, len(handlers))
-	for name := range handlers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
-
 // RegisterCoreHandlers links operation handlers owned by this package.
 func RegisterCoreHandlers() error {
 	if !catalog.HasOperationCapability(AppStatusCapability) {
 		if err := catalog.RegisterOperationCapability(AppStatusCapability); err != nil {
-			return err
+			return logOperationRegistrationError("register app status capability", err)
 		}
 	}
-	return Register(AppStatusCapability, AppStatus)
-}
-
-func ensureOperationCapabilityRegistered(capability string) error {
-	if catalog.HasOperationCapability(capability) {
-		return nil
-	}
-	if err := catalog.RegisterOperationCapability(capability); err != nil {
-		return err
+	if err := Register(AppStatusCapability, AppStatus); err != nil {
+		return logOperationRegistrationError("register app status operation", err)
 	}
 	return nil
 }
@@ -224,8 +207,17 @@ func readInfoPlist(path string) (infoPlist, error) {
 	var info infoPlist
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return info, err
+		operationsLog.Error("operations.info_plist_read_failed", "path", path, "err", err)
+		return info, fmt.Errorf("read info plist %s: %w", path, err)
 	}
-	_, err = plist.Unmarshal(data, &info)
-	return info, err
+	if _, err := plist.Unmarshal(data, &info); err != nil {
+		operationsLog.Error("operations.info_plist_parse_failed", "path", path, "err", err)
+		return info, fmt.Errorf("parse info plist %s: %w", path, err)
+	}
+	return info, nil
+}
+
+func logOperationRegistrationError(message string, err error) error {
+	operationsLog.Error("operations.registration_failed", "message", message, "err", err)
+	return fmt.Errorf("%s: %w", message, err)
 }

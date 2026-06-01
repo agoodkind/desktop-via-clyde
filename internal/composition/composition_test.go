@@ -6,6 +6,7 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/bundledclitee"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/codexcli"
+	"goodkind.io/desktop-via-clyde/internal/codexclishim"
 	"goodkind.io/desktop-via-clyde/internal/extensions"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/patch"
@@ -16,7 +17,7 @@ func TestRegisterLinksEveryCatalogCapability(t *testing.T) {
 	if err := Register(); err != nil {
 		t.Fatalf("Register(): %v", err)
 	}
-	assertEqualStrings(t, operations.RegisteredCapabilities(), []string{
+	wantOperations := []string{
 		patch.AppKeychainMigrateCapability,
 		patch.AppPatchCapability,
 		operations.AppStatusCapability,
@@ -24,8 +25,13 @@ func TestRegisterLinksEveryCatalogCapability(t *testing.T) {
 		upgrade.AppUpgradeCapability,
 		codexcli.StandaloneInstallCapability,
 		codexcli.StandaloneStatusCapability,
-	})
-	assertEqualStrings(t, catalog.OperationCapabilities(), operations.RegisteredCapabilities())
+	}
+	assertEqualStrings(t, catalog.OperationCapabilities(), wantOperations)
+	for _, capability := range wantOperations {
+		if _, ok := operations.Lookup(capability); !ok {
+			t.Fatalf("operation %q has no handler", capability)
+		}
+	}
 	assertEqualStrings(t, upgrade.RegisteredBootstrapStrategies(), []string{
 		upgrade.CleanMainBinaryBootstrapCapability,
 	})
@@ -37,8 +43,13 @@ func TestRegisterLinksEveryCatalogCapability(t *testing.T) {
 		bundledclitee.HookCapability,
 	})
 	assertEqualStrings(t, catalog.PatchHookCapabilities(), patch.RegisteredPostPatchHooks())
+	assertEqualStrings(t, patch.RegisteredPreLaunchPolicyHooks(), []string{
+		codexclishim.HookCapability,
+	})
+	assertEqualStrings(t, catalog.PreLaunchPolicyHookCapabilities(), patch.RegisteredPreLaunchPolicyHooks())
 	assertEqualStrings(t, extensions.RegisteredAppValidators(), []string{
 		"bundled_cli_tee",
+		"codex_cli_shim",
 		"computer_use",
 		"original_dr_bootstrap_capability",
 	})
