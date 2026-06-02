@@ -9,10 +9,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
-var stateLog = slog.With("component", "desktop-via-clyde", "subcomponent", "state")
+var (
+	stateLog = slog.With("component", "desktop-via-clyde", "subcomponent", "state")
+	stateMu  sync.Mutex
+)
 
 // TargetState is the on-disk record for a single patched bundle.
 type TargetState struct {
@@ -41,6 +45,32 @@ type MultiState struct {
 // no state on disk yet.
 func Load(path string) (MultiState, error) {
 	stateLog.Debug("state.load", "path", path)
+	return loadUnlocked(path)
+}
+
+// Update serializes one load, mutate, save cycle against the state file.
+func Update(path string, mutate func(MultiState) (MultiState, error)) error {
+	if mutate == nil {
+		return fmt.Errorf("state update callback is required")
+	}
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	stateLog.Debug("state.update", "path", path)
+	current, err := loadUnlocked(path)
+	if err != nil {
+		return err
+	}
+	updated, err := mutate(current)
+	if err != nil {
+		return err
+	}
+	if len(updated.Targets) == 0 {
+		return removeUnlocked(path)
+	}
+	return saveUnlocked(path, updated)
+}
+
+func loadUnlocked(path string) (MultiState, error) {
 	s := MultiState{Targets: map[string]TargetState{}}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -60,13 +90,12 @@ func Load(path string) (MultiState, error) {
 	return s, nil
 }
 
-// Save writes state.json atomically (write to sibling tmp, rename).
-func Save(path string, s MultiState) error {
-	stateLog.Debug("state.save", "path", path)
+func saveUnlocked(path string, s MultiState) error {
 	if s.Targets == nil {
 		s.Targets = map[string]TargetState{}
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dirPath := filepath.Dir(path)
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
 		stateLog.Error("state.save.mkdir_failed", "path", path, "err", err)
 		return fmt.Errorf("create state dir for %s: %w", path, err)
 	}
@@ -75,21 +104,37 @@ func Save(path string, s MultiState) error {
 		stateLog.Error("state.save.encode_failed", "path", path, "err", err)
 		return fmt.Errorf("encode state for %s: %w", path, err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		stateLog.Error("state.save.write_failed", "path", tmp, "err", err)
-		return fmt.Errorf("write temp state file %s: %w", tmp, err)
+	tmpFile, err := os.CreateTemp(dirPath, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		stateLog.Error("state.save.create_temp_failed", "path", path, "err", err)
+		return fmt.Errorf("create temp state file for %s: %w", path, err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		stateLog.Error("state.save.rename_failed", "from", tmp, "to", path, "err", err)
-		return fmt.Errorf("rename temp state file %s -> %s: %w", tmp, path, err)
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		stateLog.Error("state.save.write_failed", "path", tmpPath, "err", err)
+		return fmt.Errorf("write temp state file %s: %w", tmpPath, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		stateLog.Error("state.save.close_failed", "path", tmpPath, "err", err)
+		return fmt.Errorf("close temp state file %s: %w", tmpPath, err)
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		_ = os.Remove(tmpPath)
+		stateLog.Error("state.save.chmod_failed", "path", tmpPath, "err", err)
+		return fmt.Errorf("chmod temp state file %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		stateLog.Error("state.save.rename_failed", "from", tmpPath, "to", path, "err", err)
+		return fmt.Errorf("rename temp state file %s -> %s: %w", tmpPath, path, err)
 	}
 	return nil
 }
 
-// Remove deletes the state file. Missing files are not an error.
-func Remove(path string) error {
-	stateLog.Debug("state.remove", "path", path)
+func removeUnlocked(path string) error {
 	err := os.Remove(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		stateLog.Error("state.remove.failed", "path", path, "err", err)

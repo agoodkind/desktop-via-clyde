@@ -518,27 +518,35 @@ func stepWriteState(ctx context.Context, r *Runner, t targets.Target, version st
 	if r.DryRun {
 		return nil
 	}
-	ms, err := state.Load(paths.StateFile())
-	if err != nil {
-		return logPatchError(ctx, "patch.load_state_failed", fmt.Errorf("load state file: %w", err))
-	}
-	originalDR := ms.Targets[t.ID].OriginalDesignatedRequirement
-	if originalDR == "" {
-		captured, captureErr := captureOriginalDR(ctx, t)
-		if captureErr != nil {
-			return logPatchError(ctx, "patch.capture_original_dr_failed", fmt.Errorf("capture original DR from backup: %w", captureErr))
+	capturedOriginalDR := false
+	var captureOriginalDRErr error
+	updateErr := state.Update(paths.StateFile(), func(ms state.MultiState) (state.MultiState, error) {
+		originalDR := ms.Targets[t.ID].OriginalDesignatedRequirement
+		if originalDR == "" {
+			captured, captureErr := captureOriginalDR(ctx, t)
+			if captureErr != nil {
+				captureOriginalDRErr = captureErr
+				return ms, captureErr
+			}
+			originalDR = captured
+			capturedOriginalDR = true
 		}
-		originalDR = captured
-		notef(r, fmt.Sprintf("target=%s captured original DR (%d bytes)", t.ID, len(originalDR)))
+		ms.Targets[t.ID] = state.TargetState{
+			PatchedVersion:                version,
+			PatchedAt:                     clock.Now().UTC(),
+			SignIdentity:                  paths.SignIdentity(),
+			OriginalDesignatedRequirement: originalDR,
+		}
+		return ms, nil
+	})
+	if updateErr != nil {
+		if captureOriginalDRErr != nil {
+			return logPatchError(ctx, "patch.capture_original_dr_failed", fmt.Errorf("capture original DR from backup: %w", captureOriginalDRErr))
+		}
+		return logPatchError(ctx, "patch.save_state_failed", fmt.Errorf("save state file: %w", updateErr))
 	}
-	ms.Targets[t.ID] = state.TargetState{
-		PatchedVersion:                version,
-		PatchedAt:                     clock.Now().UTC(),
-		SignIdentity:                  paths.SignIdentity(),
-		OriginalDesignatedRequirement: originalDR,
-	}
-	if err := state.Save(paths.StateFile(), ms); err != nil {
-		return logPatchError(ctx, "patch.save_state_failed", fmt.Errorf("save state file: %w", err))
+	if capturedOriginalDR {
+		notef(r, fmt.Sprintf("target=%s captured original DR during state update", t.ID))
 	}
 	return nil
 }
@@ -566,10 +574,19 @@ func OriginalDesignatedRequirement(ctx context.Context, t targets.Target, repair
 	if !repair {
 		return captured, nil
 	}
-	entry.OriginalDesignatedRequirement = captured
-	ms.Targets[t.ID] = entry
-	if err := state.Save(paths.StateFile(), ms); err != nil {
-		return "", logPatchError(ctx, "patch.original_dr_save_repair_failed", fmt.Errorf("save repaired state.json: %w", err))
+	updateErr := state.Update(paths.StateFile(), func(current state.MultiState) (state.MultiState, error) {
+		currentEntry, ok := current.Targets[t.ID]
+		if !ok {
+			return current, MissingStateEntryError{TargetID: t.ID}
+		}
+		if currentEntry.OriginalDesignatedRequirement == "" {
+			currentEntry.OriginalDesignatedRequirement = captured
+			current.Targets[t.ID] = currentEntry
+		}
+		return current, nil
+	})
+	if updateErr != nil {
+		return "", logPatchError(ctx, "patch.original_dr_save_repair_failed", fmt.Errorf("save repaired state.json: %w", updateErr))
 	}
 	return captured, nil
 }

@@ -95,7 +95,7 @@ func PostPatchHook(ctx context.Context, runner *patch.Runner, target targets.Tar
 	teeOpts := targetOptions(target, opts)
 	bundled, resolveErr := ResolvePath(teeOpts)
 	if resolveErr != nil {
-		fmt.Fprintf(runner.Out, "bundled CLI not present, skipping tee install (%v)\n", resolveErr)
+		patch.Note(runner, fmt.Sprintf("bundled CLI not present, skipping tee install (%v)", resolveErr))
 		return nil
 	}
 	if _, statErr := os.Stat(bundled); statErr != nil {
@@ -103,14 +103,14 @@ func PostPatchHook(ctx context.Context, runner *patch.Runner, target targets.Tar
 			bundledCLITeeLog.ErrorContext(ctx, "bundledclitee.post_patch_stat_failed", "path", bundled, "err", statErr)
 			return fmt.Errorf("stat bundled cli %s: %w", bundled, statErr)
 		}
-		fmt.Fprintf(runner.Out, "bundled CLI missing at %s, skipping tee install\n", bundled)
+		patch.Note(runner, fmt.Sprintf("bundled CLI missing at %s, skipping tee install", bundled))
 		return nil
 	}
 	if _, realErr := os.Stat(bundled + ".real"); realErr == nil {
-		fmt.Fprintf(runner.Out, "bundled CLI already wrapped (.real present), skipping\n")
+		patch.Note(runner, "bundled CLI already wrapped (.real present), skipping")
 		return nil
 	}
-	fmt.Fprintf(runner.Out, "install bundled CLI stdio tee at %s\n", bundled)
+	patch.Note(runner, "install bundled CLI stdio tee at "+bundled)
 	if opts.DryRun {
 		return nil
 	}
@@ -128,7 +128,7 @@ func PreUnpatchHook(ctx context.Context, runner *patch.Runner, target targets.Ta
 	teeOpts := targetOptions(target, opts)
 	bundled, resolveErr := ResolvePath(teeOpts)
 	if resolveErr != nil {
-		fmt.Fprintf(runner.Out, "bundled CLI not present, skipping tee uninstall (%v)\n", resolveErr)
+		patch.Note(runner, fmt.Sprintf("bundled CLI not present, skipping tee uninstall (%v)", resolveErr))
 		return nil
 	}
 	if _, statErr := os.Stat(bundled + ".real"); statErr != nil {
@@ -136,10 +136,10 @@ func PreUnpatchHook(ctx context.Context, runner *patch.Runner, target targets.Ta
 			bundledCLITeeLog.ErrorContext(ctx, "bundledclitee.pre_unpatch_stat_real_failed", "path", bundled+".real", "err", statErr)
 			return fmt.Errorf("stat bundled cli real sibling %s.real: %w", bundled, statErr)
 		}
-		fmt.Fprintf(runner.Out, "no .real sibling at %s.real, nothing to uninstall\n", bundled)
+		patch.Note(runner, "no .real sibling at "+bundled+".real, nothing to uninstall")
 		return nil
 	}
-	fmt.Fprintf(runner.Out, "uninstall bundled CLI stdio tee at %s\n", bundled)
+	patch.Note(runner, "uninstall bundled CLI stdio tee at "+bundled)
 	if opts.DryRun {
 		return nil
 	}

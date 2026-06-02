@@ -4,18 +4,18 @@ package operations
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"sync"
 
 	"goodkind.io/desktop-via-clyde/internal/catalog"
-	"goodkind.io/desktop-via-clyde/internal/paths"
-	"goodkind.io/desktop-via-clyde/internal/state"
+	"goodkind.io/desktop-via-clyde/internal/clioutput"
+	"goodkind.io/desktop-via-clyde/internal/response"
+	"goodkind.io/desktop-via-clyde/internal/statusreport"
 	"goodkind.io/desktop-via-clyde/internal/targets"
-	"howett.net/plist"
 )
 
 // Handler runs one configured operation capability.
@@ -72,6 +72,7 @@ type Request struct {
 	CLI        *targets.CLIProgram
 	Capability string
 	Flags      FlagValues
+	Format     clioutput.Format
 }
 
 // Run dispatches one operation capability with parsed flags and an optional
@@ -127,49 +128,23 @@ func AppStatus(ctx context.Context, req Request) error {
 	if req.App == nil {
 		return fmt.Errorf("%s requires an app target", req.Capability)
 	}
-	if err := writeAppStatus(ctx, req.Out, *req.App); err != nil {
+	report, err := statusreport.BuildTarget(ctx, *req.App)
+	if err != nil {
 		return Error(ctx, "operations.app_status_failed", "print app status", err)
 	}
-	return nil
-}
-
-func writeAppStatus(ctx context.Context, out io.Writer, target targets.Target) error {
-	multiState, err := state.Load(paths.StateFile())
-	if err != nil {
-		return Error(ctx, "operations.app_status_load_state_failed", "load state file "+paths.StateFile(), err)
-	}
-	fmt.Fprintf(out, "state file: %s\n", paths.StateFile())
-	fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", "TARGET", "STATE", "VERSION", "NOTES")
-
-	entry, hasState := multiState.Targets[target.ID]
-	appExists, appStatErr := pathExists(ctx, target.AppPath)
-	if appStatErr != nil {
-		return Error(ctx, "operations.app_status_stat_app_failed", "stat app bundle "+target.AppPath, appStatErr)
-	}
-	if !appExists {
-		fmt.Fprintf(out, "%-8s  %-9s  %-20s  bundle missing at %s\n", target.ID, "absent", "-", target.AppPath)
+	if req.Format == clioutput.FormatJSON {
+		body, err := json.Marshal(report)
+		if err != nil {
+			return Error(ctx, "operations.app_status_marshal_failed", "marshal app status", err)
+		}
+		if err := response.WriteJSON(ctx, req.Out, body, response.JSONIndented); err != nil {
+			return Error(ctx, "operations.app_status_write_json_failed", "write app status", err)
+		}
 		return nil
 	}
-	if !hasState {
-		fmt.Fprintf(out, "%-8s  %-9s  %-20s  bundle present, no state entry\n", target.ID, "clean", "-")
-		return nil
+	if err := statusreport.WriteText(req.Out, report); err != nil {
+		return Error(ctx, "operations.app_status_write_text_failed", "write app status", err)
 	}
-
-	currentVersion := readBundleVersion(target)
-	stateLabel := "patched"
-	notes := fmt.Sprintf("signed-as=%q", entry.SignIdentity)
-	realPathExists, realPathErr := pathExists(ctx, paths.RealBinaryPath(target))
-	if realPathErr != nil {
-		return Error(ctx, "operations.app_status_stat_real_failed", "stat restored binary path "+paths.RealBinaryPath(target), realPathErr)
-	}
-	if !realPathExists {
-		stateLabel = "drifted"
-		notes = notes + "; " + target.ExecName + ".real missing"
-	} else if currentVersion != "" && currentVersion != entry.PatchedVersion {
-		stateLabel = "drifted"
-		notes += fmt.Sprintf("; current version %s != patched %s", currentVersion, entry.PatchedVersion)
-	}
-	fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", target.ID, stateLabel, entry.PatchedVersion, notes)
 	return nil
 }
 
@@ -177,44 +152,6 @@ func writeAppStatus(ctx context.Context, out io.Writer, target targets.Target) e
 func Error(ctx context.Context, event string, message string, err error) error {
 	slog.Default().ErrorContext(ctx, event, "err", err)
 	return errors.New(message + ": " + err.Error())
-}
-
-func pathExists(ctx context.Context, path string) (bool, error) {
-	_, err := os.Stat(path)
-	if err == nil {
-		return true, nil
-	}
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	slog.Default().ErrorContext(ctx, "operations.path_exists_stat_failed", "path", path, "err", err)
-	return false, errors.New("stat " + path + ": " + err.Error())
-}
-
-func readBundleVersion(target targets.Target) string {
-	info, err := readInfoPlist(paths.InfoPlistPath(target))
-	if err != nil {
-		return ""
-	}
-	return info.CFBundleVersion
-}
-
-type infoPlist struct {
-	CFBundleVersion string `plist:"CFBundleVersion"`
-}
-
-func readInfoPlist(path string) (infoPlist, error) {
-	var info infoPlist
-	data, err := os.ReadFile(path)
-	if err != nil {
-		operationsLog.Error("operations.info_plist_read_failed", "path", path, "err", err)
-		return info, fmt.Errorf("read info plist %s: %w", path, err)
-	}
-	if _, err := plist.Unmarshal(data, &info); err != nil {
-		operationsLog.Error("operations.info_plist_parse_failed", "path", path, "err", err)
-		return info, fmt.Errorf("parse info plist %s: %w", path, err)
-	}
-	return info, nil
 }
 
 func logOperationRegistrationError(message string, err error) error {

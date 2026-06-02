@@ -3,10 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"goodkind.io/desktop-via-clyde/internal/batchops"
+	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/composition"
 	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/operations"
@@ -19,14 +23,14 @@ func TestRootHelpListsTargetCommands(t *testing.T) {
 		t.Fatalf("executeRoot(--help): %v", err)
 	}
 
-	required := []string{"cursor", "codex", "claude", "codex-cli", "status"}
+	required := []string{"patch", "upgrade", "cursor", "codex", "claude", "codex-cli", "status"}
 	for _, want := range required {
 		if !strings.Contains(output, want) {
 			t.Fatalf("root help missing %q\noutput:\n%s", want, output)
 		}
 	}
 
-	forbidden := []string{"patch", "unpatch", "upgrade", "keychain-migrate", strings.Join([]string{"mitm", "hook"}, "-")}
+	forbidden := []string{"unpatch", "keychain-migrate", strings.Join([]string{"mitm", "hook"}, "-")}
 	for _, want := range forbidden {
 		if strings.Contains(output, "\n  "+want+" ") {
 			t.Fatalf("root help unexpectedly lists %q\noutput:\n%s", want, output)
@@ -84,6 +88,31 @@ func TestClaudeUpgradeHelpOmitsChannelFlag(t *testing.T) {
 	}
 }
 
+func TestBatchAllHelpListsSharedFlags(t *testing.T) {
+	output, err := executeRoot(t, "upgrade", "all", "--help")
+	if err != nil {
+		t.Fatalf("executeRoot(upgrade all --help): %v", err)
+	}
+	for _, want := range []string{"--output-format string", "--parallel int", "--target stringArray", "--set stringArray", "--no-migrate-keychain"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("upgrade all help missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRootHelpUsesResponseWrapper(t *testing.T) {
+	output, err := executeRoot(t, "--help")
+	if err != nil {
+		t.Fatalf("executeRoot(--help): %v", err)
+	}
+	if !strings.HasPrefix(output, "trace_id=") {
+		t.Fatalf("root help missing response header\noutput:\n%s", output)
+	}
+	if !strings.Contains(output, "--output-format string") {
+		t.Fatalf("root help missing inherited output format flag\noutput:\n%s", output)
+	}
+}
+
 func TestClaudeHelpDoesNotListBundledCLITeeEntrypoint(t *testing.T) {
 	output, err := executeRoot(t, "claude", "--help")
 	if err != nil {
@@ -106,6 +135,10 @@ func TestClaudeBundledCLITeeEntrypointReturnsError(t *testing.T) {
 
 func TestOperationHelpCommandsSucceed(t *testing.T) {
 	for _, args := range [][]string{
+		{"patch", "--help"},
+		{"patch", "all", "--help"},
+		{"upgrade", "--help"},
+		{"upgrade", "all", "--help"},
 		{"cursor", "upgrade", "--help"},
 		{"codex", "patch", "--help"},
 		{"codex", "upgrade", "--help"},
@@ -212,6 +245,8 @@ func TestRootHelpRendersConfiguredFakeCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeRootNoFixture(--help): %v", err)
 	}
+	assertContainsOutput(t, rootOutput, "patch")
+	assertContainsOutput(t, rootOutput, "upgrade")
 	assertContainsOutput(t, rootOutput, "alpha-app")
 	assertContainsOutput(t, rootOutput, "beta-tool")
 }
@@ -366,6 +401,125 @@ func TestFakeCLIOperationDispatchUsesConfiguredAliasAndFlags(t *testing.T) {
 	}
 }
 
+func TestPatchAllDryRunDispatchesBatchRequest(t *testing.T) {
+	var got batchops.Request
+	output, err := executeRootWithBatchRunner(t, func(_ context.Context, req batchops.Request) error {
+		got = req
+		return nil
+	}, "patch", "all", "--dry-run", "--no-migrate-keychain", "--parallel", "2", "--target", "cursor", "--set", "cursor.app-path=/tmp/Cursor.app")
+	if err != nil {
+		t.Fatalf("executeRootWithBatchRunner(patch all): %v\noutput:\n%s", err, output)
+	}
+	if got.Operation != batchops.OperationPatch {
+		t.Fatalf("operation = %q, want %q", got.Operation, batchops.OperationPatch)
+	}
+	if !got.DryRun {
+		t.Fatal("dry-run = false, want true")
+	}
+	if !got.NoMigrateKeychain {
+		t.Fatal("no-migrate-keychain = false, want true")
+	}
+	if got.Parallel != 2 {
+		t.Fatalf("parallel = %d, want 2", got.Parallel)
+	}
+	if len(got.Targets) != 1 || got.Targets[0] != "cursor" {
+		t.Fatalf("targets = %#v", got.Targets)
+	}
+	if len(got.Sets) != 1 || got.Sets[0] != "cursor.app-path=/tmp/Cursor.app" {
+		t.Fatalf("sets = %#v", got.Sets)
+	}
+	if got.Format != clioutput.FormatText {
+		t.Fatalf("format = %q, want %q", got.Format, clioutput.FormatText)
+	}
+}
+
+func TestUpgradeAllDryRunDispatchesBatchRequest(t *testing.T) {
+	var got batchops.Request
+	output, err := executeRootWithBatchRunner(t, func(_ context.Context, req batchops.Request) error {
+		got = req
+		return nil
+	}, "upgrade", "all", "--dry-run", "--target", "cursor", "--target", "codex-cli", "--set", "cursor.channel=stable", "--set", "codex-cli.codex-home=/tmp/codex-home")
+	if err != nil {
+		t.Fatalf("executeRootWithBatchRunner(upgrade all): %v\noutput:\n%s", err, output)
+	}
+	if got.Operation != batchops.OperationUpgrade {
+		t.Fatalf("operation = %q, want %q", got.Operation, batchops.OperationUpgrade)
+	}
+	if !got.DryRun {
+		t.Fatal("dry-run = false, want true")
+	}
+	if want := []string{"cursor", "codex-cli"}; strings.Join(got.Targets, ",") != strings.Join(want, ",") {
+		t.Fatalf("targets = %#v, want %#v", got.Targets, want)
+	}
+	if want := []string{"cursor.channel=stable", "codex-cli.codex-home=/tmp/codex-home"}; strings.Join(got.Sets, ",") != strings.Join(want, ",") {
+		t.Fatalf("sets = %#v, want %#v", got.Sets, want)
+	}
+}
+
+func TestBatchRunnerErrorReturnsNonZero(t *testing.T) {
+	output, err := executeRootWithBatchRunner(t, func(_ context.Context, _ batchops.Request) error {
+		return errors.New("boom")
+	}, "patch", "all", "--dry-run")
+	if err == nil {
+		t.Fatalf("executeRootWithBatchRunner(patch all) unexpectedly succeeded\noutput:\n%s", output)
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("error = %q, want boom", err.Error())
+	}
+}
+
+func TestRootStatusJSONEmitsTypedPayload(t *testing.T) {
+	output, err := executeRoot(t, "status", "--output-format", "json")
+	if err != nil {
+		t.Fatalf("executeRoot(status json): %v", err)
+	}
+	var payload struct {
+		Meta struct {
+			TraceID string `json:"trace_id"`
+			SpanID  string `json:"span_id"`
+		} `json:"_meta"`
+		StateFile string `json:"state_file"`
+		Targets   []struct {
+			ID    string `json:"id"`
+			State string `json:"state"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("unmarshal status json: %v\noutput:\n%s", err, output)
+	}
+	if payload.Meta.TraceID == "" || payload.Meta.SpanID == "" {
+		t.Fatalf("missing metadata in status json: %#v", payload.Meta)
+	}
+	if payload.StateFile == "" || len(payload.Targets) == 0 {
+		t.Fatalf("incomplete status payload: %#v", payload)
+	}
+}
+
+func TestPatchAllDryRunJSONEmitsProgressAndSummary(t *testing.T) {
+	output, err := executeRoot(t, "patch", "all", "--dry-run", "--target", "cursor", "--output-format", "json")
+	if err != nil {
+		t.Fatalf("executeRoot(patch all json): %v\noutput:\n%s", err, output)
+	}
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected progress and summary lines\noutput:\n%s", output)
+	}
+	var progress map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &progress); err != nil {
+		t.Fatalf("unmarshal progress line: %v\nline:\n%s", err, lines[0])
+	}
+	if progress["type"] != "progress" {
+		t.Fatalf("progress type = %#v", progress["type"])
+	}
+	var summary map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &summary); err != nil {
+		t.Fatalf("unmarshal summary line: %v\nline:\n%s", err, lines[len(lines)-1])
+	}
+	if summary["type"] != "summary" {
+		t.Fatalf("summary type = %#v", summary["type"])
+	}
+}
+
 func executeRoot(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	installFixture(t)
@@ -373,16 +527,26 @@ func executeRoot(t *testing.T, args ...string) (string, error) {
 }
 
 func executeRootNoFixture(args ...string) (string, error) {
-	var out bytes.Buffer
-	cmd := newRootCmd(context.Background(), &out)
-	cmd.SetArgs(args)
-	err := cmd.Execute()
-	return out.String(), err
+	return executeRootNoFixtureWithRunners(operations.Run, batchops.Run, args...)
 }
 
 func executeRootWithRunner(runner operationRunner, args ...string) (string, error) {
+	return executeRootNoFixtureWithRunners(runner, func(_ context.Context, _ batchops.Request) error { return nil }, args...)
+}
+
+func executeRootWithBatchRunner(t *testing.T, runner batchOperationRunner, args ...string) (string, error) {
+	t.Helper()
+	installFixture(t)
+	return executeRootNoFixtureWithRunners(func(_ context.Context, _ operations.Request) error { return nil }, runner, args...)
+}
+
+func executeRootNoFixtureWithRunners(
+	runner operationRunner,
+	batchRunner batchOperationRunner,
+	args ...string,
+) (string, error) {
 	var out bytes.Buffer
-	cmd := newRootCmdWithRunner(context.Background(), &out, runner)
+	cmd := newRootCmdWithRunners(context.Background(), &out, &out, runner, batchRunner)
 	cmd.SetArgs(args)
 	err := cmd.Execute()
 	return out.String(), err

@@ -57,19 +57,11 @@ func Unpatch(ctx context.Context, t targets.Target, opts Options) error {
 }
 
 func removeTargetState(ctx context.Context, targetID string) error {
-	ms, err := state.Load(paths.StateFile())
-	if err != nil {
-		return logPatchError(ctx, "unpatch.load_state_failed", fmt.Errorf("load state: %w", err))
-	}
-	delete(ms.Targets, targetID)
-	if len(ms.Targets) == 0 {
-		if err := state.Remove(paths.StateFile()); err != nil {
-			return logPatchError(ctx, "unpatch.remove_state_file_failed", fmt.Errorf("remove state file: %w", err))
-		}
-		return nil
-	}
-	if err := state.Save(paths.StateFile(), ms); err != nil {
-		return logPatchError(ctx, "unpatch.save_state_failed", fmt.Errorf("save state: %w", err))
+	if err := state.Update(paths.StateFile(), func(ms state.MultiState) (state.MultiState, error) {
+		delete(ms.Targets, targetID)
+		return ms, nil
+	}); err != nil {
+		return logPatchError(ctx, "unpatch.save_state_failed", fmt.Errorf("update state: %w", err))
 	}
 	return nil
 }

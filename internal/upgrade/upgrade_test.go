@@ -181,8 +181,10 @@ func TestLoadOriginalDRUsesStateEntry(t *testing.T) {
 			},
 		},
 	}
-	if err := state.Save(paths.StateFile(), multiState); err != nil {
-		t.Fatalf("state.Save: %v", err)
+	if err := state.Update(paths.StateFile(), func(_ state.MultiState) (state.MultiState, error) {
+		return multiState, nil
+	}); err != nil {
+		t.Fatalf("state.Update: %v", err)
 	}
 	got, err := loadOriginalDR(context.Background(), tg, false)
 	if err != nil {
