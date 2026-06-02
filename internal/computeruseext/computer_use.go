@@ -92,7 +92,7 @@ func BundledLifecycleHook(
 			return err
 		}
 	}
-	return patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID, false)
+	return patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID)
 }
 
 // LifecycleHook repairs installed and cached Computer Use helpers.
@@ -118,7 +118,7 @@ func LifecycleHook(
 	patch.RecordTrace(r, ActionRepairBundledComputerUse, t.ID, appPath)
 	patch.Note(r, fmt.Sprintf("target=%s repair Computer Use helper at %s", t.ID, appPath))
 	if r.DryRun {
-		if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID, true); err != nil {
+		if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID); err != nil {
 			return err
 		}
 		if err := patchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
@@ -137,7 +137,7 @@ func LifecycleHook(
 		}
 		return err
 	}
-	if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID, true); err != nil {
+	if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID); err != nil {
 		return err
 	}
 	if err := patchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
@@ -206,7 +206,7 @@ func patchComputerUseCache(
 			if err := ensureComputerUseAppPath(appPath); err != nil {
 				return err
 			}
-			if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID, false); err != nil {
+			if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID); err != nil {
 				return err
 			}
 		}
@@ -241,7 +241,7 @@ func patchComputerUseAuthPluginStep(
 func dryRunPatchComputerUseAuthPlugin(
 	ctx context.Context,
 	r *patch.Runner,
-	t targets.Target,
+	_ targets.Target,
 	pluginPath string,
 	executablePath string,
 	policy targets.ComputerUsePolicy,
@@ -249,9 +249,6 @@ func dryRunPatchComputerUseAuthPlugin(
 ) error {
 	patch.RecordTrace(r, ActionRepairComputerUseTrustedTeam, "", executablePath)
 	patch.Note(r, "computer-use: repair login authorization trusted service team in "+executablePath)
-	if err := backupComputerUseAuthPlugin(ctx, r, t, pluginPath); err != nil {
-		return err
-	}
 	stagingPath := computerUseAuthPluginDryRunStagingPath(pluginPath)
 	if err := r.Run(ctx, "/usr/bin/rsync", "-a", pluginPath+"/", stagingPath+"/"); err != nil {
 		return logComputerUsePatchError(ctx, "patch.computer_use_auth_plugin_stage_failed",
@@ -294,9 +291,6 @@ func patchComputerUseAuthPlugin(
 
 	repair, err := readComputerUseAuthPluginRepair(ctx, executablePath, policy, localTeamID)
 	if err != nil {
-		return err
-	}
-	if err := backupComputerUseAuthPlugin(ctx, r, t, pluginPath); err != nil {
 		return err
 	}
 	if err := stageInstallComputerUseAuthPlugin(ctx, r, pluginPath, executablePath, policy, repair); err != nil {
@@ -403,30 +397,6 @@ func installComputerUseAuthPlugin(ctx context.Context, r *patch.Runner, stagingP
 	return nil
 }
 
-func backupComputerUseAuthPlugin(ctx context.Context, r *patch.Runner, t targets.Target, pluginPath string) error {
-	backup := computerUseAuthPluginBackupBundle(t, pluginPath)
-	if !r.DryRun {
-		if _, err := os.Stat(backup); err == nil {
-			patch.Note(r, fmt.Sprintf("target=%s authorization plugin backup exists at %s, skipping", t.ID, backup))
-			return nil
-		}
-		if err := os.MkdirAll(filepath.Dir(backup), 0o755); err != nil {
-			return logComputerUsePatchError(ctx, "patch.computer_use_auth_plugin_backup_dir_failed",
-				fmt.Errorf("create authorization plugin backup dir %s: %w", filepath.Dir(backup), err))
-		}
-	}
-	patch.Note(r, fmt.Sprintf("target=%s backup authorization plugin %s -> %s", t.ID, pluginPath, backup))
-	if err := r.Run(ctx, "/usr/bin/rsync", "-a", pluginPath+"/", backup+"/"); err != nil {
-		return logComputerUsePatchError(ctx, "patch.computer_use_auth_plugin_backup_failed",
-			fmt.Errorf("backup authorization plugin: %w", err))
-	}
-	return nil
-}
-
-func computerUseAuthPluginBackupBundle(t targets.Target, pluginPath string) string {
-	return filepath.Join(paths.BackupDir(t), "computer-use", filepath.Base(pluginPath))
-}
-
 func computerUseAuthPluginDryRunStagingPath(pluginPath string) string {
 	return filepath.Join(os.TempDir(), "desktop-via-clyde-auth-plugin", filepath.Base(pluginPath))
 }
@@ -474,17 +444,11 @@ func verifyComputerUseAuthPlugin(
 func patchComputerUseBundle(
 	ctx context.Context,
 	r *patch.Runner,
-	t targets.Target,
+	_ targets.Target,
 	appPath string,
 	policy targets.ComputerUsePolicy,
 	localTeamID string,
-	backup bool,
 ) error {
-	if backup {
-		if err := backupComputerUseHelper(ctx, r, t, appPath); err != nil {
-			return err
-		}
-	}
 	if err := patchComputerUseTrustedTeam(ctx, r, appPath, policy, localTeamID); err != nil {
 		return err
 	}
@@ -503,29 +467,6 @@ func patchComputerUseBundle(
 		return err
 	}
 	return nil
-}
-
-func backupComputerUseHelper(ctx context.Context, r *patch.Runner, t targets.Target, appPath string) error {
-	backup := computerUseBackupBundle(t, appPath)
-	if !r.DryRun {
-		if _, err := os.Stat(backup); err == nil {
-			patch.Note(r, fmt.Sprintf("target=%s helper backup exists at %s, skipping", t.ID, backup))
-			return nil
-		}
-		if err := os.MkdirAll(filepath.Dir(backup), 0o755); err != nil {
-			return logComputerUsePatchError(ctx, "patch.computer_use_backup_dir_failed", fmt.Errorf("create helper backup dir %s: %w", filepath.Dir(backup), err))
-		}
-	}
-	patch.Note(r, fmt.Sprintf("target=%s backup helper %s -> %s", t.ID, appPath, backup))
-	if err := r.Run(ctx, "/usr/bin/rsync", "-a", appPath+"/", backup+"/"); err != nil {
-		return logComputerUsePatchError(ctx, "patch.computer_use_backup_failed",
-			fmt.Errorf("backup helper: %w", err))
-	}
-	return nil
-}
-
-func computerUseBackupBundle(t targets.Target, appPath string) string {
-	return filepath.Join(paths.BackupDir(t), "computer-use", filepath.Base(appPath))
 }
 
 func patchComputerUseTrustedTeam(

@@ -8,7 +8,7 @@ This project modifies third-party app bundles in place and re-signs them with a 
 
 The runtime config lives at `$XDG_CONFIG_HOME/desktop-via-clyde/config.toml`, with `$HOME/.config/desktop-via-clyde/config.toml` as the default path.
 
-Runtime state lives under `$XDG_STATE_HOME/clyde`, with `$HOME/.local/state/clyde` as the default root. Patch state, app backups, helper installs, and the Clyde MITM CA all live under that state root.
+Runtime state lives under `$XDG_STATE_HOME/clyde`, with `$HOME/.local/state/clyde` as the default root. Patch state, helper installs, logs, and the Clyde MITM CA all live under that state root.
 
 The checked-in config fixture lives under `internal/testconfig/testdata`.
 

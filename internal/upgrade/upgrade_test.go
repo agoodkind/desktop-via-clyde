@@ -186,7 +186,7 @@ func TestLoadOriginalDRUsesStateEntry(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("state.Update: %v", err)
 	}
-	got, err := loadOriginalDR(context.Background(), tg, false)
+	got, err := loadOriginalDR(context.Background(), tg)
 	if err != nil {
 		t.Fatalf("loadOriginalDR: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestLoadOriginalDRBootstrapsCleanClaude(t *testing.T) {
 		return anthropicRequirement, nil
 	})
 	t.Cleanup(restore)
-	got, err := loadOriginalDR(context.Background(), tg, false)
+	got, err := loadOriginalDR(context.Background(), tg)
 	if err != nil {
 		t.Fatalf("loadOriginalDR: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestLoadOriginalDRRejectsMissingStateWithRealBinary(t *testing.T) {
 	if err := os.WriteFile(paths.RealBinaryPath(tg), []byte("patched"), 0o755); err != nil {
 		t.Fatalf("WriteFile real binary: %v", err)
 	}
-	_, err := loadOriginalDR(context.Background(), tg, false)
+	_, err := loadOriginalDR(context.Background(), tg)
 	if err == nil {
 		t.Fatal("expected missing state plus real binary error")
 	}
@@ -239,7 +239,7 @@ func TestLoadOriginalDRRejectsLocalRequirementBootstrap(t *testing.T) {
 		return goodkindRequirement, nil
 	})
 	t.Cleanup(restore)
-	_, err := loadOriginalDR(context.Background(), tg, false)
+	_, err := loadOriginalDR(context.Background(), tg)
 	if err == nil {
 		t.Fatal("expected local signing requirement error")
 	}

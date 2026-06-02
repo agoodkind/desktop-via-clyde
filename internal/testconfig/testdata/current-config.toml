@@ -122,21 +122,6 @@ name = "app-path"
 type = "string"
 usage = "override the target .app path for isolated testing"
 
-[apps.cursor.operations.unpatch]
-use = "unpatch"
-short = "Restore one app's bundle from its backup"
-capability = "app.unpatch"
-
-[[apps.cursor.operations.unpatch.flags]]
-name = "dry-run"
-type = "bool"
-usage = "print every step without modifying the bundle"
-
-[[apps.cursor.operations.unpatch.flags]]
-name = "app-path"
-type = "string"
-usage = "override the target .app path for isolated testing"
-
 [apps.cursor.operations.upgrade]
 use = "upgrade"
 short = "Fetch the latest build from the upstream update manifest, verify, swap into the app path, and re-patch"
@@ -185,8 +170,8 @@ capability = "app.status"
 
 [apps.codex]
 app_path = "/Applications/Codex.app"
-bundle_id = "com.openai.codex"
-exec_name = "Codex"
+bundle_id = "com.openai.codex.beta"
+exec_name = "Codex (Beta)"
 keychain_services = ["Codex Safe Storage", "Codex Auth", "Codex MCP Credentials"]
 nested_sign_paths = [
     "Contents/Resources/codex",
@@ -375,21 +360,6 @@ name = "app-path"
 type = "string"
 usage = "override the target .app path for isolated testing"
 
-[apps.codex.operations.unpatch]
-use = "unpatch"
-short = "Restore one app's bundle from its backup"
-capability = "app.unpatch"
-
-[[apps.codex.operations.unpatch.flags]]
-name = "dry-run"
-type = "bool"
-usage = "print every step without modifying the bundle"
-
-[[apps.codex.operations.unpatch.flags]]
-name = "app-path"
-type = "string"
-usage = "override the target .app path for isolated testing"
-
 [apps.codex.operations.upgrade]
 use = "upgrade"
 short = "Fetch the latest build from the upstream update manifest, verify, swap into the app path, and re-patch"
@@ -544,7 +514,6 @@ completion_steps = [
   "open the session you want to inspect",
   "type /context and wait for the result",
   "read the latest stdio log under {log_dir}/",
-  "desktop-via-clyde claude unpatch when done",
 ]
 
 [apps.claude.operations.patch]
@@ -563,21 +532,6 @@ type = "bool"
 usage = "skip keychain access repair"
 
 [[apps.claude.operations.patch.flags]]
-name = "app-path"
-type = "string"
-usage = "override the target .app path for isolated testing"
-
-[apps.claude.operations.unpatch]
-use = "unpatch"
-short = "Restore one app's bundle from its backup"
-capability = "app.unpatch"
-
-[[apps.claude.operations.unpatch.flags]]
-name = "dry-run"
-type = "bool"
-usage = "print every step without modifying the bundle"
-
-[[apps.claude.operations.unpatch.flags]]
 name = "app-path"
 type = "string"
 usage = "override the target .app path for isolated testing"

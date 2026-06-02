@@ -132,6 +132,8 @@ type Options struct {
 	NoMigrateKeychain bool
 	// Out receives progress output. Defaults to os.Stdout.
 	Out io.Writer
+	// LogOut receives raw subprocess output. Defaults to Out.
+	LogOut io.Writer
 }
 
 // Operation runs the app upgrade operation for one configured target.
@@ -144,6 +146,7 @@ func Operation(ctx context.Context, req operations.Request) error {
 		DryRun:            req.Flags.Bool("dry-run"),
 		NoMigrateKeychain: req.Flags.Bool("no-migrate-keychain"),
 		Out:               req.Out,
+		LogOut:            req.LogOut,
 	}); err != nil {
 		upgradeLog.ErrorContext(ctx, "upgrade.operation_failed", "err", err)
 		return fmt.Errorf("upgrade operation: %w",
@@ -211,6 +214,9 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	}
 	upgradeLog.InfoContext(ctx, "upgrade.start", "target", t.ID, "app_path", t.AppPath, "dry_run", opts.DryRun)
 	r := patch.NewRunner(ctx, opts.DryRun, opts.Out)
+	if opts.LogOut != nil {
+		r.RawOut = opts.LogOut
+	}
 	channel, err := t.Updater.ResolveChannel(opts.Channel)
 	if err != nil {
 		return logUpgradeError(ctx, "upgrade.resolve_channel_failed", fmt.Errorf("resolve update channel: %w", err))
@@ -244,7 +250,7 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 		return nil
 	}
 
-	originalDR, err := loadOriginalDR(ctx, t, opts.DryRun)
+	originalDR, err := loadOriginalDR(ctx, t)
 	if err != nil {
 		return err
 	}
@@ -286,6 +292,7 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 		DryRun:            opts.DryRun,
 		NoMigrateKeychain: opts.NoMigrateKeychain,
 		Out:               opts.Out,
+		LogOut:            r.RawOut,
 		Trace:             nil,
 	}
 	if err := patch.Patch(ctx, t, patchOpts); err != nil {
@@ -501,11 +508,10 @@ func directHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
-// loadOriginalDR reads or repairs the recorded upstream DR string from
-// state.json. The field is populated at first patch time by reading
-// codesign --display --requirements - against the unmodified upstream bundle.
-func loadOriginalDR(ctx context.Context, t targets.Target, dryRun bool) (string, error) {
-	dr, err := patch.OriginalDesignatedRequirement(ctx, t, !dryRun)
+// loadOriginalDR reads the recorded upstream DR string from state.json and
+// falls back to the configured bootstrap strategy when state is missing.
+func loadOriginalDR(ctx context.Context, t targets.Target) (string, error) {
+	dr, err := patch.OriginalDesignatedRequirement(ctx, t)
 	if err == nil {
 		return verifyOriginalRequirementIsUpstream(t, dr)
 	}
@@ -526,7 +532,7 @@ func loadOriginalDR(ctx context.Context, t targets.Target, dryRun bool) (string,
 func bootstrapOriginalDRFromCleanMainBinary(ctx context.Context, t targets.Target) (string, error) {
 	realPath := paths.RealBinaryPath(t)
 	if _, err := os.Stat(realPath); err == nil {
-		return "", logUpgradeError(ctx, "upgrade.original_dr_state_missing_real_exists", fmt.Errorf("target=%s has no state entry but %s exists; restore or unpatch the app before upgrade", t.ID, realPath))
+		return "", logUpgradeError(ctx, "upgrade.original_dr_state_missing_real_exists", fmt.Errorf("target=%s has no state entry but %s exists; reinstall a clean vendor app and patch again before upgrade", t.ID, realPath))
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", logUpgradeError(ctx, "upgrade.original_dr_real_stat_failed", fmt.Errorf("stat %s: %w", realPath, err))
 	}
@@ -573,13 +579,14 @@ func handleCurrentVersion(
 			DryRun:            opts.DryRun,
 			NoMigrateKeychain: opts.NoMigrateKeychain,
 			Out:               opts.Out,
+			LogOut:            r.RawOut,
 			Trace:             nil,
 		}); err != nil {
 			return logUpgradeError(ctx, "upgrade.current_version_patch_failed", fmt.Errorf("patch clean bundle after version check: %w", err))
 		}
 		return nil
 	}
-	if _, err := loadOriginalDR(ctx, t, opts.DryRun); err != nil {
+	if _, err := loadOriginalDR(ctx, t); err != nil {
 		return err
 	}
 	notef(r, fmt.Sprintf("target=%s already on version %s; nothing to do", t.ID, currentVersion))
@@ -768,17 +775,14 @@ func verifyOriginalDR(ctx context.Context, r *patch.Runner, appPath, dr string, 
 	return nil
 }
 
-// swapBundle removes the existing /Applications/<App>.app and the stale
-// desktop-via-clyde backup, then installs the freshly extracted upstream copy.
+// swapBundle removes the existing /Applications/<App>.app and installs the
+// freshly extracted upstream copy.
 func swapBundle(ctx context.Context, r *patch.Runner, t targets.Target, extractedApp string, dryRun bool) error {
 	upgradeLog.DebugContext(ctx, "upgrade.swap_bundle.boundary", "target", t.ID, "app_path", t.AppPath, "extracted_app", extractedApp, "dry_run", dryRun)
-	notef(r, fmt.Sprintf("removing patched bundle %s and stale backup %s", t.AppPath, paths.BackupDir(t)))
+	notef(r, "removing patched bundle "+t.AppPath)
 	if !dryRun {
 		if err := os.RemoveAll(t.AppPath); err != nil {
 			return logUpgradeError(ctx, "upgrade.remove_current_bundle_failed", fmt.Errorf("remove %s: %w", t.AppPath, err))
-		}
-		if err := os.RemoveAll(paths.BackupDir(t)); err != nil {
-			return logUpgradeError(ctx, "upgrade.remove_backup_failed", fmt.Errorf("remove %s: %w", paths.BackupDir(t), err))
 		}
 	}
 	notef(r, fmt.Sprintf("installing fresh bundle %s -> %s", extractedApp, t.AppPath))

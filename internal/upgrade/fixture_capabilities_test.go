@@ -23,7 +23,6 @@ func registerFixtureCapabilities() error {
 func registerFixtureCapabilitiesOnce() error {
 	for _, capability := range []string{
 		"app.patch",
-		"app.unpatch",
 		"app.upgrade",
 		"app.keychain-migrate",
 		"app.status",

@@ -97,16 +97,9 @@ func validateLinkedCapabilities() error {
 	for _, capability := range patch.RegisteredPostPatchHooks() {
 		registeredPostPatch[capability] = true
 	}
-	registeredPreUnpatch := map[string]bool{}
-	for _, capability := range patch.RegisteredPreUnpatchHooks() {
-		registeredPreUnpatch[capability] = true
-	}
 	for _, capability := range catalog.PatchHookCapabilities() {
 		if !registeredPostPatch[capability] {
 			return fmt.Errorf("patch hook capability %q has no post-patch hook", capability)
-		}
-		if !registeredPreUnpatch[capability] {
-			return fmt.Errorf("patch hook capability %q has no pre-unpatch hook", capability)
 		}
 	}
 	registeredPreLaunchPolicy := map[string]bool{}

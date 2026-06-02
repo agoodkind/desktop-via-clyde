@@ -1,4 +1,4 @@
-// Package patch implements the patch, unpatch, and keychain-migrate workflows.
+// Package patch implements the patch and keychain-migrate workflows.
 package patch
 
 import (
@@ -32,8 +32,6 @@ var ErrMissingStateEntry = errors.New("missing target state entry")
 const (
 	// AppPatchCapability is the operation capability for app patching.
 	AppPatchCapability = "app.patch"
-	// AppUnpatchCapability is the operation capability for app unpatching.
-	AppUnpatchCapability = "app.unpatch"
 	// AppKeychainMigrateCapability is the operation capability for keychain migration.
 	AppKeychainMigrateCapability = "app.keychain-migrate"
 )
@@ -47,14 +45,6 @@ func RegisterOperations() error {
 	}
 	if err := operations.Register(AppPatchCapability, Operation); err != nil {
 		return logPatchRegistrationError("register patch operation", err)
-	}
-	if !catalog.HasOperationCapability(AppUnpatchCapability) {
-		if err := catalog.RegisterOperationCapability(AppUnpatchCapability); err != nil {
-			return logPatchRegistrationError("register unpatch capability", err)
-		}
-	}
-	if err := operations.Register(AppUnpatchCapability, UnpatchOperation); err != nil {
-		return logPatchRegistrationError("register unpatch operation", err)
 	}
 	if !catalog.HasOperationCapability(AppKeychainMigrateCapability) {
 		if err := catalog.RegisterOperationCapability(AppKeychainMigrateCapability); err != nil {
@@ -87,6 +77,7 @@ type Options struct {
 	DryRun            bool
 	NoMigrateKeychain bool
 	Out               io.Writer
+	LogOut            io.Writer
 	Trace             *Trace
 }
 
@@ -99,29 +90,12 @@ func Operation(ctx context.Context, req operations.Request) error {
 		DryRun:            req.Flags.Bool("dry-run"),
 		NoMigrateKeychain: req.Flags.Bool("no-migrate-keychain"),
 		Out:               req.Out,
+		LogOut:            req.LogOut,
 		Trace:             nil,
 	}); err != nil {
 		patchLog.ErrorContext(ctx, "patch.operation_failed", "err", err)
 		return fmt.Errorf("patch operation: %w",
 			operations.Error(ctx, "operations.patch_failed", "patch app", err))
-	}
-	return nil
-}
-
-// UnpatchOperation runs the app unpatch operation for one configured target.
-func UnpatchOperation(ctx context.Context, req operations.Request) error {
-	if req.App == nil {
-		return fmt.Errorf("%s requires an app target", req.Capability)
-	}
-	if err := Unpatch(ctx, *req.App, Options{
-		DryRun:            req.Flags.Bool("dry-run"),
-		NoMigrateKeychain: false,
-		Out:               req.Out,
-		Trace:             nil,
-	}); err != nil {
-		patchLog.ErrorContext(ctx, "patch.unpatch_operation_failed", "err", err)
-		return fmt.Errorf("unpatch operation: %w",
-			operations.Error(ctx, "operations.unpatch_failed", "restore app bundle", err))
 	}
 	return nil
 }
@@ -135,6 +109,7 @@ func KeychainMigrateOperation(ctx context.Context, req operations.Request) error
 		DryRun:            req.Flags.Bool("dry-run"),
 		NoMigrateKeychain: false,
 		Out:               req.Out,
+		LogOut:            req.LogOut,
 		Trace:             nil,
 	}); err != nil {
 		patchLog.ErrorContext(ctx, "patch.keychain_migrate_operation_failed", "err", err)
@@ -156,6 +131,9 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	}
 	log := gklog.LoggerFromContext(ctx).With("subcomponent", "patch", "target", t.ID)
 	r := NewRunner(ctx, opts.DryRun, opts.Out)
+	if opts.LogOut != nil {
+		r.RawOut = opts.LogOut
+	}
 	r.Trace = opts.Trace
 	log.InfoContext(ctx, "patch.start", "app_path", t.AppPath, "dry_run", opts.DryRun, "no_migrate_keychain", opts.NoMigrateKeychain)
 
@@ -172,8 +150,9 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	notef(r, fmt.Sprintf("target=%s read Info.plist version=%s id=%s exec=%s",
 		t.ID, info.CFBundleVersion, info.CFBundleIdentifier, info.CFBundleExecutable))
 
-	if err := stepBackup(ctx, r, t); err != nil {
-		return logPatchError(ctx, "patch.backup_failed", fmt.Errorf("backup: %w", err))
+	originalDR, err := resolveOriginalDRForPatch(ctx, r, t)
+	if err != nil {
+		return err
 	}
 
 	var captured []KeychainItem
@@ -213,7 +192,7 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 		notef(r, fmt.Sprintf("target=%s no keychain items needed access restore", t.ID))
 	}
 
-	if err := stepWriteState(ctx, r, t, info.CFBundleVersion); err != nil {
+	if err := stepWriteState(ctx, r, t, info.CFBundleVersion, originalDR); err != nil {
 		return logPatchError(ctx, "patch.write_state_failed", fmt.Errorf("write state: %w", err))
 	}
 
@@ -237,6 +216,11 @@ func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Op
 	if t.Entitlements == nil {
 		return logPatchError(ctx, "patch.entitlement_policy_missing", fmt.Errorf("target %s has no entitlement policy", t.ID))
 	}
+	preservedRoot, cleanupPreserved, err := stagePreservedNestedCode(ctx, r, *t)
+	if err != nil {
+		return logPatchError(ctx, "patch.stage_preserved_nested_code_failed", fmt.Errorf("stage preserved nested code: %w", err))
+	}
+	defer cleanupPreserved()
 	entFile, err := stepExtractEntitlements(ctx, r, *t)
 	if err != nil {
 		return logPatchError(ctx, "patch.extract_entitlements_failed", fmt.Errorf("extract entitlements: %w", err))
@@ -256,11 +240,12 @@ func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Op
 		DryRun:            r.DryRun,
 		NoMigrateKeychain: opts.NoMigrateKeychain,
 		Out:               r.Out,
+		LogOut:            r.RawOut,
 		Trace:             r.Trace,
 	}); err != nil {
 		return logPatchError(ctx, "patch.pre_resign_hook_failed", fmt.Errorf("run pre-resign hooks: %w", err))
 	}
-	if err := stepRestorePreservedNestedCode(ctx, r, *t); err != nil {
+	if err := stepRestorePreservedNestedCode(ctx, r, *t, preservedRoot); err != nil {
 		return logPatchError(ctx, "patch.restore_preserved_nested_code_failed", fmt.Errorf("restore preserved nested code: %w", err))
 	}
 	if err := stepResign(ctx, r, *t, entFile); err != nil {
@@ -314,21 +299,6 @@ func loadInfoPlistOrPlaceholder(t targets.Target, dryRun bool) (InfoPlist, error
 		return InfoPlist{}, logPatchErrorNoContext("patch.info_plist_stat_failed", fmt.Errorf("info plist not found at %s: %w", p, err))
 	}
 	return ReadInfoPlist(p)
-}
-
-func stepBackup(ctx context.Context, r *Runner, t targets.Target) error {
-	bundle := paths.BackupBundle(t)
-	if !r.DryRun {
-		if _, err := os.Stat(bundle); err == nil {
-			notef(r, fmt.Sprintf("target=%s backup exists at %s, skipping", t.ID, bundle))
-			return nil
-		}
-		if err := os.MkdirAll(paths.BackupDir(t), 0o755); err != nil {
-			return logPatchError(ctx, "patch.create_backup_dir_failed", fmt.Errorf("create backup dir %s: %w", paths.BackupDir(t), err))
-		}
-	}
-	notef(r, fmt.Sprintf("target=%s backup app bundle %s -> %s", t.ID, t.AppPath, bundle))
-	return r.Run(ctx, "/usr/bin/rsync", "-a", t.AppPath+"/", bundle+"/")
 }
 
 func stepExtractEntitlements(ctx context.Context, r *Runner, t targets.Target) (string, error) {
@@ -403,10 +373,10 @@ func stepInstallShim(ctx context.Context, r *Runner, t targets.Target) error {
 	return nil
 }
 
-func stepRestorePreservedNestedCode(ctx context.Context, r *Runner, t targets.Target) error {
+func stepRestorePreservedNestedCode(ctx context.Context, r *Runner, t targets.Target, preservedRoot string) error {
 	patchLog.DebugContext(ctx, "patch.restore_preserved_nested_code.boundary", "target", t.ID)
 	for _, relPath := range t.PreservedNestedCodePaths {
-		source := filepath.Join(paths.BackupBundle(t), filepath.FromSlash(relPath))
+		source := filepath.Join(preservedRoot, filepath.FromSlash(relPath))
 		destination := filepath.Join(t.AppPath, filepath.FromSlash(relPath))
 		traceAction(r, actionRestorePreservedNestedCode, t.ID, destination)
 		notef(r, fmt.Sprintf("target=%s restore preserved nested code %s -> %s", t.ID, source, destination))
@@ -513,24 +483,16 @@ func stepStripQuarantine(ctx context.Context, r *Runner, t targets.Target) {
 	_ = unix.Removexattr(t.AppPath, "com.apple.quarantine")
 }
 
-func stepWriteState(ctx context.Context, r *Runner, t targets.Target, version string) error {
+func stepWriteState(ctx context.Context, r *Runner, t targets.Target, version string, originalDR string) error {
 	notef(r, fmt.Sprintf("target=%s write patch state version=%s -> %s", t.ID, version, paths.StateFile()))
 	if r.DryRun {
 		return nil
 	}
-	capturedOriginalDR := false
-	var captureOriginalDRErr error
+	if strings.TrimSpace(originalDR) == "" {
+		return logPatchErrorNoContext("patch.original_dr_missing_before_state_write",
+			fmt.Errorf("target=%s has no clean upstream DesignatedRequirement to write", t.ID))
+	}
 	updateErr := state.Update(paths.StateFile(), func(ms state.MultiState) (state.MultiState, error) {
-		originalDR := ms.Targets[t.ID].OriginalDesignatedRequirement
-		if originalDR == "" {
-			captured, captureErr := captureOriginalDR(ctx, t)
-			if captureErr != nil {
-				captureOriginalDRErr = captureErr
-				return ms, captureErr
-			}
-			originalDR = captured
-			capturedOriginalDR = true
-		}
 		ms.Targets[t.ID] = state.TargetState{
 			PatchedVersion:                version,
 			PatchedAt:                     clock.Now().UTC(),
@@ -540,22 +502,14 @@ func stepWriteState(ctx context.Context, r *Runner, t targets.Target, version st
 		return ms, nil
 	})
 	if updateErr != nil {
-		if captureOriginalDRErr != nil {
-			return logPatchError(ctx, "patch.capture_original_dr_failed", fmt.Errorf("capture original DR from backup: %w", captureOriginalDRErr))
-		}
 		return logPatchError(ctx, "patch.save_state_failed", fmt.Errorf("save state file: %w", updateErr))
-	}
-	if capturedOriginalDR {
-		notef(r, fmt.Sprintf("target=%s captured original DR during state update", t.ID))
 	}
 	return nil
 }
 
 // OriginalDesignatedRequirement returns the recorded upstream
-// DesignatedRequirement for t. If repair is true and a state entry exists but
-// predates the field, it writes the captured DR back to state.json. If repair
-// is false, it captures from backup when possible but leaves state.json alone.
-func OriginalDesignatedRequirement(ctx context.Context, t targets.Target, repair bool) (string, error) {
+// DesignatedRequirement for t from state.json.
+func OriginalDesignatedRequirement(ctx context.Context, t targets.Target) (string, error) {
 	ms, err := state.Load(paths.StateFile())
 	if err != nil {
 		return "", logPatchError(ctx, "patch.original_dr_load_state_failed", fmt.Errorf("load state.json: %w", err))
@@ -567,52 +521,8 @@ func OriginalDesignatedRequirement(ctx context.Context, t targets.Target, repair
 	if entry.OriginalDesignatedRequirement != "" {
 		return entry.OriginalDesignatedRequirement, nil
 	}
-	captured, err := captureOriginalDR(ctx, t)
-	if err != nil {
-		return "", logPatchError(ctx, "patch.original_dr_capture_failed", fmt.Errorf("state entry for target %s has no recorded OriginalDesignatedRequirement and repair from backup failed: %w", t.ID, err))
-	}
-	if !repair {
-		return captured, nil
-	}
-	updateErr := state.Update(paths.StateFile(), func(current state.MultiState) (state.MultiState, error) {
-		currentEntry, ok := current.Targets[t.ID]
-		if !ok {
-			return current, MissingStateEntryError{TargetID: t.ID}
-		}
-		if currentEntry.OriginalDesignatedRequirement == "" {
-			currentEntry.OriginalDesignatedRequirement = captured
-			current.Targets[t.ID] = currentEntry
-		}
-		return current, nil
-	})
-	if updateErr != nil {
-		return "", logPatchError(ctx, "patch.original_dr_save_repair_failed", fmt.Errorf("save repaired state.json: %w", updateErr))
-	}
-	return captured, nil
-}
-
-// captureOriginalDR reads the DesignatedRequirement string from the
-// upstream-signed binary inside the backup bundle and returns it as
-// a single requirement-language line. The function reads from the
-// backup bundle because the live /Applications copy has already been
-// re-signed with Goodkind by the time stepWriteState runs; the
-// backup created before mutation is the only on-disk copy of the bundle
-// that still carries the vendor signature, so the DR captured from
-// there reflects what a freshly downloaded update payload from
-// upstream must satisfy. Falls back to the live bundle for cases
-// where the backup is missing, with a warning logged at the call
-// site.
-func captureOriginalDR(ctx context.Context, t targets.Target) (string, error) {
-	source := filepath.Join(paths.BackupBundle(t), "Contents", "MacOS", t.ExecName)
-	if _, err := os.Stat(source); err != nil {
-		realInBackup := filepath.Join(paths.BackupBundle(t), "Contents", "MacOS", t.ExecName+".real")
-		if _, err := os.Stat(realInBackup); err == nil {
-			source = realInBackup
-		} else {
-			return "", logPatchError(ctx, "patch.original_dr_backup_missing", fmt.Errorf("no upstream-signed binary in backup at %s: %w", paths.BackupBundle(t), err))
-		}
-	}
-	return DesignatedRequirement(ctx, source)
+	return "", logPatchErrorNoContext("patch.original_dr_state_missing",
+		fmt.Errorf("state entry for target %s has no recorded clean upstream DesignatedRequirement", t.ID))
 }
 
 // DesignatedRequirement returns the designated requirement string for one code object.
@@ -636,6 +546,123 @@ func DesignatedRequirement(ctx context.Context, codePath string) (string, error)
 		}
 	}
 	return "", fmt.Errorf("no 'designated =>' line in codesign output for %s", codePath)
+}
+
+var readDesignatedRequirement = DesignatedRequirement
+
+func resolveOriginalDRForPatch(ctx context.Context, r *Runner, t targets.Target) (string, error) {
+	ms, err := state.Load(paths.StateFile())
+	if err != nil {
+		return "", logPatchError(ctx, "patch.original_dr_load_state_failed", fmt.Errorf("load state.json: %w", err))
+	}
+	if entry, ok := ms.Targets[t.ID]; ok {
+		recorded := strings.TrimSpace(entry.OriginalDesignatedRequirement)
+		if recorded != "" && !designatedRequirementIdentifiesLocalTeam(recorded) {
+			return recorded, nil
+		}
+	}
+
+	realExists, err := realBinaryExists(ctx, t)
+	if err != nil {
+		return "", err
+	}
+	if realExists {
+		return "", logPatchErrorNoContext("patch.original_dr_state_missing_real_exists",
+			fmt.Errorf("target=%s has %s but state lacks a clean upstream DesignatedRequirement; reinstall the vendor app and patch again", t.ID, paths.RealBinaryPath(t)))
+	}
+
+	mainPath := paths.MainBinaryPath(t)
+	notef(r, fmt.Sprintf("target=%s capture upstream DR from clean executable %s", t.ID, mainPath))
+	if r.DryRun {
+		if _, err := os.Stat(mainPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return "", nil
+			}
+			return "", logPatchError(ctx, "patch.original_dr_main_binary_stat_failed", fmt.Errorf("stat clean executable %s: %w", mainPath, err))
+		}
+	}
+	dr, err := readDesignatedRequirement(ctx, mainPath)
+	if err != nil {
+		return "", logPatchError(ctx, "patch.original_dr_capture_failed", fmt.Errorf("capture designated requirement from clean executable: %w", err))
+	}
+	if designatedRequirementIdentifiesLocalTeam(dr) {
+		return "", logPatchErrorNoContext("patch.original_dr_identifies_local_team",
+			fmt.Errorf("target=%s DesignatedRequirement identifies local signing team %s, not upstream", t.ID, paths.SignTeamID()))
+	}
+	return dr, nil
+}
+
+func stagePreservedNestedCode(ctx context.Context, r *Runner, t targets.Target) (string, func(), error) {
+	patchLog.DebugContext(ctx, "patch.stage_preserved_nested_code.boundary", "target", t.ID, "count", len(t.PreservedNestedCodePaths), "dry_run", r.DryRun)
+	if len(t.PreservedNestedCodePaths) == 0 {
+		return "", func() {}, nil
+	}
+	stageRoot := filepath.Join(os.TempDir(), "desktop-via-clyde-preserved-code", t.ID)
+	cleanup := func() {}
+	if !r.DryRun {
+		tempRoot, err := os.MkdirTemp("", "desktop-via-clyde-preserved-code-*")
+		if err != nil {
+			return "", nil, logPatchError(ctx, "patch.preserved_nested_code_temp_dir_failed", fmt.Errorf("create preserved nested code temp dir: %w", err))
+		}
+		stageRoot = tempRoot
+		cleanup = func() {
+			_ = os.RemoveAll(tempRoot)
+		}
+	}
+	for _, relPath := range t.PreservedNestedCodePaths {
+		if err := stagePreservedNestedCodePath(ctx, r, t, stageRoot, relPath); err != nil {
+			cleanup()
+			return "", nil, err
+		}
+	}
+	return stageRoot, cleanup, nil
+}
+
+func stagePreservedNestedCodePath(ctx context.Context, r *Runner, t targets.Target, stageRoot string, relPath string) error {
+	source := filepath.Join(t.AppPath, filepath.FromSlash(relPath))
+	destination := filepath.Join(stageRoot, filepath.FromSlash(relPath))
+	if r.DryRun {
+		if err := r.Run(ctx, "/bin/cp", "-p", source, destination); err != nil {
+			return logPatchError(ctx, "patch.preserved_nested_code_stage_file_failed", fmt.Errorf("stage preserved nested code file %s: %w", relPath, err))
+		}
+		return nil
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return logPatchError(ctx, "patch.preserved_nested_code_source_stat_failed", fmt.Errorf("stat preserved nested code source %s: %w", source, err))
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return logPatchError(ctx, "patch.preserved_nested_code_stage_parent_failed", fmt.Errorf("create preserved nested code staging parent %s: %w", filepath.Dir(destination), err))
+	}
+	if info.IsDir() {
+		if err := r.Run(ctx, "/usr/bin/rsync", "-a", source+"/", destination+"/"); err != nil {
+			return logPatchError(ctx, "patch.preserved_nested_code_stage_directory_failed", fmt.Errorf("stage preserved nested code directory %s: %w", relPath, err))
+		}
+		return nil
+	}
+	if err := r.Run(ctx, "/bin/cp", "-p", source, destination); err != nil {
+		return logPatchError(ctx, "patch.preserved_nested_code_stage_file_failed", fmt.Errorf("stage preserved nested code file %s: %w", relPath, err))
+	}
+	return nil
+}
+
+func designatedRequirementIdentifiesLocalTeam(dr string) bool {
+	localTeamID := strings.TrimSpace(paths.SignTeamID())
+	if localTeamID == "" {
+		return false
+	}
+	return strings.Contains(dr, localTeamID)
+}
+
+func realBinaryExists(ctx context.Context, t targets.Target) (bool, error) {
+	_, err := os.Stat(paths.RealBinaryPath(t))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, logPatchError(ctx, "patch.real_binary_stat_failed", fmt.Errorf("stat real binary %s: %w", paths.RealBinaryPath(t), err))
 }
 
 func stepVerify(ctx context.Context, r *Runner, t targets.Target) error {

@@ -4,7 +4,6 @@ package batchops
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,11 +12,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/clioutput"
+	"goodkind.io/desktop-via-clyde/internal/clock"
 	"goodkind.io/desktop-via-clyde/internal/cmdflags"
 	"goodkind.io/desktop-via-clyde/internal/operations"
-	"goodkind.io/desktop-via-clyde/internal/response"
 	"goodkind.io/desktop-via-clyde/internal/spec"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
@@ -57,23 +57,10 @@ type selectedOperation struct {
 
 // Result records one aggregate target result.
 type Result struct {
-	ID   string
-	Kind string
-	Err  error
-}
-
-type summaryItem struct {
-	ID     string `json:"id"`
-	Kind   string `json:"kind"`
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
-}
-
-type summaryDocument struct {
-	Type      string        `json:"type"`
-	Scope     string        `json:"scope"`
-	Operation string        `json:"operation"`
-	Results   []summaryItem `json:"results"`
+	ID       string
+	Kind     string
+	Err      error
+	Duration time.Duration
 }
 
 // Run executes one aggregate batch operation with the default operation runner.
@@ -88,11 +75,6 @@ func RunWithOperationRunner(ctx context.Context, req Request, runner RunnerFunc)
 	}
 	if req.Out == nil {
 		req.Out = os.Stdout
-	}
-	rawOut := req.Out
-	progressOut := req.Out
-	if req.Format == clioutput.FormatJSON {
-		progressOut = clioutput.NewJSONLineWriter(ctx, rawOut, string(req.Operation), "")
 	}
 	selections, knownTargets, err := selectOperations(req.Operation, req.Targets)
 	if err != nil {
@@ -109,9 +91,27 @@ func RunWithOperationRunner(ctx context.Context, req Request, runner RunnerFunc)
 	if parallelism <= 0 || parallelism > len(selections) {
 		parallelism = len(selections)
 	}
+	session, err := clioutput.NewSession(ctx, clioutput.SessionOptions{
+		Out:       req.Out,
+		Format:    req.Format,
+		Operation: string(req.Operation),
+		Scope:     "all",
+		Parallel:  parallelism,
+		DryRun:    req.DryRun,
+	})
+	if err != nil {
+		return fmt.Errorf("create output session: %w", err)
+	}
+	for _, selection := range selections {
+		event := clioutput.NewEvent(clioutput.EventTargetQueued, string(req.Operation))
+		event.Target = selection.ID
+		event.Status = "queued"
+		if emitErr := session.Emit(event); emitErr != nil {
+			return fmt.Errorf("emit queued target event: %w", emitErr)
+		}
+	}
 
 	results := make([]Result, len(selections))
-	var outputMu sync.Mutex
 	var waitGroup sync.WaitGroup
 	semaphore := make(chan struct{}, parallelism)
 
@@ -126,18 +126,23 @@ func RunWithOperationRunner(ctx context.Context, req Request, runner RunnerFunc)
 				}
 				slog.ErrorContext(ctx, "batchops.worker_wrapper.panic", "err", fmt.Errorf("panic: %v", recovered), "target", selection.ID, "operation", req.Operation)
 				results[index] = Result{
-					ID:   selection.ID,
-					Kind: selection.Kind,
-					Err:  fmt.Errorf("panic: %v", recovered),
+					ID:       selection.ID,
+					Kind:     selection.Kind,
+					Err:      fmt.Errorf("panic: %v", recovered),
+					Duration: 0,
 				}
 			}()
-			results[index] = runSelection(ctx, req, runner, progressOut, &outputMu, semaphore, selection, overrides[selection.ID])
+			results[index] = runSelection(ctx, req, runner, session, semaphore, selection, overrides[selection.ID])
 		}(index, selection)
 	}
 
 	waitGroup.Wait()
-	if err := printSummary(ctx, rawOut, req.Operation, req.Format, results); err != nil {
-		return err
+	targetResults := make([]clioutput.TargetResult, 0, len(results))
+	for _, result := range results {
+		targetResults = append(targetResults, clioutput.NewTargetResult(result.ID, result.Kind, result.Err, result.Duration))
+	}
+	if err := session.Close(targetResults); err != nil {
+		return fmt.Errorf("close output session: %w", err)
 	}
 
 	failedCount := 0
@@ -159,8 +164,7 @@ func runSelection(
 	ctx context.Context,
 	req Request,
 	runner RunnerFunc,
-	progressOut io.Writer,
-	outputMu *sync.Mutex,
+	session *clioutput.Session,
 	semaphore chan struct{},
 	selection selectedOperation,
 	overrides map[string]string,
@@ -172,13 +176,19 @@ func runSelection(
 		}
 		slog.ErrorContext(ctx, "batchops.worker.panic", "err", fmt.Errorf("panic: %v", recovered), "target", selection.ID, "operation", req.Operation)
 		result = Result{
-			ID:   selection.ID,
-			Kind: selection.Kind,
-			Err:  fmt.Errorf("panic: %v", recovered),
+			ID:       selection.ID,
+			Kind:     selection.Kind,
+			Err:      fmt.Errorf("panic: %v", recovered),
+			Duration: 0,
 		}
 	}()
 
-	result = Result{ID: selection.ID, Kind: selection.Kind, Err: nil}
+	result = Result{
+		ID:       selection.ID,
+		Kind:     selection.Kind,
+		Err:      nil,
+		Duration: 0,
+	}
 	select {
 	case semaphore <- struct{}{}:
 		defer func() { <-semaphore }()
@@ -187,30 +197,63 @@ func runSelection(
 		return result
 	}
 
-	_ = writeBatchLine(progressOut, outputMu, fmt.Sprintf("[%s] starting %s", selection.ID, req.Operation))
+	started := clock.Now()
+	rawLog, _, logErr := session.OpenTargetLog(selection.ID)
+	if logErr != nil {
+		result.Err = logErr
+		return result
+	}
+	defer func() {
+		_ = rawLog.Close()
+	}()
 	flagValues, valuesErr := buildFlagValues(selection.Operation.Flags, req, overrides)
 	if valuesErr != nil {
 		result.Err = valuesErr
-		_ = writeBatchLine(progressOut, outputMu, fmt.Sprintf("[%s] failed before dispatch: %v", selection.ID, valuesErr))
+		result.Duration = clock.Since(started)
+		emitTargetFailure(session, req.Operation, selection.ID, valuesErr)
+		emitTargetDone(session, req.Operation, selection.ID, valuesErr, result.Duration)
 		return result
 	}
 
 	appTarget := cloneAppTarget(selection.App, flagValues)
-	prefixedOut := newLinePrefixWriter(progressOut, outputMu, selection.ID)
+	progressOut := session.ProgressWriter(selection.ID)
 	result.Err = runner(ctx, operations.Request{
-		Out:        prefixedOut,
+		Out:        progressOut,
+		LogOut:     rawLog,
 		App:        appTarget,
 		CLI:        selection.CLI,
 		Capability: selection.Operation.Capability,
 		Flags:      flagValues,
 		Format:     req.Format,
 	})
-	if result.Err != nil {
-		_ = writeBatchLine(progressOut, outputMu, fmt.Sprintf("[%s] failed: %v", selection.ID, result.Err))
-		return result
-	}
-	_ = writeBatchLine(progressOut, outputMu, fmt.Sprintf("[%s] completed %s", selection.ID, req.Operation))
+	result.Duration = clock.Since(started)
+	emitTargetFailure(session, req.Operation, selection.ID, result.Err)
+	emitTargetDone(session, req.Operation, selection.ID, result.Err, result.Duration)
 	return result
+}
+
+func emitTargetFailure(session *clioutput.Session, operation OperationName, targetID string, err error) {
+	if err == nil {
+		return
+	}
+	if emitErr := session.EmitStepFailed(targetID, err.Error()); emitErr != nil {
+		slog.Warn("batchops.emit_target_failure_failed", "err", emitErr, "target", targetID, "operation", operation)
+	}
+}
+
+func emitTargetDone(session *clioutput.Session, operation OperationName, targetID string, err error, duration time.Duration) {
+	status := "ok"
+	if err != nil {
+		status = "failed"
+	}
+	durationMS := duration.Milliseconds()
+	event := clioutput.NewEvent(clioutput.EventTargetDone, string(operation))
+	event.Target = targetID
+	event.Status = status
+	event.DurationMS = &durationMS
+	if emitErr := session.Emit(event); emitErr != nil {
+		slog.Warn("batchops.emit_target_done_failed", "err", emitErr, "target", targetID, "operation", operation)
+	}
 }
 
 func selectOperations(operation OperationName, filters []string) ([]selectedOperation, map[string]bool, error) {
@@ -388,49 +431,4 @@ func cloneAppTarget(target *targets.Target, flagValues operations.FlagValues) *t
 		copied.AppPath = appPath
 	}
 	return &copied
-}
-
-func printSummary(ctx context.Context, out io.Writer, operation OperationName, format clioutput.Format, results []Result) error {
-	if format == clioutput.FormatJSON {
-		items := make([]summaryItem, 0, len(results))
-		for _, result := range results {
-			status := "ok"
-			errorMessage := ""
-			if result.Err != nil {
-				status = "failed"
-				errorMessage = result.Err.Error()
-			}
-			items = append(items, summaryItem{ID: result.ID, Kind: result.Kind, Status: status, Error: errorMessage})
-		}
-		body, err := json.Marshal(summaryDocument{
-			Type:      "summary",
-			Scope:     string(operation),
-			Operation: string(operation),
-			Results:   items,
-		})
-		if err != nil {
-			slog.WarnContext(ctx, "batchops.summary.marshal_failed", "err", err, "operation", operation)
-			return fmt.Errorf("marshal batch summary: %w", err)
-		}
-		if err := response.WriteJSON(ctx, out, body, response.JSONCompact); err != nil {
-			slog.WarnContext(ctx, "batchops.summary.write_json_failed", "err", err, "operation", operation)
-			return fmt.Errorf("write batch summary json: %w", err)
-		}
-		return nil
-	}
-	_, _ = fmt.Fprintf(out, "%s summary:\n", strings.ToUpper(string(operation)))
-	for _, result := range results {
-		status := "ok"
-		detail := ""
-		if result.Err != nil {
-			status = "failed"
-			detail = result.Err.Error()
-		}
-		if detail == "" {
-			_, _ = fmt.Fprintf(out, "  %s (%s): %s\n", result.ID, result.Kind, status)
-			continue
-		}
-		_, _ = fmt.Fprintf(out, "  %s (%s): %s: %s\n", result.ID, result.Kind, status, detail)
-	}
-	return nil
 }

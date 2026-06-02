@@ -86,6 +86,7 @@ type InstallOptions struct {
 	NoSccache         bool
 	ForceRebuild      bool
 	Out               io.Writer
+	LogOut            io.Writer
 	Trace             *patch.Trace
 }
 
@@ -116,6 +117,7 @@ func InstallOperation(ctx context.Context, req operations.Request) error {
 		NoSccache:         req.Flags.Bool("no-sccache"),
 		ForceRebuild:      req.Flags.Bool("force-rebuild"),
 		Out:               req.Out,
+		LogOut:            req.LogOut,
 		Trace:             nil,
 	}); err != nil {
 		codexcliLog.ErrorContext(ctx, "codexcli.install_operation_failed", "err", err)
@@ -211,7 +213,7 @@ func Install(ctx context.Context, opts InstallOptions) error {
 		log.ErrorContext(ctx, "codexcli.install.invalid_options", "err", err)
 		return err
 	}
-	r := patch.NewRunner(ctx, opts.DryRun, opts.Out)
+	r := newInstallRunner(ctx, opts)
 	r.Trace = opts.Trace
 	buildMode, err := parseBuildMode(opts.BuildMode)
 	if err != nil {
@@ -298,6 +300,14 @@ func Install(ctx context.Context, opts InstallOptions) error {
 	}
 	notef(r, "codex-cli: install complete release="+releaseDir)
 	return nil
+}
+
+func newInstallRunner(ctx context.Context, opts InstallOptions) *patch.Runner {
+	runner := patch.NewRunner(ctx, opts.DryRun, opts.Out)
+	if opts.LogOut != nil {
+		runner.RawOut = opts.LogOut
+	}
+	return runner
 }
 
 // Status prints the local Codex CLI source, install, and signing state. It is

@@ -414,45 +414,6 @@ func traceEvent(opts Options, event TraceEvent) {
 	opts.Trace.Events = append(opts.Trace.Events, event)
 }
 
-// Uninstall restores the renamed original binary. It refuses to act when
-// there is no .real sibling, since that means there is nothing to restore.
-func Uninstall(ctx context.Context, opts Options) error {
-	log := claudeteeLog.With("operation", "uninstall")
-	log.InfoContext(ctx, "claudetee.uninstall.start")
-	out := opts.writer()
-	bundled, err := ResolveBundledCLIPath(opts)
-	if err != nil {
-		log.ErrorContext(ctx, "claudetee.uninstall.resolve_target_failed", "err", err)
-		return err
-	}
-	realPath := realSiblingPath(bundled)
-	if _, err := os.Stat(realPath); err != nil {
-		log.ErrorContext(ctx, "claudetee.uninstall.real_missing", "path", realPath, "err", err)
-		return fmt.Errorf("no .real sibling at %s; nothing to restore", realPath)
-	}
-	fmt.Fprintf(out, "target:       %s\n", bundled)
-	fmt.Fprintf(out, "real sibling: %s\n", realPath)
-	if opts.DryRun {
-		traceConfiguredProcessStops(opts)
-		fmt.Fprintln(out, "dry-run: configured process stops would happen here")
-		fmt.Fprintf(out, "dry-run: %s would be moved back to %s\n", realPath, bundled)
-		return nil
-	}
-
-	if err := stopConfiguredProcesses(ctx, opts, out); err != nil {
-		log.ErrorContext(ctx, "claudetee.uninstall.stop_failed", "err", err)
-		return err
-	}
-
-	fmt.Fprintf(out, "restoring %s -> %s\n", realPath, bundled)
-	if err := os.Rename(realPath, bundled); err != nil {
-		log.ErrorContext(ctx, "claudetee.uninstall.restore_failed", "from", realPath, "to", bundled, "err", err)
-		return fmt.Errorf("restore original: %w", err)
-	}
-	fmt.Fprintln(out, "done.")
-	return nil
-}
-
 // stopConfiguredProcesses sends best-effort SIGTERM to declared processes so
 // they release file locks on the binary we are about to rename.
 func stopConfiguredProcesses(ctx context.Context, opts Options, out io.Writer) error {

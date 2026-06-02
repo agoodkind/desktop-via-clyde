@@ -16,6 +16,7 @@ import (
 
 	"goodkind.io/desktop-via-clyde/internal/batchops"
 	"goodkind.io/desktop-via-clyde/internal/clioutput"
+	"goodkind.io/desktop-via-clyde/internal/clock"
 	"goodkind.io/desktop-via-clyde/internal/cmdflags"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/response"
@@ -272,18 +273,65 @@ func runOperation(
 		appTarget = &copied
 	}
 
-	commandOut := out
-	if format == clioutput.FormatJSON {
-		commandOut = clioutput.NewJSONLineWriter(ctx, out, operation.Use, targetID(appTarget, program))
+	targetName := targetID(appTarget, program)
+	session, err := clioutput.NewSession(ctx, clioutput.SessionOptions{
+		Out:       out,
+		Format:    format,
+		Operation: operation.Use,
+		Scope:     targetName,
+		Parallel:  1,
+		DryRun:    flagValues.Bool("dry-run"),
+	})
+	if err != nil {
+		return fmt.Errorf("create output session: %w", err)
 	}
-	return runner(ctx, operations.Request{
+	rawLog, _, err := session.OpenTargetLog(targetName)
+	if err != nil {
+		return fmt.Errorf("open target output log: %w", err)
+	}
+	started := clock.Now()
+	commandOut := session.ProgressWriter(targetName)
+	runErr := runner(ctx, operations.Request{
 		Out:        commandOut,
+		LogOut:     rawLog,
 		App:        appTarget,
 		CLI:        program,
 		Capability: operation.Capability,
 		Flags:      flagValues,
 		Format:     format,
 	})
+	_ = rawLog.Close()
+	status := "ok"
+	if runErr != nil {
+		status = "failed"
+	}
+	failureEmitErr := error(nil)
+	if runErr != nil {
+		failureEmitErr = session.EmitStepFailed(targetName, runErr.Error())
+	}
+	duration := clock.Since(started)
+	durationMS := duration.Milliseconds()
+	event := clioutput.NewEvent(clioutput.EventTargetDone, operation.Use)
+	event.Target = targetName
+	event.Status = status
+	event.DurationMS = &durationMS
+	emitErr := session.Emit(event)
+	closeErr := session.Close([]clioutput.TargetResult{
+		clioutput.NewTargetResult(targetName, targetKind(appTarget, program), runErr, duration),
+	})
+	if runErr != nil {
+		return runErr
+	}
+	if failureEmitErr != nil {
+		return fmt.Errorf("emit target failure event: %w", failureEmitErr)
+	}
+	if emitErr != nil {
+		return fmt.Errorf("emit target completion event: %w", emitErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close output session: %w", closeErr)
+	}
+	return nil
 }
 
 func runStatus(ctx context.Context, cmd *cobra.Command, out io.Writer) error {
@@ -371,4 +419,14 @@ func targetID(appTarget *targets.Target, program *targets.CLIProgram) string {
 		return program.ID
 	}
 	return ""
+}
+
+func targetKind(appTarget *targets.Target, program *targets.CLIProgram) string {
+	if appTarget != nil {
+		return "app"
+	}
+	if program != nil {
+		return "cli"
+	}
+	return "target"
 }

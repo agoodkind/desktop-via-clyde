@@ -171,19 +171,6 @@ func TestInstallRefusesWhenRealExists(t *testing.T) {
 	}
 }
 
-func TestUninstallRefusesWhenNoRealSibling(t *testing.T) {
-	opts, _ := setupFakeBundledCLI(t)
-	var out bytes.Buffer
-	opts.Out = &out
-	err := Uninstall(context.Background(), opts)
-	if err == nil {
-		t.Fatalf("expected uninstall to refuse when there is no .real")
-	}
-	if !strings.Contains(err.Error(), "nothing to restore") {
-		t.Fatalf("expected 'nothing to restore' error, got: %v", err)
-	}
-}
-
 // setupFakeBundledCLI builds a fake claude-code/<version>/claude.app tree
 // under a temp HOME and returns the home dir plus the bundled CLI path. The
 // fake claude binary is just a few bytes; tests that need a working real

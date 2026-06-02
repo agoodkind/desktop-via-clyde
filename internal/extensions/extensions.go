@@ -88,14 +88,6 @@ func (t Target) PostPatchHookCapabilities() []string {
 	return []string{t.BundledCLITee.Capability}
 }
 
-// PreUnpatchHookCapabilities returns optional pre-unpatch hook capabilities.
-func (t Target) PreUnpatchHookCapabilities() []string {
-	if t.BundledCLITee == nil || t.BundledCLITee.Capability == "" {
-		return nil
-	}
-	return []string{t.BundledCLITee.Capability}
-}
-
 // PreLaunchPolicyHookCapabilities returns optional pre-launch-policy hook capabilities.
 func (t Target) PreLaunchPolicyHookCapabilities() []string {
 	if t.CodexCLIShim == nil || t.CodexCLIShim.Capability == "" {

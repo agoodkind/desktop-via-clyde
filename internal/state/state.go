@@ -9,8 +9,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+
+	"goodkind.io/desktop-via-clyde/internal/paths"
 )
 
 var (
@@ -94,6 +97,10 @@ func saveUnlocked(path string, s MultiState) error {
 	if s.Targets == nil {
 		s.Targets = map[string]TargetState{}
 	}
+	if err := validateUnlocked(s); err != nil {
+		stateLog.Error("state.save.validate_failed", "path", path, "err", err)
+		return err
+	}
 	dirPath := filepath.Dir(path)
 	if err := os.MkdirAll(dirPath, 0o755); err != nil {
 		stateLog.Error("state.save.mkdir_failed", "path", path, "err", err)
@@ -130,6 +137,19 @@ func saveUnlocked(path string, s MultiState) error {
 		_ = os.Remove(tmpPath)
 		stateLog.Error("state.save.rename_failed", "from", tmpPath, "to", path, "err", err)
 		return fmt.Errorf("rename temp state file %s -> %s: %w", tmpPath, path, err)
+	}
+	return nil
+}
+
+func validateUnlocked(s MultiState) error {
+	localTeamID := strings.TrimSpace(paths.SignTeamID())
+	if localTeamID == "" {
+		return nil
+	}
+	for targetID, targetState := range s.Targets {
+		if strings.Contains(targetState.OriginalDesignatedRequirement, localTeamID) {
+			return fmt.Errorf("target %s original designated requirement contains local signing team %s", targetID, localTeamID)
+		}
 	}
 	return nil
 }

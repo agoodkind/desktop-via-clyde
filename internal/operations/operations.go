@@ -68,6 +68,7 @@ func (f FlagValues) Bool(name string) bool {
 // Request describes one command dispatch into a typed capability.
 type Request struct {
 	Out        io.Writer
+	LogOut     io.Writer
 	App        *targets.Target
 	CLI        *targets.CLIProgram
 	Capability string

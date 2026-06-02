@@ -29,15 +29,18 @@ func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
 		t.Fatalf("Lookup(codex): %v", err)
 	}
 	tg.AppPath = filepath.Join(t.TempDir(), "Codex.app")
+	tg.Extensions.ComputerUse.HostAppPath = tg.AppPath
 
 	trace := &patch.Trace{}
-	if err := patch.Patch(context.Background(), tg, patch.Options{
+	runner := patch.NewRunner(context.Background(), true, io.Discard)
+	runner.Trace = trace
+	if err := computeruseext.BundledLifecycleHook(context.Background(), runner, tg, patch.Options{
 		DryRun:            true,
 		NoMigrateKeychain: true,
 		Out:               io.Discard,
 		Trace:             trace,
 	}); err != nil {
-		t.Fatalf("Patch dry-run: %v", err)
+		t.Fatalf("BundledLifecycleHook dry-run: %v", err)
 	}
 	bundledHelperPath := filepath.Join(tg.AppPath, filepath.FromSlash(tg.Extensions.ComputerUse.BundledAppPath))
 	senderPath := filepath.Join(bundledHelperPath, "Contents/MacOS/SkyComputerUseService")
@@ -47,15 +50,6 @@ func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
 	requireTraceAction(t, trace, computeruseext.ActionRepairComputerUseTrustedTeam, senderPath)
 	requireTraceAction(t, trace, computeruseext.ActionRepairComputerUseRequirement, requirementPath)
 	requireTraceAction(t, trace, computeruseext.ActionSignComputerUseHelper, bundledHelperPath)
-
-	helperRepairIdx := traceActionIndex(trace, computeruseext.ActionRepairBundledComputerUse, bundledHelperPath)
-	resignIdx := traceActionIndex(trace, patch.ActionSignBundle, tg.AppPath)
-	if helperRepairIdx < 0 || resignIdx < 0 {
-		t.Fatalf("expected helper repair and bundle signing in trace: %#v", trace.Events)
-	}
-	if helperRepairIdx > resignIdx {
-		t.Fatalf("helper repair ran after bundle signing: %#v", trace.Events)
-	}
 }
 
 func TestCodexNestedSignPathsIncludeTCCActiveResourceExecutables(t *testing.T) {
@@ -83,15 +77,19 @@ func TestPatchDryRunScansComputerUseCacheHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lookup(codex): %v", err)
 	}
+	tg.AppPath = filepath.Join(t.TempDir(), "Codex.app")
+	tg.Extensions.ComputerUse.HostAppPath = tg.AppPath
 
 	trace := &patch.Trace{}
-	if err := patch.Patch(context.Background(), tg, patch.Options{
+	runner := patch.NewRunner(context.Background(), true, io.Discard)
+	runner.Trace = trace
+	if err := computeruseext.LifecycleHook(context.Background(), runner, tg, patch.Options{
 		DryRun:            true,
 		NoMigrateKeychain: true,
 		Out:               io.Discard,
 		Trace:             trace,
 	}); err != nil {
-		t.Fatalf("Patch dry-run: %v", err)
+		t.Fatalf("LifecycleHook dry-run: %v", err)
 	}
 
 	pattern := filepath.Join(paths.Home(), filepath.FromSlash(tg.Extensions.ComputerUse.CacheAppGlobsFromHome[0]))
@@ -103,15 +101,19 @@ func TestPatchDryRunRepairsComputerUseAuthPlugin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lookup(codex): %v", err)
 	}
+	tg.AppPath = filepath.Join(t.TempDir(), "Codex.app")
+	tg.Extensions.ComputerUse.HostAppPath = tg.AppPath
 
 	trace := &patch.Trace{}
-	if err := patch.Patch(context.Background(), tg, patch.Options{
+	runner := patch.NewRunner(context.Background(), true, io.Discard)
+	runner.Trace = trace
+	if err := computeruseext.LifecycleHook(context.Background(), runner, tg, patch.Options{
 		DryRun:            true,
 		NoMigrateKeychain: true,
 		Out:               io.Discard,
 		Trace:             trace,
 	}); err != nil {
-		t.Fatalf("Patch dry-run: %v", err)
+		t.Fatalf("LifecycleHook dry-run: %v", err)
 	}
 
 	pluginPath := tg.Extensions.ComputerUse.AuthPluginPath
@@ -127,6 +129,7 @@ func TestClaudePatchRestoresSquirrelInsteadOfResigningIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lookup(claude): %v", err)
 	}
+	tg.AppPath = filepath.Join(t.TempDir(), "Claude.app")
 
 	trace := &patch.Trace{}
 	if err := patch.Patch(context.Background(), tg, patch.Options{

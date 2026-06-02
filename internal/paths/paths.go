@@ -48,21 +48,6 @@ func StdioTeeLogDir() string {
 	return filepath.Join(LogDir(), "stdio-tee")
 }
 
-// BackupRoot returns the per-target backup root.
-func BackupRoot() string {
-	return filepath.Join(StateRoot(), "desktop-via-clyde-backup")
-}
-
-// BackupDir returns the backup directory for one target ID.
-func BackupDir(t targets.Target) string {
-	return filepath.Join(BackupRoot(), t.ID)
-}
-
-// BackupBundle returns the backup bundle path for one target.
-func BackupBundle(t targets.Target) string {
-	return filepath.Join(BackupDir(t), filepath.Base(t.AppPath))
-}
-
 // StateFile returns the shared patch state file path.
 func StateFile() string {
 	return filepath.Join(StateRoot(), "desktop-via-clyde-state.json")

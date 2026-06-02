@@ -31,9 +31,6 @@ func RegisterPatchHooks() error {
 	if err := patch.RegisterPostPatchHook(HookCapability, PostPatchHook); err != nil {
 		return logBundledCLITeeRegistrationError("register bundled CLI tee post-patch hook", err)
 	}
-	if err := patch.RegisterPreUnpatchHook(HookCapability, PreUnpatchHook); err != nil {
-		return logBundledCLITeeRegistrationError("register bundled CLI tee pre-unpatch hook", err)
-	}
 	return nil
 }
 
@@ -78,15 +75,6 @@ func Install(ctx context.Context, opts Options) error {
 	return nil
 }
 
-// Uninstall removes the linked tee wrapper from the selected bundled CLI.
-func Uninstall(ctx context.Context, opts Options) error {
-	if err := claudetee.Uninstall(ctx, toClaudeOptions(opts)); err != nil {
-		bundledCLITeeLog.ErrorContext(ctx, "bundledclitee.uninstall_failed", "err", err)
-		return fmt.Errorf("uninstall bundled cli tee: %w", err)
-	}
-	return nil
-}
-
 // PostPatchHook installs the tee wrapper after a successful shared patch flow.
 func PostPatchHook(ctx context.Context, runner *patch.Runner, target targets.Target, opts patch.Options) error {
 	if target.Extensions.BundledCLITee == nil {
@@ -115,35 +103,6 @@ func PostPatchHook(ctx context.Context, runner *patch.Runner, target targets.Tar
 		return nil
 	}
 	if err := Install(ctx, teeOpts); err != nil {
-		return err
-	}
-	return nil
-}
-
-// PreUnpatchHook removes the tee wrapper before the shared unpatch flow runs.
-func PreUnpatchHook(ctx context.Context, runner *patch.Runner, target targets.Target, opts patch.Options) error {
-	if target.Extensions.BundledCLITee == nil {
-		return nil
-	}
-	teeOpts := targetOptions(target, opts)
-	bundled, resolveErr := ResolvePath(teeOpts)
-	if resolveErr != nil {
-		patch.Note(runner, fmt.Sprintf("bundled CLI not present, skipping tee uninstall (%v)", resolveErr))
-		return nil
-	}
-	if _, statErr := os.Stat(bundled + ".real"); statErr != nil {
-		if !errors.Is(statErr, os.ErrNotExist) {
-			bundledCLITeeLog.ErrorContext(ctx, "bundledclitee.pre_unpatch_stat_real_failed", "path", bundled+".real", "err", statErr)
-			return fmt.Errorf("stat bundled cli real sibling %s.real: %w", bundled, statErr)
-		}
-		patch.Note(runner, "no .real sibling at "+bundled+".real, nothing to uninstall")
-		return nil
-	}
-	patch.Note(runner, "uninstall bundled CLI stdio tee at "+bundled)
-	if opts.DryRun {
-		return nil
-	}
-	if err := Uninstall(ctx, teeOpts); err != nil {
 		return err
 	}
 	return nil

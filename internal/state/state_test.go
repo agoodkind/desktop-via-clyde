@@ -6,6 +6,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"goodkind.io/desktop-via-clyde/internal/config"
+	"goodkind.io/desktop-via-clyde/internal/spec"
 )
 
 func TestUpdateConcurrentWritesPreserveTargets(t *testing.T) {
@@ -61,5 +64,33 @@ func TestUpdateRemovesStateFileWhenTargetsBecomeEmpty(t *testing.T) {
 	}
 	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
 		t.Fatalf("state file stat err = %v, want not exists", err)
+	}
+}
+
+func TestUpdateRejectsOriginalRequirementWithLocalSigningTeam(t *testing.T) {
+	config.SetCurrent(&spec.Config{
+		Signing: spec.SigningSpec{
+			Identity: "Developer ID Application: Alex Goodkind (H3BMXM4W7H)",
+			TeamID:   "H3BMXM4W7H",
+		},
+		Apps: map[string]spec.AppSpec{},
+		CLIs: map[string]spec.CLISpec{},
+	})
+	t.Cleanup(func() {
+		config.SetCurrent(nil)
+	})
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	err := Update(statePath, func(ms MultiState) (MultiState, error) {
+		ms.Targets["codex"] = TargetState{
+			PatchedVersion:                "1",
+			PatchedAt:                     time.Unix(0, 0).UTC(),
+			SignIdentity:                  "Developer ID Application: Alex Goodkind (H3BMXM4W7H)",
+			OriginalDesignatedRequirement: `identifier "com.openai.chatgpt" and certificate leaf[subject.OU] = H3BMXM4W7H`,
+		}
+		return ms, nil
+	})
+	if err == nil {
+		t.Fatal("expected local team original DR validation error")
 	}
 }

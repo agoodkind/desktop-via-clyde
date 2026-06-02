@@ -21,7 +21,6 @@ func TestRegisterLinksEveryCatalogCapability(t *testing.T) {
 		patch.AppKeychainMigrateCapability,
 		patch.AppPatchCapability,
 		operations.AppStatusCapability,
-		patch.AppUnpatchCapability,
 		upgrade.AppUpgradeCapability,
 		codexcli.StandaloneInstallCapability,
 		codexcli.StandaloneStatusCapability,
@@ -37,9 +36,6 @@ func TestRegisterLinksEveryCatalogCapability(t *testing.T) {
 	})
 	assertEqualStrings(t, catalog.BootstrapCapabilities(), upgrade.RegisteredBootstrapStrategies())
 	assertEqualStrings(t, patch.RegisteredPostPatchHooks(), []string{
-		bundledclitee.HookCapability,
-	})
-	assertEqualStrings(t, patch.RegisteredPreUnpatchHooks(), []string{
 		bundledclitee.HookCapability,
 	})
 	assertEqualStrings(t, catalog.PatchHookCapabilities(), patch.RegisteredPostPatchHooks())

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -197,7 +198,12 @@ func TestRunWithOperationRunnerPrefixesOutputAndPrintsSummary(t *testing.T) {
 		t.Fatalf("RunWithOperationRunner(patch output): %v", err)
 	}
 	output := out.String()
-	for _, want := range []string{"[cursor] hello", "[cursor] world", "PATCH summary:", "cursor (app): ok"} {
+	for _, want := range []string{
+		"Patch all",
+		"cursor hello ok",
+		"cursor world ok",
+		"Result completed=1 failed=0",
+	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q\noutput:\n%s", want, output)
 		}
@@ -223,15 +229,68 @@ func TestRunWithOperationRunnerJSONSummary(t *testing.T) {
 		t.Fatalf("RunWithOperationRunner(patch json): %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 4 {
-		t.Fatalf("json output line count = %d, want 4\noutput:\n%s", len(lines), out.String())
+	if len(lines) != 7 {
+		t.Fatalf("json output line count = %d, want 7\noutput:\n%s", len(lines), out.String())
 	}
 	var summary map[string]any
-	if err := json.Unmarshal([]byte(lines[3]), &summary); err != nil {
+	if err := json.Unmarshal([]byte(lines[6]), &summary); err != nil {
 		t.Fatalf("unmarshal summary: %v\nline:\n%s", err, lines[3])
 	}
-	if summary["type"] != "summary" {
+	if summary["type"] != "run_done" {
 		t.Fatalf("summary type = %#v", summary["type"])
+	}
+}
+
+func TestRunWithOperationRunnerRoutesRawOutputToTargetLog(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	installFixture(t)
+
+	var out bytes.Buffer
+	err := RunWithOperationRunner(context.Background(), Request{
+		Out:       &out,
+		Operation: OperationPatch,
+		DryRun:    true,
+		Parallel:  1,
+		Targets:   []string{"cursor"},
+		Format:    "json",
+	}, func(_ context.Context, req operations.Request) error {
+		_, _ = req.Out.Write([]byte("[dry-run] friendly status\n"))
+		_, _ = req.LogOut.Write([]byte("raw child output\n"))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunWithOperationRunner(patch json): %v", err)
+	}
+	if strings.Contains(out.String(), "raw child output") {
+		t.Fatalf("stdout included raw child output:\n%s", out.String())
+	}
+
+	var targetStarted struct {
+		Type    string `json:"type"`
+		LogFile string `json:"log_file"`
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		var event struct {
+			Type    string `json:"type"`
+			LogFile string `json:"log_file"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("unmarshal event: %v\nline:\n%s", err, line)
+		}
+		if event.Type == "target_started" {
+			targetStarted = event
+			break
+		}
+	}
+	if targetStarted.LogFile == "" {
+		t.Fatalf("target_started event missing log_file\noutput:\n%s", out.String())
+	}
+	body, err := os.ReadFile(targetStarted.LogFile)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", targetStarted.LogFile, err)
+	}
+	if string(body) != "raw child output\n" {
+		t.Fatalf("target log = %q, want raw child output", string(body))
 	}
 }
 

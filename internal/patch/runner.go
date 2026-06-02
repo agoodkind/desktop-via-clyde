@@ -19,6 +19,7 @@ import (
 type Runner struct {
 	DryRun bool
 	Out    io.Writer
+	RawOut io.Writer
 	Log    *slog.Logger
 	Trace  *Trace
 	ctxFn  func() context.Context
@@ -57,6 +58,7 @@ func NewRunner(ctx context.Context, dryRun bool, out io.Writer) *Runner {
 	return &Runner{
 		DryRun: dryRun,
 		Out:    out,
+		RawOut: out,
 		Log:    gklog.LoggerFromContext(ctx),
 		Trace:  nil,
 		ctxFn: func() context.Context {
@@ -83,8 +85,8 @@ func (r *Runner) Run(ctx context.Context, name string, args ...string) error {
 		return nil
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Stdout = r.Out
-	cmd.Stderr = r.Out
+	cmd.Stdout = r.rawOut()
+	cmd.Stderr = r.rawOut()
 	if err := cmd.Run(); err != nil {
 		r.logError(ctx, "runner.command.failed", err,
 			slog.String("command", name),
@@ -113,8 +115,8 @@ func (r *Runner) RunWithHeartbeat(ctx context.Context, label string, interval ti
 		return nil
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Stdout = r.Out
-	cmd.Stderr = r.Out
+	cmd.Stdout = r.rawOut()
+	cmd.Stderr = r.rawOut()
 	if err := cmd.Start(); err != nil {
 		r.logError(ctx, "runner.command.start_failed", err,
 			slog.String("label", label),
@@ -216,8 +218,8 @@ func (r *Runner) runEnvInDirWithHeartbeat(
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = workDir
 	cmd.Env = mergedEnv(env)
-	cmd.Stdout = r.Out
-	cmd.Stderr = r.Out
+	cmd.Stdout = r.rawOut()
+	cmd.Stderr = r.rawOut()
 	if err := cmd.Start(); err != nil {
 		r.logError(ctx, "runner.command.start_failed", err,
 			slog.String("label", label),
@@ -283,7 +285,7 @@ func (r *Runner) RunCaptureStdout(ctx context.Context, name string, args ...stri
 		return nil, nil
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Stderr = r.Out
+	cmd.Stderr = r.rawOut()
 	output, err := cmd.Output()
 	if err != nil {
 		r.logError(ctx, "runner.command.failed", err,
@@ -313,7 +315,7 @@ func (r *Runner) logCommand(env map[string]string, name string, args ...string) 
 
 func (r *Runner) logCommandInDir(env map[string]string, workDir string, name string, args ...string) {
 	if workDir != "" {
-		fmt.Fprintf(r.Out, "%s cd %s\n", r.prefix(), workDir)
+		fmt.Fprintf(r.rawOut(), "%s cd %s\n", r.prefix(), workDir)
 	}
 	if len(env) > 0 {
 		keys := make([]string, 0, len(env))
@@ -322,10 +324,20 @@ func (r *Runner) logCommandInDir(env map[string]string, workDir string, name str
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			fmt.Fprintf(r.Out, "%s env %s=%s\n", r.prefix(), key, env[key])
+			fmt.Fprintf(r.rawOut(), "%s env %s=%s\n", r.prefix(), key, env[key])
 		}
 	}
-	fmt.Fprintf(r.Out, "%s %s %s\n", r.prefix(), name, joinArgs(args))
+	fmt.Fprintf(r.rawOut(), "%s %s %s\n", r.prefix(), name, joinArgs(args))
+}
+
+func (r *Runner) rawOut() io.Writer {
+	if r.RawOut != nil {
+		return r.RawOut
+	}
+	if r.Out != nil {
+		return r.Out
+	}
+	return os.Stdout
 }
 
 func (r *Runner) context() context.Context {

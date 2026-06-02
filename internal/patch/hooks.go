@@ -19,7 +19,6 @@ type PreLaunchPolicyHook func(context.Context, *Runner, *targets.Target, Options
 var (
 	hooksMu              sync.RWMutex
 	postPatchHooks       = map[string]LifecycleHook{}
-	preUnpatchHooks      = map[string]LifecycleHook{}
 	preResignHooks       = map[string]LifecycleHook{}
 	postBundleHooks      = map[string]LifecycleHook{}
 	preLaunchPolicyHooks = map[string]PreLaunchPolicyHook{}
@@ -28,11 +27,6 @@ var (
 // RegisterPostPatchHook links one patch hook capability to post-patch behavior.
 func RegisterPostPatchHook(capability string, hook LifecycleHook) error {
 	return registerLifecycleHook(capability, hook, postPatchHooks)
-}
-
-// RegisterPreUnpatchHook links one patch hook capability to pre-unpatch behavior.
-func RegisterPreUnpatchHook(capability string, hook LifecycleHook) error {
-	return registerLifecycleHook(capability, hook, preUnpatchHooks)
 }
 
 // RegisterPreLaunchPolicyHook links one hook before launch policy serialization.
@@ -55,11 +49,6 @@ func RegisterPreLaunchPolicyHook(capability string, hook PreLaunchPolicyHook) er
 // RegisteredPostPatchHooks returns post-patch hook capabilities in stable order.
 func RegisteredPostPatchHooks() []string {
 	return registeredHookNames(postPatchHooks)
-}
-
-// RegisteredPreUnpatchHooks returns pre-unpatch hook capabilities in stable order.
-func RegisteredPreUnpatchHooks() []string {
-	return registeredHookNames(preUnpatchHooks)
 }
 
 // RegisteredPreLaunchPolicyHooks returns pre-launch-policy hook capabilities in stable order.
@@ -94,20 +83,6 @@ func runPostPatchHook(
 	hook, ok := lookupLifecycleHook(postPatchHooks, capability)
 	if !ok {
 		return fmt.Errorf("post-patch hook %q is not registered", capability)
-	}
-	return hook(ctx, r, t, opts)
-}
-
-func runPreUnpatchHook(
-	ctx context.Context,
-	r *Runner,
-	t targets.Target,
-	opts Options,
-	capability string,
-) error {
-	hook, ok := lookupLifecycleHook(preUnpatchHooks, capability)
-	if !ok {
-		return fmt.Errorf("pre-unpatch hook %q is not registered", capability)
 	}
 	return hook(ctx, r, t, opts)
 }

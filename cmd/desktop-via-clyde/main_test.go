@@ -44,7 +44,7 @@ func TestTargetHelpListsOperations(t *testing.T) {
 		t.Fatalf("executeRoot(codex --help): %v", err)
 	}
 
-	required := []string{"patch", "unpatch", "upgrade", "keychain-migrate", "status"}
+	required := []string{"patch", "upgrade", "keychain-migrate", "status"}
 	for _, want := range required {
 		if !strings.Contains(output, want) {
 			t.Fatalf("target help missing %q\noutput:\n%s", want, output)
@@ -182,7 +182,7 @@ func TestCodexCLIUpgradeHelpAdvertisesLocalFastDefault(t *testing.T) {
 }
 
 func TestVerbFirstCommandsReturnError(t *testing.T) {
-	for _, args := range [][]string{{"patch", "codex"}, {"unpatch", "codex"}, {"upgrade", "codex"}, {"keychain-migrate", "codex"}} {
+	for _, args := range [][]string{{"patch", "codex"}, {"upgrade", "codex"}, {"keychain-migrate", "codex"}} {
 		output, err := executeRoot(t, args...)
 		if err == nil {
 			t.Fatalf("executeRoot(%v) unexpectedly succeeded\noutput:\n%s", args, output)
@@ -508,14 +508,14 @@ func TestPatchAllDryRunJSONEmitsProgressAndSummary(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &progress); err != nil {
 		t.Fatalf("unmarshal progress line: %v\nline:\n%s", err, lines[0])
 	}
-	if progress["type"] != "progress" {
+	if progress["type"] != "run_started" {
 		t.Fatalf("progress type = %#v", progress["type"])
 	}
 	var summary map[string]any
 	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &summary); err != nil {
 		t.Fatalf("unmarshal summary line: %v\nline:\n%s", err, lines[len(lines)-1])
 	}
-	if summary["type"] != "summary" {
+	if summary["type"] != "run_done" {
 		t.Fatalf("summary type = %#v", summary["type"])
 	}
 }
@@ -564,9 +564,14 @@ func installFixture(t *testing.T) {
 	if err := composition.Register(); err != nil {
 		t.Fatalf("composition.Register: %v", err)
 	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg, err := config.LoadPath(filepath.Join("..", "..", "internal", "testconfig", "testdata", "current-config.toml"))
 	if err != nil {
 		t.Fatalf("LoadPath(current-config.toml): %v", err)
+	}
+	for id, app := range cfg.Apps {
+		app.AppPath = filepath.Join(t.TempDir(), filepath.Base(app.AppPath))
+		cfg.Apps[id] = app
 	}
 	config.SetCurrent(cfg)
 	t.Cleanup(func() {

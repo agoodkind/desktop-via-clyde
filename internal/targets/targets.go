@@ -185,11 +185,6 @@ func (t Target) PostPatchHookCapabilities() []string {
 	return t.Extensions.PostPatchHookCapabilities()
 }
 
-// PreUnpatchHookCapabilities returns optional pre-unpatch hook capabilities.
-func (t Target) PreUnpatchHookCapabilities() []string {
-	return t.Extensions.PreUnpatchHookCapabilities()
-}
-
 // PreLaunchPolicyHookCapabilities returns optional pre-launch-policy hook capabilities.
 func (t Target) PreLaunchPolicyHookCapabilities() []string {
 	return t.Extensions.PreLaunchPolicyHookCapabilities()
