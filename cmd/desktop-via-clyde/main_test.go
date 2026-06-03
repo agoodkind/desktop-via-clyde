@@ -94,10 +94,13 @@ func TestBatchAllHelpListsSharedFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeRoot(upgrade all --help): %v", err)
 	}
-	for _, want := range []string{"--output-format string", "--parallel int", "--target stringArray", "--set stringArray", "--no-migrate-keychain"} {
+	for _, want := range []string{"--output-format string", "--parallel int", "--target stringArray", "--set stringArray", "--migrate-keychain"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("upgrade all help missing %q\noutput:\n%s", want, output)
 		}
+	}
+	if strings.Contains(output, "--no-migrate-keychain") {
+		t.Fatalf("upgrade all help unexpectedly lists --no-migrate-keychain\noutput:\n%s", output)
 	}
 }
 
@@ -402,12 +405,88 @@ func TestFakeCLIOperationDispatchUsesConfiguredAliasAndFlags(t *testing.T) {
 	}
 }
 
+func TestAppPatchDispatchDefaultsMigrateKeychainFalse(t *testing.T) {
+	installFixture(t)
+
+	var got operations.Request
+	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
+		got = req
+		return nil
+	}, "codex", "patch", "--dry-run")
+	if err != nil {
+		t.Fatalf("executeRootWithRunner(codex patch): %v", err)
+	}
+	if got.Capability != "app.patch" {
+		t.Fatalf("capability = %q, want app.patch", got.Capability)
+	}
+	if got.App == nil || got.App.ID != "codex" {
+		t.Fatalf("app request = %#v", got.App)
+	}
+	if got.Flags.Bool("migrate-keychain") {
+		t.Fatal("migrate-keychain = true, want false")
+	}
+}
+
+func TestAppPatchDispatchReadsMigrateKeychainFlag(t *testing.T) {
+	installFixture(t)
+
+	var got operations.Request
+	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
+		got = req
+		return nil
+	}, "codex", "patch", "--dry-run", "--migrate-keychain")
+	if err != nil {
+		t.Fatalf("executeRootWithRunner(codex patch --migrate-keychain): %v", err)
+	}
+	if !got.Flags.Bool("migrate-keychain") {
+		t.Fatal("migrate-keychain = false, want true")
+	}
+}
+
+func TestAppUpgradeDispatchDefaultsMigrateKeychainFalse(t *testing.T) {
+	installFixture(t)
+
+	var got operations.Request
+	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
+		got = req
+		return nil
+	}, "codex", "upgrade", "--dry-run")
+	if err != nil {
+		t.Fatalf("executeRootWithRunner(codex upgrade): %v", err)
+	}
+	if got.Capability != "app.upgrade" {
+		t.Fatalf("capability = %q, want app.upgrade", got.Capability)
+	}
+	if got.App == nil || got.App.ID != "codex" {
+		t.Fatalf("app request = %#v", got.App)
+	}
+	if got.Flags.Bool("migrate-keychain") {
+		t.Fatal("migrate-keychain = true, want false")
+	}
+}
+
+func TestAppUpgradeDispatchReadsMigrateKeychainFlag(t *testing.T) {
+	installFixture(t)
+
+	var got operations.Request
+	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
+		got = req
+		return nil
+	}, "codex", "upgrade", "--dry-run", "--migrate-keychain")
+	if err != nil {
+		t.Fatalf("executeRootWithRunner(codex upgrade --migrate-keychain): %v", err)
+	}
+	if !got.Flags.Bool("migrate-keychain") {
+		t.Fatal("migrate-keychain = false, want true")
+	}
+}
+
 func TestPatchAllDryRunDispatchesBatchRequest(t *testing.T) {
 	var got batchops.Request
 	output, err := executeRootWithBatchRunner(t, func(_ context.Context, req batchops.Request) error {
 		got = req
 		return nil
-	}, "patch", "all", "--dry-run", "--no-migrate-keychain", "--parallel", "2", "--target", "cursor", "--set", "cursor.app-path=/tmp/Cursor.app")
+	}, "patch", "all", "--dry-run", "--migrate-keychain", "--parallel", "2", "--target", "cursor", "--set", "cursor.app-path=/tmp/Cursor.app")
 	if err != nil {
 		t.Fatalf("executeRootWithBatchRunner(patch all): %v\noutput:\n%s", err, output)
 	}
@@ -417,8 +496,8 @@ func TestPatchAllDryRunDispatchesBatchRequest(t *testing.T) {
 	if !got.DryRun {
 		t.Fatal("dry-run = false, want true")
 	}
-	if !got.NoMigrateKeychain {
-		t.Fatal("no-migrate-keychain = false, want true")
+	if !got.MigrateKeychain {
+		t.Fatal("migrate-keychain = false, want true")
 	}
 	if got.Parallel != 2 {
 		t.Fatalf("parallel = %d, want 2", got.Parallel)
@@ -448,6 +527,9 @@ func TestUpgradeAllDryRunDispatchesBatchRequest(t *testing.T) {
 	}
 	if !got.DryRun {
 		t.Fatal("dry-run = false, want true")
+	}
+	if got.MigrateKeychain {
+		t.Fatal("migrate-keychain = true, want false")
 	}
 	if want := []string{"cursor", "codex-cli"}; strings.Join(got.Targets, ",") != strings.Join(want, ",") {
 		t.Fatalf("targets = %#v, want %#v", got.Targets, want)

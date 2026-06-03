@@ -34,14 +34,14 @@ const (
 
 // Request describes one aggregate command execution.
 type Request struct {
-	Out               io.Writer
-	Operation         OperationName
-	DryRun            bool
-	NoMigrateKeychain bool
-	Parallel          int
-	Targets           []string
-	Sets              []string
-	Format            clioutput.Format
+	Out             io.Writer
+	Operation       OperationName
+	DryRun          bool
+	MigrateKeychain bool
+	Parallel        int
+	Targets         []string
+	Sets            []string
+	Format          clioutput.Format
 }
 
 // RunnerFunc dispatches one selected target operation.
@@ -396,11 +396,11 @@ func buildFlagValues(
 			}
 		}
 	}
-	if req.NoMigrateKeychain {
-		if _, ok := cmdflags.Find(flags, "no-migrate-keychain"); ok {
-			if err := cmdflags.ApplyOverride(values, flags, "no-migrate-keychain", "true"); err != nil {
-				slog.Warn("batchops.apply_no_migrate_keychain_override_failed", "err", err)
-				return operations.FlagValues{}, fmt.Errorf("apply no-migrate-keychain override: %w", err)
+	if req.MigrateKeychain {
+		if _, ok := cmdflags.Find(flags, "migrate-keychain"); ok {
+			if err := cmdflags.ApplyOverride(values, flags, "migrate-keychain", "true"); err != nil {
+				slog.Warn("batchops.apply_migrate_keychain_override_failed", "err", err)
+				return operations.FlagValues{}, fmt.Errorf("apply migrate-keychain override: %w", err)
 			}
 		}
 	}

@@ -53,28 +53,28 @@ func TestRunWithOperationRunnerUpgradeIncludesCLIAndOverrides(t *testing.T) {
 	installFixture(t)
 
 	type observed struct {
-		kind              string
-		channel           string
-		packageHome       string
-		noMigrateKeychain bool
-		dryRun            bool
+		kind            string
+		channel         string
+		packageHome     string
+		migrateKeychain bool
+		dryRun          bool
 	}
 	observedByID := map[string]observed{}
 	err := RunWithOperationRunner(context.Background(), Request{
-		Operation:         OperationUpgrade,
-		DryRun:            true,
-		NoMigrateKeychain: true,
-		Parallel:          1,
+		Operation:       OperationUpgrade,
+		DryRun:          true,
+		MigrateKeychain: true,
+		Parallel:        1,
 		Sets: []string{
 			"cursor.channel=stable",
 			"codex-cli.codex-home=/tmp/codex-home",
 		},
 	}, func(_ context.Context, req operations.Request) error {
 		item := observed{
-			channel:           req.Flags.String("channel"),
-			packageHome:       req.Flags.String("package-home"),
-			noMigrateKeychain: req.Flags.Bool("no-migrate-keychain"),
-			dryRun:            req.Flags.Bool("dry-run"),
+			channel:         req.Flags.String("channel"),
+			packageHome:     req.Flags.String("package-home"),
+			migrateKeychain: req.Flags.Bool("migrate-keychain"),
+			dryRun:          req.Flags.Bool("dry-run"),
 		}
 		if req.App != nil {
 			item.kind = "app"
@@ -103,8 +103,11 @@ func TestRunWithOperationRunnerUpgradeIncludesCLIAndOverrides(t *testing.T) {
 	if observedByID["codex-cli"].packageHome != "/tmp/codex-home" {
 		t.Fatalf("codex-cli package-home = %q, want /tmp/codex-home", observedByID["codex-cli"].packageHome)
 	}
-	if observedByID["codex-cli"].noMigrateKeychain {
-		t.Fatal("codex-cli no-migrate-keychain = true, want false")
+	if !observedByID["claude"].migrateKeychain {
+		t.Fatal("claude migrate-keychain = false, want true")
+	}
+	if observedByID["codex-cli"].migrateKeychain {
+		t.Fatal("codex-cli migrate-keychain = true, want false")
 	}
 	if !observedByID["claude"].dryRun || !observedByID["codex-cli"].dryRun {
 		t.Fatal("expected dry-run to propagate to every upgrade request")

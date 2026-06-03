@@ -128,8 +128,8 @@ type Options struct {
 	Channel string
 	// DryRun prints every step without modifying the bundle or the filesystem.
 	DryRun bool
-	// NoMigrateKeychain is forwarded to the post-swap patch run.
-	NoMigrateKeychain bool
+	// MigrateKeychain is forwarded to the post-swap patch run.
+	MigrateKeychain bool
 	// Out receives progress output. Defaults to os.Stdout.
 	Out io.Writer
 	// LogOut receives raw subprocess output. Defaults to Out.
@@ -142,11 +142,11 @@ func Operation(ctx context.Context, req operations.Request) error {
 		return fmt.Errorf("%s requires an app target", req.Capability)
 	}
 	if err := Run(ctx, *req.App, Options{
-		Channel:           req.Flags.String("channel"),
-		DryRun:            req.Flags.Bool("dry-run"),
-		NoMigrateKeychain: req.Flags.Bool("no-migrate-keychain"),
-		Out:               req.Out,
-		LogOut:            req.LogOut,
+		Channel:         req.Flags.String("channel"),
+		DryRun:          req.Flags.Bool("dry-run"),
+		MigrateKeychain: req.Flags.Bool("migrate-keychain"),
+		Out:             req.Out,
+		LogOut:          req.LogOut,
 	}); err != nil {
 		upgradeLog.ErrorContext(ctx, "upgrade.operation_failed", "err", err)
 		return fmt.Errorf("upgrade operation: %w",
@@ -293,11 +293,11 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	}
 
 	patchOpts := patch.Options{
-		DryRun:            opts.DryRun,
-		NoMigrateKeychain: opts.NoMigrateKeychain,
-		Out:               opts.Out,
-		LogOut:            r.RawOut,
-		Trace:             nil,
+		DryRun:          opts.DryRun,
+		MigrateKeychain: opts.MigrateKeychain,
+		Out:             opts.Out,
+		LogOut:          r.RawOut,
+		Trace:           nil,
 	}
 	if err := patch.Patch(ctx, t, patchOpts); err != nil {
 		return logUpgradeError(ctx, "upgrade.repatch_failed", fmt.Errorf("re-patch after swap: %w", err))
@@ -587,11 +587,11 @@ func handleCurrentVersion(
 	if !patched {
 		notef(r, fmt.Sprintf("target=%s already on version %s; patching clean bundle", t.ID, currentVersion))
 		if err := patch.Patch(ctx, t, patch.Options{
-			DryRun:            opts.DryRun,
-			NoMigrateKeychain: opts.NoMigrateKeychain,
-			Out:               opts.Out,
-			LogOut:            r.RawOut,
-			Trace:             nil,
+			DryRun:          opts.DryRun,
+			MigrateKeychain: opts.MigrateKeychain,
+			Out:             opts.Out,
+			LogOut:          r.RawOut,
+			Trace:           nil,
 		}); err != nil {
 			return logUpgradeError(ctx, "upgrade.current_version_patch_failed", fmt.Errorf("patch clean bundle after version check: %w", err))
 		}

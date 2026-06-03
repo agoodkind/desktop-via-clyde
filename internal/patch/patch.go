@@ -74,11 +74,11 @@ func (e MissingStateEntryError) Is(target error) bool {
 
 // Options controls a patch invocation.
 type Options struct {
-	DryRun            bool
-	NoMigrateKeychain bool
-	Out               io.Writer
-	LogOut            io.Writer
-	Trace             *Trace
+	DryRun          bool
+	MigrateKeychain bool
+	Out             io.Writer
+	LogOut          io.Writer
+	Trace           *Trace
 }
 
 // Operation runs the app patch operation for one configured target.
@@ -87,11 +87,11 @@ func Operation(ctx context.Context, req operations.Request) error {
 		return fmt.Errorf("%s requires an app target", req.Capability)
 	}
 	if err := Patch(ctx, *req.App, Options{
-		DryRun:            req.Flags.Bool("dry-run"),
-		NoMigrateKeychain: req.Flags.Bool("no-migrate-keychain"),
-		Out:               req.Out,
-		LogOut:            req.LogOut,
-		Trace:             nil,
+		DryRun:          req.Flags.Bool("dry-run"),
+		MigrateKeychain: req.Flags.Bool("migrate-keychain"),
+		Out:             req.Out,
+		LogOut:          req.LogOut,
+		Trace:           nil,
 	}); err != nil {
 		patchLog.ErrorContext(ctx, "patch.operation_failed", "err", err)
 		return fmt.Errorf("patch operation: %w",
@@ -106,11 +106,11 @@ func KeychainMigrateOperation(ctx context.Context, req operations.Request) error
 		return fmt.Errorf("%s requires an app target", req.Capability)
 	}
 	if err := KeychainMigrate(ctx, *req.App, Options{
-		DryRun:            req.Flags.Bool("dry-run"),
-		NoMigrateKeychain: false,
-		Out:               req.Out,
-		LogOut:            req.LogOut,
-		Trace:             nil,
+		DryRun:          req.Flags.Bool("dry-run"),
+		MigrateKeychain: true,
+		Out:             req.Out,
+		LogOut:          req.LogOut,
+		Trace:           nil,
 	}); err != nil {
 		patchLog.ErrorContext(ctx, "patch.keychain_migrate_operation_failed", "err", err)
 		return fmt.Errorf("keychain migrate operation: %w",
@@ -135,7 +135,7 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 		r.RawOut = opts.LogOut
 	}
 	r.Trace = opts.Trace
-	log.InfoContext(ctx, "patch.start", "app_path", t.AppPath, "dry_run", opts.DryRun, "no_migrate_keychain", opts.NoMigrateKeychain)
+	log.InfoContext(ctx, "patch.start", "app_path", t.AppPath, "dry_run", opts.DryRun, "migrate_keychain", opts.MigrateKeychain)
 
 	if !opts.DryRun {
 		if _, err := os.Stat(t.AppPath); err != nil {
@@ -157,8 +157,8 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 
 	var captured []KeychainItem
 	switch {
-	case opts.NoMigrateKeychain:
-		notef(r, fmt.Sprintf("target=%s skipped keychain access repair (--no-migrate-keychain)", t.ID))
+	case !opts.MigrateKeychain:
+		notef(r, fmt.Sprintf("target=%s skipped keychain access repair (pass --migrate-keychain to run)", t.ID))
 	case opts.DryRun:
 		notef(r, fmt.Sprintf("target=%s would find keychain items for services=%v", t.ID, t.KeychainServices))
 	default:
@@ -178,8 +178,8 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	}
 
 	switch {
-	case opts.NoMigrateKeychain:
-		notef(r, fmt.Sprintf("target=%s skipped keychain access restore (--no-migrate-keychain)", t.ID))
+	case !opts.MigrateKeychain:
+		notef(r, fmt.Sprintf("target=%s skipped keychain access restore (pass --migrate-keychain to run)", t.ID))
 	case opts.DryRun:
 		notef(r, fmt.Sprintf("target=%s would restore keychain access for captured items", t.ID))
 	case len(captured) > 0:
@@ -237,11 +237,11 @@ func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Op
 		return logPatchError(ctx, "patch.install_shim_failed", fmt.Errorf("install shim: %w", err))
 	}
 	if err := runPreResignHooks(ctx, r, *t, Options{
-		DryRun:            r.DryRun,
-		NoMigrateKeychain: opts.NoMigrateKeychain,
-		Out:               r.Out,
-		LogOut:            r.RawOut,
-		Trace:             r.Trace,
+		DryRun:          r.DryRun,
+		MigrateKeychain: opts.MigrateKeychain,
+		Out:             r.Out,
+		LogOut:          r.RawOut,
+		Trace:           r.Trace,
 	}); err != nil {
 		return logPatchError(ctx, "patch.pre_resign_hook_failed", fmt.Errorf("run pre-resign hooks: %w", err))
 	}

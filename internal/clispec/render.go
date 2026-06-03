@@ -111,7 +111,7 @@ func newBatchAllCmd(out io.Writer, operation batchops.OperationName, runner Batc
 	}
 	handler := batchAllHandler{out: out, operation: operation, runner: runner}
 	cmd.Flags().Bool("dry-run", false, "print every step without modifying bundles, installs, or the filesystem")
-	cmd.Flags().Bool("no-migrate-keychain", false, "skip keychain access repair where that flag is supported")
+	cmd.Flags().Bool("migrate-keychain", false, "restore keychain access where that flag is supported")
 	cmd.Flags().Int("parallel", 0, "maximum concurrent targets; 0 runs all selected targets in parallel")
 	cmd.Flags().StringArray("target", nil, "restrict the batch to one target id; repeat the flag to select multiple ids")
 	cmd.Flags().StringArray("set", nil, "override one target flag as target.flag=value; repeat the flag for multiple overrides")
@@ -213,10 +213,10 @@ func runBatchAll(
 		slog.WarnContext(ctx, "clispec.batch.read_dry_run_failed", "err", err)
 		return fmt.Errorf("read bool flag dry-run: %w", err)
 	}
-	noMigrateKeychain, err := cmd.Flags().GetBool("no-migrate-keychain")
+	migrateKeychain, err := cmd.Flags().GetBool("migrate-keychain")
 	if err != nil {
-		slog.WarnContext(ctx, "clispec.batch.read_no_migrate_keychain_failed", "err", err)
-		return fmt.Errorf("read bool flag no-migrate-keychain: %w", err)
+		slog.WarnContext(ctx, "clispec.batch.read_migrate_keychain_failed", "err", err)
+		return fmt.Errorf("read bool flag migrate-keychain: %w", err)
 	}
 	parallel, err := cmd.Flags().GetInt("parallel")
 	if err != nil {
@@ -234,14 +234,14 @@ func runBatchAll(
 		return fmt.Errorf("read string array flag set: %w", err)
 	}
 	return runner(ctx, batchops.Request{
-		Out:               out,
-		Operation:         operation,
-		DryRun:            dryRun,
-		NoMigrateKeychain: noMigrateKeychain,
-		Parallel:          parallel,
-		Targets:           targetIDs,
-		Sets:              sets,
-		Format:            format,
+		Out:             out,
+		Operation:       operation,
+		DryRun:          dryRun,
+		MigrateKeychain: migrateKeychain,
+		Parallel:        parallel,
+		Targets:         targetIDs,
+		Sets:            sets,
+		Format:          format,
 	})
 }
 

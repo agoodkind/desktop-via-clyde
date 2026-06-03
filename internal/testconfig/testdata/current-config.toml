@@ -113,9 +113,9 @@ type = "bool"
 usage = "print every step without modifying the bundle"
 
 [[apps.cursor.operations.patch.flags]]
-name = "no-migrate-keychain"
+name = "migrate-keychain"
 type = "bool"
-usage = "skip keychain access repair"
+usage = "restore keychain access during patch"
 
 [[apps.cursor.operations.patch.flags]]
 name = "app-path"
@@ -139,9 +139,9 @@ type = "bool"
 usage = "print every step without modifying the bundle"
 
 [[apps.cursor.operations.upgrade.flags]]
-name = "no-migrate-keychain"
+name = "migrate-keychain"
 type = "bool"
-usage = "skip keychain access repair after install"
+usage = "restore keychain access after install"
 
 [[apps.cursor.operations.upgrade.flags]]
 name = "app-path"
@@ -351,9 +351,9 @@ type = "bool"
 usage = "print every step without modifying the bundle"
 
 [[apps.codex.operations.patch.flags]]
-name = "no-migrate-keychain"
+name = "migrate-keychain"
 type = "bool"
-usage = "skip keychain access repair"
+usage = "restore keychain access during patch"
 
 [[apps.codex.operations.patch.flags]]
 name = "app-path"
@@ -377,9 +377,9 @@ type = "bool"
 usage = "print every step without modifying the bundle"
 
 [[apps.codex.operations.upgrade.flags]]
-name = "no-migrate-keychain"
+name = "migrate-keychain"
 type = "bool"
-usage = "skip keychain access repair after install"
+usage = "restore keychain access after install"
 
 [[apps.codex.operations.upgrade.flags]]
 name = "app-path"
@@ -527,9 +527,9 @@ type = "bool"
 usage = "print every step without modifying the bundle"
 
 [[apps.claude.operations.patch.flags]]
-name = "no-migrate-keychain"
+name = "migrate-keychain"
 type = "bool"
-usage = "skip keychain access repair"
+usage = "restore keychain access during patch"
 
 [[apps.claude.operations.patch.flags]]
 name = "app-path"
@@ -547,9 +547,9 @@ type = "bool"
 usage = "print every step without modifying the bundle"
 
 [[apps.claude.operations.upgrade.flags]]
-name = "no-migrate-keychain"
+name = "migrate-keychain"
 type = "bool"
-usage = "skip keychain access repair after install"
+usage = "restore keychain access after install"
 
 [[apps.claude.operations.upgrade.flags]]
 name = "app-path"

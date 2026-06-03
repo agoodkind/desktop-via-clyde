@@ -1,11 +1,13 @@
 package patch_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -35,10 +37,10 @@ func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
 	runner := patch.NewRunner(context.Background(), true, io.Discard)
 	runner.Trace = trace
 	if err := computeruseext.BundledLifecycleHook(context.Background(), runner, tg, patch.Options{
-		DryRun:            true,
-		NoMigrateKeychain: true,
-		Out:               io.Discard,
-		Trace:             trace,
+		DryRun:          true,
+		MigrateKeychain: false,
+		Out:             io.Discard,
+		Trace:           trace,
 	}); err != nil {
 		t.Fatalf("BundledLifecycleHook dry-run: %v", err)
 	}
@@ -84,10 +86,10 @@ func TestPatchDryRunScansComputerUseCacheHelpers(t *testing.T) {
 	runner := patch.NewRunner(context.Background(), true, io.Discard)
 	runner.Trace = trace
 	if err := computeruseext.LifecycleHook(context.Background(), runner, tg, patch.Options{
-		DryRun:            true,
-		NoMigrateKeychain: true,
-		Out:               io.Discard,
-		Trace:             trace,
+		DryRun:          true,
+		MigrateKeychain: false,
+		Out:             io.Discard,
+		Trace:           trace,
 	}); err != nil {
 		t.Fatalf("LifecycleHook dry-run: %v", err)
 	}
@@ -108,10 +110,10 @@ func TestPatchDryRunRepairsComputerUseAuthPlugin(t *testing.T) {
 	runner := patch.NewRunner(context.Background(), true, io.Discard)
 	runner.Trace = trace
 	if err := computeruseext.LifecycleHook(context.Background(), runner, tg, patch.Options{
-		DryRun:            true,
-		NoMigrateKeychain: true,
-		Out:               io.Discard,
-		Trace:             trace,
+		DryRun:          true,
+		MigrateKeychain: false,
+		Out:             io.Discard,
+		Trace:           trace,
 	}); err != nil {
 		t.Fatalf("LifecycleHook dry-run: %v", err)
 	}
@@ -133,10 +135,10 @@ func TestClaudePatchRestoresSquirrelInsteadOfResigningIt(t *testing.T) {
 
 	trace := &patch.Trace{}
 	if err := patch.Patch(context.Background(), tg, patch.Options{
-		DryRun:            true,
-		NoMigrateKeychain: true,
-		Out:               io.Discard,
-		Trace:             trace,
+		DryRun:          true,
+		MigrateKeychain: false,
+		Out:             io.Discard,
+		Trace:           trace,
 	}); err != nil {
 		t.Fatalf("Patch dry-run: %v", err)
 	}
@@ -145,6 +147,53 @@ func TestClaudePatchRestoresSquirrelInsteadOfResigningIt(t *testing.T) {
 	requireTraceAction(t, trace, patch.ActionRestorePreservedNestedCode, restorePath)
 	if traceActionIndex(trace, patch.ActionSignNestedCode, restorePath) >= 0 {
 		t.Fatalf("Patch dry-run trace re-signs preserved nested code: %#v", trace.Events)
+	}
+}
+
+func TestPatchDryRunSkipsKeychainPreviewUnlessMigrateRequested(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	tg, err := lookupTarget(t, "claude")
+	if err != nil {
+		t.Fatalf("Lookup(claude): %v", err)
+	}
+	tg.AppPath = filepath.Join(t.TempDir(), "Claude.app")
+
+	var skippedOutput bytes.Buffer
+	if err := patch.Patch(context.Background(), tg, patch.Options{
+		DryRun:          true,
+		MigrateKeychain: false,
+		Out:             &skippedOutput,
+	}); err != nil {
+		t.Fatalf("Patch dry-run without migrate-keychain: %v", err)
+	}
+	skippedText := skippedOutput.String()
+	if !strings.Contains(skippedText, "skipped keychain access repair") {
+		t.Fatalf("dry-run output missing repair skip\noutput:\n%s", skippedText)
+	}
+	if !strings.Contains(skippedText, "skipped keychain access restore") {
+		t.Fatalf("dry-run output missing restore skip\noutput:\n%s", skippedText)
+	}
+	if strings.Contains(skippedText, "would find keychain items") {
+		t.Fatalf("dry-run output unexpectedly previews keychain capture\noutput:\n%s", skippedText)
+	}
+	if strings.Contains(skippedText, "would restore keychain access") {
+		t.Fatalf("dry-run output unexpectedly previews keychain restore\noutput:\n%s", skippedText)
+	}
+
+	var migrateOutput bytes.Buffer
+	if err := patch.Patch(context.Background(), tg, patch.Options{
+		DryRun:          true,
+		MigrateKeychain: true,
+		Out:             &migrateOutput,
+	}); err != nil {
+		t.Fatalf("Patch dry-run with migrate-keychain: %v", err)
+	}
+	migrateText := migrateOutput.String()
+	if !strings.Contains(migrateText, "would find keychain items") {
+		t.Fatalf("dry-run output missing keychain capture preview\noutput:\n%s", migrateText)
+	}
+	if !strings.Contains(migrateText, "would restore keychain access") {
+		t.Fatalf("dry-run output missing keychain restore preview\noutput:\n%s", migrateText)
 	}
 }
 
