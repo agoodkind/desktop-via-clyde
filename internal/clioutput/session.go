@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-isatty"
@@ -53,6 +53,7 @@ const (
 	statusRunning = "running"
 	statusOK      = "ok"
 	statusFailed  = "failed"
+	statusSkipped = "skipped"
 )
 
 // Event is one structured progress event for patch and upgrade commands.
@@ -551,6 +552,7 @@ type targetState struct {
 	LogFile  string
 	Done     int
 	Failed   bool
+	Skipped  bool
 	Duration string
 }
 
@@ -563,7 +565,7 @@ type liveModel struct {
 	done      int
 	failed    int
 	total     int
-	progress  progress.Model
+	spinner   spinner.Model
 }
 
 func newLiveModel() liveModel {
@@ -576,7 +578,7 @@ func newLiveModel() liveModel {
 		done:      0,
 		failed:    0,
 		total:     0,
-		progress:  progress.New(progress.WithDefaultGradient()),
+		spinner:   spinner.New(spinner.WithSpinner(spinner.Dot)),
 	}
 }
 
@@ -607,7 +609,8 @@ func (m *liveModel) apply(event Event) {
 		target.Detail = event.Detail
 		target.Done++
 		if event.Type == EventStepSkipped {
-			target.Status = "skipped"
+			target.Status = statusSkipped
+			target.Skipped = true
 		}
 		if event.Type == EventStepFailed {
 			target.Failed = true
@@ -619,6 +622,9 @@ func (m *liveModel) apply(event Event) {
 		target.Duration = durationValue(event.DurationMS)
 		if event.Status == statusFailed {
 			target.Failed = true
+		} else if target.Skipped || target.Status == statusSkipped {
+			target.Status = statusSkipped
+			target.Skipped = true
 		}
 	case EventRunDone:
 		m.done = intValueFromPointer(event.Succeeded)
@@ -642,6 +648,7 @@ func (m *liveModel) ensureTarget(id string) *targetState {
 		LogFile:  "",
 		Done:     0,
 		Failed:   false,
+		Skipped:  false,
 		Duration: "",
 	}
 	m.targets[id] = target
@@ -654,44 +661,158 @@ func (m *liveModel) View() string {
 	headerStyle := lipgloss.NewStyle().Bold(true)
 	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	okStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	skippedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	failStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	stateStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("69"))
 	runStatus := strings.Builder{}
-	runStatus.WriteString(headerStyle.Render(title(m.operation)) + "\n")
-	if m.started != "" {
-		runStatus.WriteString("started  " + m.started + "\n")
+	okCount, skippedCount, failedCount, activeCount := m.targetCounts()
+	runState := "running"
+	if m.total > 0 {
+		runState = "finished"
 	}
+	_, _ = fmt.Fprintf(&runStatus, "%s  %s  %s", headerStyle.Render(title(m.operation)), runState, targetCountLabel(len(m.targets)))
+	if m.total > 0 {
+		_, _ = fmt.Fprintf(&runStatus, "  %d ok  %d skipped  %d failed", okCount, skippedCount, failedCount)
+	}
+	if m.started != "" {
+		runStatus.WriteString("  started " + m.started)
+	}
+	runStatus.WriteString("\n")
 	if m.runLog != "" {
 		runStatus.WriteString("run log  " + m.runLog + "\n")
 	}
 	runStatus.WriteString("\n")
+	if len(m.targets) > 0 {
+		runStatus.WriteString(mutedStyle.Render(fmt.Sprintf("%-10s %-10s %-24s %s", "TARGET", "STATE", "STEP", "DETAIL")) + "\n")
+	}
 	for _, id := range m.order {
 		target := m.targets[id]
-		status := target.Status
-		if target.Failed {
-			status = failStyle.Render(status)
-		} else if status == statusOK {
-			status = okStyle.Render(status)
-		}
-		_, _ = fmt.Fprintf(&runStatus, "%-8s %-10s %s\n", target.ID, status, target.Step)
-		if target.LogFile != "" {
-			runStatus.WriteString(mutedStyle.Render("log     "+target.LogFile) + "\n")
-		}
-		if target.Detail != "" {
-			runStatus.WriteString("  " + target.Detail + "\n")
-		}
+		state := renderStateCell(target, m.spinner.View(), okStyle, skippedStyle, failStyle, stateStyle)
+		_, _ = fmt.Fprintf(&runStatus, "%-10s %s %-24s %s\n", target.ID, state, displayStep(target.Step), displayDetail(target))
+	}
+	if activeCount > 0 {
 		runStatus.WriteString("\n")
+		runStatus.WriteString(headerStyle.Render("Active") + "\n")
+		for _, id := range m.order {
+			target := m.targets[id]
+			if target.Status != statusRunning {
+				continue
+			}
+			_, _ = fmt.Fprintf(&runStatus, "  %s  %s\n", target.ID, displayStep(target.Step))
+			if target.Detail != "" {
+				runStatus.WriteString("  detail  " + displayDetail(target) + "\n")
+			}
+			if target.LogFile != "" {
+				runStatus.WriteString(mutedStyle.Render("  log     "+target.LogFile) + "\n")
+			}
+		}
 	}
-	totalSteps := 0
-	for _, target := range m.targets {
-		totalSteps += target.Done
-	}
-	if len(m.targets) > 0 {
-		runStatus.WriteString(m.progress.ViewAs(float64(totalSteps)/float64(maxInt(totalSteps, 1))) + "\n")
-	}
-	if m.total > 0 {
-		_, _ = fmt.Fprintf(&runStatus, "Result  completed %d   failed %d\n", m.done, m.failed)
+	if failedCount > 0 {
+		runStatus.WriteString("\n")
+		runStatus.WriteString(headerStyle.Render("Failures") + "\n")
+		for _, id := range m.order {
+			target := m.targets[id]
+			if !target.Failed {
+				continue
+			}
+			_, _ = fmt.Fprintf(&runStatus, "  %s  %s\n", target.ID, displayDetail(target))
+			if target.LogFile != "" {
+				runStatus.WriteString(mutedStyle.Render("  log     "+target.LogFile) + "\n")
+			}
+		}
 	}
 	return runStatus.String()
+}
+
+func (m *liveModel) targetCounts() (int, int, int, int) {
+	okCount := 0
+	skippedCount := 0
+	failedCount := 0
+	activeCount := 0
+	for _, target := range m.targets {
+		switch {
+		case target.Failed || target.Status == statusFailed:
+			failedCount++
+		case target.Skipped || target.Status == statusSkipped:
+			skippedCount++
+		case target.Status == statusRunning || target.Status == statusQueued:
+			activeCount++
+		case target.Status == statusOK:
+			okCount++
+		}
+	}
+	return okCount, skippedCount, failedCount, activeCount
+}
+
+func targetCountLabel(count int) string {
+	if count == 1 {
+		return "1 target"
+	}
+	return fmt.Sprintf("%d targets", count)
+}
+
+func renderStateCell(
+	target *targetState,
+	spinnerFrame string,
+	okStyle lipgloss.Style,
+	skippedStyle lipgloss.Style,
+	failStyle lipgloss.Style,
+	stateStyle lipgloss.Style,
+) string {
+	state := target.Status
+	style := lipgloss.NewStyle()
+	switch {
+	case target.Failed:
+		state = statusFailed
+		style = failStyle
+	case target.Skipped || state == statusSkipped:
+		state = statusSkipped
+		style = skippedStyle
+	case state == statusOK:
+		style = okStyle
+	case state == statusRunning:
+		state = spinnerFrame + " " + state
+		style = stateStyle
+	}
+	return style.Render(fmt.Sprintf("%-10s", state))
+}
+
+func displayStep(step string) string {
+	cleaned := strings.ReplaceAll(strings.TrimSpace(step), "_", " ")
+	if cleaned == "" {
+		return "progress"
+	}
+	return cleaned
+}
+
+func displayDetail(target *targetState) string {
+	detail := strings.TrimSpace(target.Detail)
+	if detail == "" {
+		return ""
+	}
+	if trimmed, ok := strings.CutPrefix(detail, "target="+target.ID+" "); ok {
+		detail = strings.TrimSpace(trimmed)
+	}
+	if trimmed, ok := strings.CutPrefix(detail, target.ID+":"); ok {
+		detail = strings.TrimSpace(trimmed)
+	}
+	if target.Step == "already_on_version" {
+		return versionFromAlreadyOnVersion(detail)
+	}
+	return detail
+}
+
+func versionFromAlreadyOnVersion(detail string) string {
+	const prefix = "already on version "
+	rest := strings.TrimSpace(strings.TrimPrefix(detail, prefix))
+	if rest == detail {
+		return detail
+	}
+	version, _, ok := strings.Cut(rest, ";")
+	if !ok {
+		return rest
+	}
+	return strings.TrimSpace(version)
 }
 
 func newRenderer(metadata response.Metadata, out io.Writer, format Format) renderer {
@@ -812,13 +933,6 @@ func intValueFromPointer(value *int) int {
 
 func minInt(left int, right int) int {
 	if left < right {
-		return left
-	}
-	return right
-}
-
-func maxInt(left int, right int) int {
-	if left > right {
 		return left
 	}
 	return right

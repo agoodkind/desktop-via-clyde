@@ -3,6 +3,7 @@
 package clioutput
 
 import (
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -15,11 +16,15 @@ func newBubbleLiveModel(model *liveModel) *bubbleLiveModel {
 }
 
 func (m *bubbleLiveModel) Init() tea.Cmd {
-	return nil
+	return m.model.spinner.Tick
 }
 
 func (m *bubbleLiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch typed := msg.(type) {
+	case spinner.TickMsg:
+		updated, cmd := m.model.spinner.Update(typed)
+		m.model.spinner = updated
+		return m, cmd
 	case eventMsg:
 		m.model.apply(typed.Event)
 		return m, nil

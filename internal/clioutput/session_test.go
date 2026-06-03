@@ -79,6 +79,38 @@ func TestSessionTextRendersCoherentNonTTYLines(t *testing.T) {
 	}
 }
 
+func TestLiveModelKeepsSkippedStatusAfterTargetDone(t *testing.T) {
+	model := newLiveModel()
+	started := NewEvent(EventRunStarted, "upgrade")
+	started.Target = "cursor"
+	started.RunLog = "/tmp/run.jsonl"
+	model.apply(started)
+	targetStarted := NewEvent(EventTargetStarted, "upgrade")
+	targetStarted.Target = "cursor"
+	targetStarted.LogFile = "/tmp/cursor.log"
+	model.apply(targetStarted)
+	skipped := NewEvent(EventStepSkipped, "upgrade")
+	skipped.Target = "cursor"
+	skipped.Step = "no_update_available"
+	skipped.Status = statusSkipped
+	skipped.Detail = "target=cursor no update available on dev channel; nothing to do"
+	model.apply(skipped)
+	done := NewEvent(EventTargetDone, "upgrade")
+	done.Target = "cursor"
+	done.Status = statusOK
+	model.apply(done)
+
+	output := model.View()
+	for _, want := range []string{"Upgrade  running  1 target", "cursor", "skipped", "no update available", "dev channel"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("view missing %q\nview:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "100%") {
+		t.Fatalf("view contains fake progress percentage\nview:\n%s", output)
+	}
+}
+
 func assertJSONEventType(t *testing.T, line string, want EventType) {
 	t.Helper()
 	var payload map[string]any

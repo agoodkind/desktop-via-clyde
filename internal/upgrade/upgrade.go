@@ -237,6 +237,10 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 
 	m, err := fetchManifest(ctx, t, currentVersion, channel)
 	if err != nil {
+		if errors.Is(err, errNoUpdate) {
+			notef(r, noUpdateMessage(t.ID, channel))
+			return nil
+		}
 		return err
 	}
 	notef(r, fmt.Sprintf("target=%s manifest: name=%s url=%s", t.ID, m.Name, m.URL))
@@ -345,7 +349,7 @@ func fetchHTTPPathJSONManifest(ctx context.Context, t targets.Target, currentVer
 	body, err := fetchURL(ctx, endpoint, renderUserAgent(t.Updater.UserAgent, currentVersion), "application/json", 1<<16)
 	if err != nil {
 		if errors.Is(err, errNoUpdate) {
-			return updateManifest{}, errors.New("upstream returned 204; no update available on this channel")
+			return updateManifest{}, errNoUpdate
 		}
 		return updateManifest{}, err
 	}
@@ -388,6 +392,13 @@ func fetchSquirrelJSONManifest(ctx context.Context, t targets.Target) (updateMan
 }
 
 var errNoUpdate = errors.New("no update available")
+
+func noUpdateMessage(targetID string, channel string) string {
+	if channel == "" {
+		return fmt.Sprintf("target=%s no update available; nothing to do", targetID)
+	}
+	return fmt.Sprintf("target=%s no update available on %s channel; nothing to do", targetID, channel)
+}
 
 func fetchURL(ctx context.Context, endpoint, userAgent, accept string, limit int64) ([]byte, error) {
 	upgradeLog.DebugContext(ctx, "upgrade.fetch_url.boundary", "endpoint", endpoint, "accept", accept, "limit", limit)

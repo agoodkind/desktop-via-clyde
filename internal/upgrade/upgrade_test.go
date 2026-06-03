@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +19,7 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/extensions"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
+	"goodkind.io/desktop-via-clyde/internal/spec"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
@@ -160,6 +163,53 @@ func TestClaudeUpdaterDoesNotRequireChannel(t *testing.T) {
 	}
 	if got != "" {
 		t.Fatalf("default claude channel = %q, want empty", got)
+	}
+}
+
+func TestRunTreatsHTTPPathNoUpdateAsSkippedSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	appPath := filepath.Join(t.TempDir(), "Cursor.app")
+	contentsDir := filepath.Join(appPath, "Contents")
+	if err := os.MkdirAll(contentsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll Contents: %v", err)
+	}
+	infoPlist := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleVersion</key>
+  <string>3.7.2</string>
+</dict>
+</plist>
+`
+	if err := os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(infoPlist), 0o644); err != nil {
+		t.Fatalf("WriteFile Info.plist: %v", err)
+	}
+	tg := targets.Target{
+		ID:      "cursor",
+		AppPath: appPath,
+		Updater: targets.Updater{
+			Kind:           targets.UpdaterHTTPPathJSONManifest,
+			URLTemplate:    server.URL + "/api/update/{version}/{channel}",
+			UserAgent:      "desktop-via-clyde-test/{version}",
+			DefaultChannel: "dev",
+			Channels: []spec.UpdaterChannel{
+				{Name: "dev"},
+			},
+		},
+	}
+	var out strings.Builder
+	if err := Run(context.Background(), tg, Options{Out: &out}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	output := out.String()
+	for _, want := range []string{"current version=3.7.2 channel=dev", "target=cursor no update available on dev channel; nothing to do"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q\noutput:\n%s", want, output)
+		}
 	}
 }
 
