@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -102,13 +103,30 @@ func newRootCmdWithRunners(
 	batchRunner batchOperationRunner,
 ) *cobra.Command {
 	normalizedCtx, _ := correlation.Ensure(ctx, "")
-	return clispec.BuildRoot(
+	root := clispec.BuildRoot(
 		normalizedCtx,
 		out,
 		errOut,
 		clispec.OperationRunner(runner),
 		clispec.BatchRunner(batchRunner),
 	)
+	traceHeaderWritten := false
+	root.PersistentPreRun = func(cmd *cobra.Command, _ []string) {
+		if traceHeaderWritten {
+			return
+		}
+		format, err := readOutputFormat(normalizedCtx, cmd)
+		if err != nil || format == clioutput.FormatJSON {
+			return
+		}
+		header := response.FromContext(normalizedCtx).HeaderLine()
+		if header == "" {
+			return
+		}
+		traceHeaderWritten = true
+		_, _ = io.WriteString(cmd.OutOrStdout(), header+"\n")
+	}
+	return root
 }
 
 func writeRuntimeMessage(ctx context.Context, out io.Writer, format clioutput.Format, message string) {
@@ -122,5 +140,19 @@ func writeRuntimeMessage(ctx context.Context, out io.Writer, format clioutput.Fo
 			return
 		}
 	}
-	_ = response.WriteText(ctx, out, message+"\n")
+	_, _ = io.WriteString(out, message+"\n")
+}
+
+func readOutputFormat(ctx context.Context, cmd *cobra.Command) (clioutput.Format, error) {
+	rawFormat, err := cmd.Root().PersistentFlags().GetString(clioutput.FlagName)
+	if err != nil {
+		slog.WarnContext(ctx, "cli.output_format_read_failed", "err", err)
+		return "", fmt.Errorf("read output format flag: %w", err)
+	}
+	format, err := clioutput.ParseFormat(rawFormat)
+	if err != nil {
+		slog.WarnContext(ctx, "cli.output_format_parse_failed", "err", err)
+		return "", fmt.Errorf("parse output format flag: %w", err)
+	}
+	return format, nil
 }

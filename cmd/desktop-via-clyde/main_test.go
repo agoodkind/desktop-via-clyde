@@ -15,6 +15,7 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/spec"
+	"goodkind.io/gklog/correlation"
 )
 
 func TestRootHelpListsTargetCommands(t *testing.T) {
@@ -465,6 +466,22 @@ func TestBatchRunnerErrorReturnsNonZero(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("error = %q, want boom", err.Error())
+	}
+	if !strings.HasPrefix(output, "trace_id=") {
+		t.Fatalf("output missing leading trace header\noutput:\n%s", output)
+	}
+	if strings.Count(output, "trace_id=") != 1 {
+		t.Fatalf("output trace header count = %d, want 1\noutput:\n%s", strings.Count(output, "trace_id="), output)
+	}
+}
+
+func TestRuntimeTextErrorOmitsTrailingTraceHeader(t *testing.T) {
+	ctx, _ := correlation.Ensure(context.Background(), "")
+	var out bytes.Buffer
+	writeRuntimeMessage(ctx, &out, clioutput.FormatText, "error: boom")
+	output := out.String()
+	if output != "error: boom\n" {
+		t.Fatalf("runtime text output = %q, want plain error", output)
 	}
 }
 
