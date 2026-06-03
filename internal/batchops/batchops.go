@@ -251,6 +251,10 @@ func emitTargetDone(session *clioutput.Session, operation OperationName, targetI
 	event.Target = targetID
 	event.Status = status
 	event.DurationMS = &durationMS
+	if err != nil {
+		event.Step = "operation_failed"
+		event.Detail = err.Error()
+	}
 	if emitErr := session.Emit(event); emitErr != nil {
 		slog.Warn("batchops.emit_target_done_failed", "err", emitErr, "target", targetID, "operation", operation)
 	}
