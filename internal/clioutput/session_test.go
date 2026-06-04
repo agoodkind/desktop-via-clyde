@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -79,6 +80,69 @@ func TestSessionTextRendersCoherentNonTTYLines(t *testing.T) {
 	}
 }
 
+func TestSessionProgressWriterRendersInstalledVersionEndToEnd(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var out bytes.Buffer
+	session, err := NewSession(context.Background(), SessionOptions{
+		Out:       &out,
+		Format:    FormatJSON,
+		Operation: "upgrade",
+		Scope:     "all",
+		Parallel:  1,
+		DryRun:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	for _, target := range []string{"cursor", "codex"} {
+		targetLog, _, err := session.OpenTargetLog(target)
+		if err != nil {
+			t.Fatalf("OpenTargetLog %s: %v", target, err)
+		}
+		if err := targetLog.Close(); err != nil {
+			t.Fatalf("Close target log %s: %v", target, err)
+		}
+	}
+
+	cursorWriter := session.ProgressWriter("cursor")
+	for _, line := range []string{
+		"[run] target=cursor current version=3.7.6 channel=dev updater=cursor\n",
+		"[run] target=cursor no update available on dev channel; nothing to do\n",
+	} {
+		if _, err := cursorWriter.Write([]byte(line)); err != nil {
+			t.Fatalf("Write cursor progress line: %v", err)
+		}
+	}
+
+	codexWriter := session.ProgressWriter("codex")
+	if _, err := codexWriter.Write([]byte("[run] target=codex already on version 3436; nothing to do\n")); err != nil {
+		t.Fatalf("Write codex progress line: %v", err)
+	}
+
+	if err := session.Close([]TargetResult{
+		NewTargetResult("cursor", "app", nil, 0),
+		NewTargetResult("codex", "app", nil, 0),
+	}); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	model := modelFromSessionLog(t, session.runLogPath)
+	assertTargetRow(t, model, tableRow{
+		Target: "cursor",
+		State:  "skipped",
+		Step:   "no update available",
+		Detail: "installed version: 3.7.6",
+	})
+	assertTargetRow(t, model, tableRow{
+		Target: "codex",
+		State:  "skipped",
+		Step:   "no update available",
+		Detail: "installed version: 3436",
+	})
+}
+
 func TestLiveModelKeepsSkippedStatusAfterTargetDone(t *testing.T) {
 	model := newLiveModel()
 	started := NewEvent(EventRunStarted, "upgrade")
@@ -102,7 +166,7 @@ func TestLiveModelKeepsSkippedStatusAfterTargetDone(t *testing.T) {
 	model.apply(done)
 
 	output := model.View()
-	for _, want := range []string{"Upgrade", "running", "1 target", "cursor", "skipped", "no update available", "current version: 3.7.6"} {
+	for _, want := range []string{"Upgrade", "running", "1 target", "cursor", "skipped", "no update available", "installed version: 3.7.6"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("view missing %q\nview:\n%s", want, output)
 		}
@@ -148,7 +212,7 @@ func TestLiveModelRendersAggregateUpgradeTableAndLogs(t *testing.T) {
 		"codex",
 		"skipped",
 		"no update available",
-		"current version: 3436",
+		"installed version: 3436",
 		"codex-cli",
 		"running",
 		"building codex entrypoint",
@@ -199,7 +263,7 @@ func TestLiveModelAlreadyCurrentSuccessRendersInstalledVersion(t *testing.T) {
 	applyTargetDone(&model, "codex", statusOK, "", "")
 
 	output := model.View()
-	for _, want := range []string{"codex", "skipped", "no update available", "current version: 3436"} {
+	for _, want := range []string{"codex", "skipped", "no update available", "installed version: 3436"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("view missing %q\nview:\n%s", want, output)
 		}
@@ -217,7 +281,7 @@ func TestLiveModelUpdaterNoUpdateUsesLastObservedCurrentVersion(t *testing.T) {
 	applyTargetDone(&model, "cursor", statusOK, "", "")
 
 	output := model.View()
-	for _, want := range []string{"cursor", "skipped", "no update available", "current version: 3.7.6"} {
+	for _, want := range []string{"cursor", "skipped", "no update available", "installed version: 3.7.6"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("view missing %q\nview:\n%s", want, output)
 		}
@@ -241,7 +305,7 @@ func TestLiveModelTargetDoneFailureOverridesAlreadyCurrentProgress(t *testing.T)
 			t.Fatalf("view missing %q\nview:\n%s", want, output)
 		}
 	}
-	for _, blocked := range []string{"skipped", "current version: 3436"} {
+	for _, blocked := range []string{"skipped", "installed version: 3436"} {
 		if strings.Contains(output, blocked) {
 			t.Fatalf("view contains stale already-current state %q\nview:\n%s", blocked, output)
 		}
@@ -348,8 +412,8 @@ func TestLiveModelCompactsVersionInstallAndToolchainDetails(t *testing.T) {
 
 	output := model.View()
 	for _, want := range []string{
-		"checking current version",
-		"current version: 3436",
+		"checking installed version",
+		"installed version: 3436",
 		"install complete",
 		"release: local-fast",
 		"installing rust toolchain",
@@ -371,6 +435,37 @@ func TestLiveModelCompactsVersionInstallAndToolchainDetails(t *testing.T) {
 			t.Fatalf("view contains duplicate or noisy detail %q\nview:\n%s", blocked, output)
 		}
 	}
+}
+
+func modelFromSessionLog(t *testing.T, path string) liveModel {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", path, err)
+	}
+	model := newLiveModel()
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		var document eventDocument
+		if err := json.Unmarshal([]byte(line), &document); err != nil {
+			t.Fatalf("Unmarshal event document: %v\nline:\n%s", err, line)
+		}
+		model.apply(document.Event)
+	}
+	return model
+}
+
+func assertTargetRow(t *testing.T, model liveModel, want tableRow) {
+	t.Helper()
+	for _, row := range model.tableRows() {
+		if row.Target != want.Target {
+			continue
+		}
+		if row.State != want.State || row.Step != want.Step || row.Detail != want.Detail {
+			t.Fatalf("row for %s = %#v, want %#v", want.Target, row, want)
+		}
+		return
+	}
+	t.Fatalf("missing row for target %s\nview:\n%s", want.Target, model.View())
 }
 
 func applyStartedTarget(model *liveModel, target string) {

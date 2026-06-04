@@ -401,10 +401,10 @@ func displayDetail(target *targetState) string {
 		return ""
 	}
 	if isNoUpdateStep(target.Step) {
-		return currentVersionDetail(target, detail)
+		return installedVersionDetail(target, detail)
 	}
 	if isCurrentVersionStep(target.Step) {
-		return currentVersionDetail(target, detail)
+		return installedVersionDetail(target, detail)
 	}
 	if target.Step == "upgrade_complete" {
 		return upgradedVersionDetail(detail)
@@ -430,7 +430,7 @@ func displayDetail(target *targetState) string {
 
 func canonicalDisplayStep(step string) (string, bool) {
 	if strings.HasPrefix(step, "current version") {
-		return "checking current version", true
+		return "checking installed version", true
 	}
 	if strings.HasPrefix(step, "install complete") {
 		return "install complete", true
@@ -486,7 +486,7 @@ func isCurrentVersionStep(step string) bool {
 	return strings.HasPrefix(step, "current_version")
 }
 
-func currentVersionDetail(target *targetState, detail string) string {
+func installedVersionDetail(target *targetState, detail string) string {
 	version := target.CurrentVersion
 	if version == "" {
 		version = versionFromDetail(target.ID, detail)
@@ -494,7 +494,7 @@ func currentVersionDetail(target *targetState, detail string) string {
 	if version == "" {
 		return ""
 	}
-	return "current version: " + version
+	return "installed version: " + version
 }
 
 func versionFromDetail(targetID string, detail string) string {
