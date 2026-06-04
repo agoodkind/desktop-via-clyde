@@ -168,6 +168,7 @@ func NewSession(ctx context.Context, opts SessionOptions) (*Session, error) {
 	dryRun := opts.DryRun
 	parallel := opts.Parallel
 	event := NewEvent(EventRunStarted, opts.Operation)
+	event.Target = scope
 	event.Time = started.Format(time.RFC3339)
 	event.RunLog = runLogPath
 	event.DryRun = &dryRun

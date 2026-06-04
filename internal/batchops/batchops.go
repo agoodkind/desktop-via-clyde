@@ -97,7 +97,7 @@ func RunWithOperationRunner(ctx context.Context, req Request, runner RunnerFunc)
 		Out:       req.Out,
 		Format:    req.Format,
 		Operation: string(req.Operation),
-		Scope:     "all",
+		Scope:     scopeForSelections(selections),
 		Parallel:  parallelism,
 		DryRun:    req.DryRun,
 	})
@@ -232,6 +232,13 @@ func runSelection(
 	emitTargetFailure(session, req.Operation, selection.ID, result.Err)
 	emitTargetDone(session, req.Operation, selection.ID, result.Err, result.Duration)
 	return result
+}
+
+func scopeForSelections(selections []selectedOperation) string {
+	if len(selections) == 1 {
+		return selections[0].ID
+	}
+	return "all"
 }
 
 func emitTargetFailure(session *clioutput.Session, operation OperationName, targetID string, err error) {

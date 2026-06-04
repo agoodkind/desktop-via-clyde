@@ -88,6 +88,14 @@ func Operation(ctx context.Context, req operations.Request) error {
 	if req.App == nil {
 		return fmt.Errorf("%s requires an app target", req.Capability)
 	}
+	if shouldUpgradeMissingBundle(*req.App, req.Flags.Bool("dry-run")) {
+		if err := runUpgradeForMissingBundle(ctx, req); err != nil {
+			patchLog.ErrorContext(ctx, "patch.missing_bundle_upgrade_failed", "err", err)
+			return fmt.Errorf("patch operation: %w",
+				operations.Error(ctx, "operations.patch_missing_bundle_upgrade_failed", "install missing app before patch", err))
+		}
+		return nil
+	}
 	if err := Patch(ctx, *req.App, Options{
 		DryRun:          req.Flags.Bool("dry-run"),
 		MigrateKeychain: req.Flags.Bool("migrate-keychain"),
@@ -100,6 +108,42 @@ func Operation(ctx context.Context, req operations.Request) error {
 			operations.Error(ctx, "operations.patch_failed", "patch app", err))
 	}
 	return nil
+}
+
+func shouldUpgradeMissingBundle(target targets.Target, dryRun bool) bool {
+	if dryRun {
+		return false
+	}
+	if _, err := os.Stat(target.AppPath); err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	return false
+}
+
+func runUpgradeForMissingBundle(ctx context.Context, req operations.Request) error {
+	handler, ok := operations.Lookup("app.upgrade")
+	if !ok {
+		return fmt.Errorf("app.upgrade operation is not registered")
+	}
+	flags := operations.NewFlagValues()
+	flags.SetBool("dry-run", req.Flags.Bool("dry-run"))
+	flags.SetBool("migrate-keychain", req.Flags.Bool("migrate-keychain"))
+	flags.SetString("channel", "")
+	if req.Out != nil {
+		if _, err := fmt.Fprintf(req.Out, "[run] target=%s app missing at %s; running upgrade before patch\n", req.App.ID, req.App.AppPath); err != nil {
+			patchLog.ErrorContext(ctx, "patch.write_missing_bundle_upgrade_notice_failed", "target", req.App.ID, "app_path", req.App.AppPath, "err", err)
+			return fmt.Errorf("write missing bundle upgrade notice: %w", err)
+		}
+	}
+	return handler(ctx, operations.Request{
+		Out:        req.Out,
+		LogOut:     req.LogOut,
+		App:        req.App,
+		CLI:        nil,
+		Capability: "app.upgrade",
+		Flags:      flags,
+		Format:     req.Format,
+	})
 }
 
 // KeychainMigrateOperation runs the keychain repair operation for one target.

@@ -213,6 +213,56 @@ func TestRunTreatsHTTPPathNoUpdateAsSkippedSuccess(t *testing.T) {
 	}
 }
 
+func TestRunMissingBundleDryRunInstallsFromUpdater(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<?xml version='1.0' encoding='utf-8'?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+  <channel>
+    <item>
+      <title>26.519.41501</title>
+      <sparkle:version>3044</sparkle:version>
+      <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+      <enclosure url="` + "https://example.invalid/Codex.zip" + `" length="1" type="application/octet-stream" />
+    </item>
+  </channel>
+</rss>`))
+	}))
+	t.Cleanup(server.Close)
+	tg := targets.Target{
+		ID:       "codex",
+		AppPath:  filepath.Join(t.TempDir(), "Codex.app"),
+		BundleID: "com.openai.codex.beta",
+		ExecName: "Codex",
+		Entitlements: &targets.EntitlementsPolicy{
+			Strip:                       nil,
+			RequiredBooleanEntitlements: nil,
+		},
+		Updater: targets.Updater{
+			Kind:      targets.UpdaterSparkleAppcast,
+			URL:       server.URL + "/appcast.xml",
+			UserAgent: "desktop-via-clyde-test",
+		},
+	}
+	var out strings.Builder
+	if err := Run(context.Background(), tg, Options{DryRun: true, Out: &out}); err != nil {
+		t.Fatalf("Run missing bundle dry-run: %v\noutput:\n%s", err, out.String())
+	}
+	output := out.String()
+	for _, want := range []string{
+		"target=codex current version=0.0.0 updater=sparkle_appcast",
+		"target=codex app missing",
+		"target=codex manifest: name=3044",
+		"target=codex capture upstream DR from downloaded executable",
+		"target=codex patch complete",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
 func TestLoadOriginalDRUsesStateEntry(t *testing.T) {
 	installFixture(t)
 	t.Setenv("HOME", t.TempDir())
@@ -455,6 +505,35 @@ func TestExtractZipFindsTargetAppRootInTempDir(t *testing.T) {
 	}
 	if _, err := os.Stat(got); err != nil {
 		t.Fatalf("extracted app missing: %v", err)
+	}
+}
+
+func TestExtractZipAcceptsSingleDifferentlyNamedAppRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourceDir := filepath.Join(tmpDir, "source")
+	appDir := filepath.Join(sourceDir, "Codex (Beta).app", "Contents", "MacOS")
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	zipPath := filepath.Join(tmpDir, "CodexBeta.zip")
+	cmd := exec.Command("/usr/bin/ditto", "-c", "-k", "--keepParent", "Codex (Beta).app", zipPath)
+	cmd.Dir = sourceDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ditto create beta fixture zip: %v output=%q", err, string(out))
+	}
+	staging := filepath.Join(tmpDir, "staging")
+	tg := targets.Target{
+		ID:       "codex",
+		AppPath:  "/Applications/Codex.app",
+		ExecName: "Codex (Beta)",
+	}
+	got, err := extractZip(context.Background(), patch.NewRunner(context.Background(), false, io.Discard), zipPath, staging, tg, false)
+	if err != nil {
+		t.Fatalf("extractZip: %v", err)
+	}
+	want := filepath.Join(staging, "extracted", "Codex (Beta).app")
+	if got != want {
+		t.Fatalf("extractZip path = %q, want %q", got, want)
 	}
 }
 

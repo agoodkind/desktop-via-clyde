@@ -103,7 +103,6 @@ type Target struct {
 	BundleID                 string
 	BundleIDAliases          []string
 	HelperBundleIDs          []string
-	HardResetServices        []string
 	ExecName                 string
 	KeychainServices         []string
 	NestedSignPaths          []string
@@ -173,7 +172,6 @@ func buildTarget(app spec.AppSpec) Target {
 		BundleID:                 app.BundleID,
 		BundleIDAliases:          cloneStrings(app.BundleIDAliases),
 		HelperBundleIDs:          cloneStrings(app.HelperBundleIDs),
-		HardResetServices:        cloneStrings(app.HardResetServices),
 		ExecName:                 app.ExecName,
 		KeychainServices:         cloneStrings(app.KeychainServices),
 		NestedSignPaths:          cloneStrings(app.NestedSignPaths),

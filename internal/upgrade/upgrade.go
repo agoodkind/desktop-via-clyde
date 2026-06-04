@@ -207,6 +207,13 @@ type squirrelJSONUpdate struct {
 
 var readDesignatedRequirement = patch.DesignatedRequirement
 
+const missingBundleCurrentVersion = "0.0.0"
+
+type bundleVersionState struct {
+	CurrentVersion string
+	Missing        bool
+}
+
 // Run fetches, verifies, swaps, and re-patches the target.
 func Run(ctx context.Context, t targets.Target, opts Options) error {
 	if opts.Out == nil {
@@ -222,20 +229,13 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 		return logUpgradeError(ctx, "upgrade.resolve_channel_failed", fmt.Errorf("resolve update channel: %w", err))
 	}
 
-	if _, err := os.Stat(t.AppPath); err != nil {
-		return logUpgradeError(ctx, "upgrade.bundle_stat_failed", fmt.Errorf("bundle not found at %s: %w", t.AppPath, err))
-	}
-	currentVersion, err := readBundleVersion(ctx, t)
+	bundleState, err := resolveBundleVersion(ctx, t)
 	if err != nil {
 		return err
 	}
-	if channel == "" {
-		notef(r, fmt.Sprintf("target=%s current version=%s updater=%s", t.ID, currentVersion, t.Updater.Kind))
-	} else {
-		notef(r, fmt.Sprintf("target=%s current version=%s channel=%s updater=%s", t.ID, currentVersion, channel, t.Updater.Kind))
-	}
+	noteBundleVersion(r, t, channel, bundleState)
 
-	m, err := fetchManifest(ctx, t, currentVersion, channel)
+	m, err := fetchManifest(ctx, t, bundleState.CurrentVersion, channel)
 	if err != nil {
 		if errors.Is(err, errNoUpdate) {
 			notef(r, noUpdateMessage(t.ID, channel))
@@ -247,16 +247,19 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	if m.URL == "" || m.Name == "" {
 		return logUpgradeError(ctx, "upgrade.manifest_missing_fields", fmt.Errorf("manifest is missing url or name field: %+v", m))
 	}
-	if m.Name == currentVersion {
-		if err := handleCurrentVersion(ctx, r, t, currentVersion, opts); err != nil {
+	if !bundleState.Missing && m.Name == bundleState.CurrentVersion {
+		if err := handleCurrentVersion(ctx, r, t, bundleState.CurrentVersion, opts); err != nil {
 			return err
 		}
 		return nil
 	}
 
-	originalDR, err := loadOriginalDR(ctx, t)
-	if err != nil {
-		return err
+	originalDR := ""
+	if !bundleState.Missing {
+		originalDR, err = loadOriginalDR(ctx, t)
+		if err != nil {
+			return err
+		}
 	}
 
 	staging, err := makeStagingDir(ctx, t, m.Name)
@@ -281,6 +284,12 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	if err != nil {
 		return err
 	}
+	if bundleState.Missing {
+		originalDR, err = captureOriginalDRFromExtractedApp(ctx, r, t, extractedApp, opts.DryRun)
+		if err != nil {
+			return err
+		}
+	}
 	if err := verifyOriginalDR(ctx, r, extractedApp, originalDR, opts.DryRun); err != nil {
 		return err
 	}
@@ -291,7 +300,15 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	if err := swapBundle(ctx, r, t, extractedApp, opts.DryRun); err != nil {
 		return err
 	}
+	if err := patchBundleAfterUpgrade(ctx, r, t, opts); err != nil {
+		return err
+	}
 
+	notef(r, fmt.Sprintf("target=%s upgrade to %s complete", t.ID, m.Name))
+	return nil
+}
+
+func patchBundleAfterUpgrade(ctx context.Context, r *patch.Runner, t targets.Target, opts Options) error {
 	patchOpts := patch.Options{
 		DryRun:          opts.DryRun,
 		MigrateKeychain: opts.MigrateKeychain,
@@ -302,9 +319,32 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	if err := patch.Patch(ctx, t, patchOpts); err != nil {
 		return logUpgradeError(ctx, "upgrade.repatch_failed", fmt.Errorf("re-patch after swap: %w", err))
 	}
-
-	notef(r, fmt.Sprintf("target=%s upgrade to %s complete", t.ID, m.Name))
 	return nil
+}
+
+func resolveBundleVersion(ctx context.Context, t targets.Target) (bundleVersionState, error) {
+	if _, err := os.Stat(t.AppPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return bundleVersionState{CurrentVersion: missingBundleCurrentVersion, Missing: true}, nil
+		}
+		return bundleVersionState{}, logUpgradeError(ctx, "upgrade.bundle_stat_failed", fmt.Errorf("stat bundle at %s: %w", t.AppPath, err))
+	}
+	currentVersion, err := readBundleVersion(ctx, t)
+	if err != nil {
+		return bundleVersionState{}, err
+	}
+	return bundleVersionState{CurrentVersion: currentVersion, Missing: false}, nil
+}
+
+func noteBundleVersion(r *patch.Runner, t targets.Target, channel string, state bundleVersionState) {
+	if channel == "" {
+		notef(r, fmt.Sprintf("target=%s current version=%s updater=%s", t.ID, state.CurrentVersion, t.Updater.Kind))
+	} else {
+		notef(r, fmt.Sprintf("target=%s current version=%s channel=%s updater=%s", t.ID, state.CurrentVersion, channel, t.Updater.Kind))
+	}
+	if state.Missing {
+		notef(r, fmt.Sprintf("target=%s app missing at %s; installing latest bundle", t.ID, t.AppPath))
+	}
 }
 
 func notef(r *patch.Runner, message string) {
@@ -767,10 +807,32 @@ func extractZip(ctx context.Context, r *patch.Runner, zipPath, staging string, t
 	if dryRun {
 		return expected, nil
 	}
-	if _, err := os.Stat(expected); err != nil {
-		return "", logUpgradeError(ctx, "upgrade.extracted_app_stat_failed", fmt.Errorf("expected %s inside zip, not found: %w", filepath.Base(t.AppPath), err))
+	if _, err := os.Stat(expected); err == nil {
+		return expected, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", logUpgradeError(ctx, "upgrade.extracted_app_stat_failed", fmt.Errorf("stat expected app %s: %w", expected, err))
 	}
-	return expected, nil
+	fallbackApp, err := singleExtractedAppRoot(extractDir)
+	if err != nil {
+		return "", logUpgradeError(ctx, "upgrade.extracted_app_stat_failed", fmt.Errorf("expected %s inside zip: %w", filepath.Base(t.AppPath), err))
+	}
+	notef(r, fmt.Sprintf("target=%s extracted app root %s differs from configured app name %s", t.ID, filepath.Base(fallbackApp), filepath.Base(t.AppPath)))
+	return fallbackApp, nil
+}
+
+func singleExtractedAppRoot(extractDir string) (string, error) {
+	matches, err := filepath.Glob(filepath.Join(extractDir, "*.app"))
+	if err != nil {
+		upgradeLog.Error("upgrade.extracted_app_glob_failed", "extract_dir", extractDir, "err", err)
+		return "", fmt.Errorf("glob extracted apps under %s: %w", extractDir, err)
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no .app bundle found under %s", extractDir)
+	}
+	return "", fmt.Errorf("multiple .app bundles found under %s: %s", extractDir, strings.Join(matches, ","))
 }
 
 // verifyOriginalDR runs codesign --verify --deep --strict against the
@@ -784,6 +846,25 @@ func verifyOriginalDR(ctx context.Context, r *patch.Runner, appPath, dr string, 
 		return logUpgradeError(ctx, "upgrade.original_dr_verify_failed", fmt.Errorf("verify original DR for %s: %w", appPath, err))
 	}
 	return nil
+}
+
+func captureOriginalDRFromExtractedApp(
+	ctx context.Context,
+	r *patch.Runner,
+	t targets.Target,
+	extractedApp string,
+	dryRun bool,
+) (string, error) {
+	executablePath := filepath.Join(extractedApp, "Contents", "MacOS", t.ExecName)
+	notef(r, fmt.Sprintf("target=%s capture upstream DR from downloaded executable %s", t.ID, executablePath))
+	if dryRun {
+		return "", nil
+	}
+	dr, err := readDesignatedRequirement(ctx, executablePath)
+	if err != nil {
+		return "", logUpgradeError(ctx, "upgrade.missing_bundle_original_dr_capture_failed", fmt.Errorf("capture designated requirement from downloaded app: %w", err))
+	}
+	return verifyOriginalRequirementIsUpstream(t, dr)
 }
 
 // swapBundle removes the existing /Applications/<App>.app and installs the

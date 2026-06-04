@@ -277,18 +277,6 @@ func TestBundleIdentityMetadataPerTarget(t *testing.T) {
 			t.Fatalf("codex helper bundle IDs missing %q: %v", want, codex.HelperBundleIDs)
 		}
 	}
-	for _, targetID := range []string{"cursor", "codex", "claude"} {
-		target, err := lookupTarget(targetID)
-		if err != nil {
-			t.Fatalf("Lookup(%s): %v", targetID, err)
-		}
-		if !slices.Contains(target.HardResetServices, "ScreenCapture") {
-			t.Fatalf("%s hard reset services missing ScreenCapture: %v", targetID, target.HardResetServices)
-		}
-		if !slices.Contains(target.HardResetServices, "SystemPolicyAllFiles") {
-			t.Fatalf("%s hard reset services missing SystemPolicyAllFiles: %v", targetID, target.HardResetServices)
-		}
-	}
 }
 
 func TestCodexComputerUseTeamRequirementPlists(t *testing.T) {

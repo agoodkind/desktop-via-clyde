@@ -2,7 +2,10 @@ package computeruseext
 
 import (
 	"bytes"
+	"path/filepath"
 	"testing"
+
+	"goodkind.io/desktop-via-clyde/internal/targets"
 )
 
 func TestTeamIDFromSignIdentity(t *testing.T) {
@@ -110,5 +113,27 @@ func TestReplaceStandaloneTeamIDRejectsInvalidTeam(t *testing.T) {
 	_, _, _, err := replaceStandaloneTeamID([]byte("2DC432GLL2"), "2DC432GLL2", "TOO-SHORT")
 	if err == nil {
 		t.Fatal("expected invalid team error")
+	}
+}
+
+func TestBundledAuthPluginSourcePathUsesDeclaredSignTarget(t *testing.T) {
+	policy := targets.ComputerUsePolicy{
+		BundledAppPath: "Contents/Resources/plugins/openai-bundled/plugins/computer-use/Codex Computer Use.app",
+		AuthPluginPath: "/Library/Security/SecurityAgentPlugins/CodexComputerUseAuthorizationPlugin.bundle",
+		SignTargets: []targets.ComputerUseSignTarget{
+			{Path: "Contents/SharedSupport/Codex Computer Use Installer.app/Contents/Resources/CodexComputerUseAuthorizationPlugin.bundle"},
+		},
+	}
+	got, ok := bundledAuthPluginSourcePath("/Applications/Codex.app", policy)
+	if !ok {
+		t.Fatal("bundledAuthPluginSourcePath ok = false, want true")
+	}
+	want := filepath.Join(
+		"/Applications/Codex.app",
+		"Contents/Resources/plugins/openai-bundled/plugins/computer-use/Codex Computer Use.app",
+		"Contents/SharedSupport/Codex Computer Use Installer.app/Contents/Resources/CodexComputerUseAuthorizationPlugin.bundle",
+	)
+	if got != want {
+		t.Fatalf("bundledAuthPluginSourcePath = %q, want %q", got, want)
 	}
 }

@@ -13,16 +13,6 @@ helper_bundle_ids = [
     "com.todesktop.230313mzl4w4u92.helper",
     "org.mantle.Mantle",
 ]
-hard_reset_services = [
-    "Accessibility",
-    "AppleEvents",
-    "Camera",
-    "ListenEvent",
-    "Microphone",
-    "PostEvent",
-    "ScreenCapture",
-    "SystemPolicyAllFiles",
-]
 exec_name = "Cursor"
 keychain_services = ["Cursor Safe Storage"]
 
@@ -214,16 +204,6 @@ helper_bundle_ids = [
     "org.sparkle-project.InstallerLauncher",
     "org.sparkle-project.Sparkle",
     "org.sparkle-project.Sparkle.Updater",
-]
-hard_reset_services = [
-    "Accessibility",
-    "AppleEvents",
-    "Camera",
-    "ListenEvent",
-    "Microphone",
-    "PostEvent",
-    "ScreenCapture",
-    "SystemPolicyAllFiles",
 ]
 exec_name = "Codex (Beta)"
 keychain_services = ["Codex Safe Storage", "Codex Auth", "Codex MCP Credentials"]
@@ -487,16 +467,6 @@ helper_bundle_ids = [
     "com.github.Electron.framework",
     "com.github.Squirrel",
     "org.mantle.Mantle",
-]
-hard_reset_services = [
-    "Accessibility",
-    "AppleEvents",
-    "Camera",
-    "ListenEvent",
-    "Microphone",
-    "PostEvent",
-    "ScreenCapture",
-    "SystemPolicyAllFiles",
 ]
 exec_name = "Claude"
 keychain_services = ["Claude Safe Storage"]

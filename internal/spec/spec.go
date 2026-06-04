@@ -103,7 +103,6 @@ type AppSpec struct {
 	BundleID                 string                   `toml:"bundle_id"`
 	BundleIDAliases          []string                 `toml:"bundle_id_aliases"`
 	HelperBundleIDs          []string                 `toml:"helper_bundle_ids"`
-	HardResetServices        []string                 `toml:"hard_reset_services"`
 	ExecName                 string                   `toml:"exec_name"`
 	KeychainServices         []string                 `toml:"keychain_services"`
 	NestedSignPaths          []string                 `toml:"nested_sign_paths"`
@@ -206,7 +205,6 @@ func cloneApp(app AppSpec) AppSpec {
 	cloned.KeychainServices = cloneStrings(app.KeychainServices)
 	cloned.BundleIDAliases = cloneStrings(app.BundleIDAliases)
 	cloned.HelperBundleIDs = cloneStrings(app.HelperBundleIDs)
-	cloned.HardResetServices = cloneStrings(app.HardResetServices)
 	cloned.NestedSignPaths = cloneStrings(app.NestedSignPaths)
 	cloned.PreservedNestedCodePaths = cloneStrings(app.PreservedNestedCodePaths)
 	cloned.Entitlements = cloneEntitlements(app.Entitlements)

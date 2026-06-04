@@ -202,7 +202,7 @@ func TestRunWithOperationRunnerPrefixesOutputAndPrintsSummary(t *testing.T) {
 	}
 	output := out.String()
 	for _, want := range []string{
-		"Patch all",
+		"Patch cursor",
 		"cursor hello ok",
 		"cursor world ok",
 		"Result completed=1 failed=0",

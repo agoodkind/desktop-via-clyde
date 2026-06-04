@@ -280,8 +280,7 @@ func patchComputerUseAuthPlugin(
 	info, err := os.Stat(pluginPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			patch.Note(r, fmt.Sprintf("target=%s authorization plugin not found at %s, skipping", t.ID, pluginPath))
-			return nil
+			return installMissingComputerUseAuthPlugin(ctx, r, t, pluginPath, policy, localTeamID)
 		}
 		return logComputerUsePatchError(ctx, "patch.computer_use_auth_plugin_stat_failed", fmt.Errorf("stat authorization plugin %s: %w", pluginPath, err))
 	}
@@ -293,10 +292,56 @@ func patchComputerUseAuthPlugin(
 	if err != nil {
 		return err
 	}
-	if err := stageInstallComputerUseAuthPlugin(ctx, r, pluginPath, executablePath, policy, repair); err != nil {
+	if err := stageInstallComputerUseAuthPlugin(ctx, r, pluginPath, pluginPath, executablePath, policy, repair); err != nil {
 		return err
 	}
 	return verifyComputerUseAuthPlugin(ctx, r, pluginPath, policy, localTeamID)
+}
+
+func installMissingComputerUseAuthPlugin(
+	ctx context.Context,
+	r *patch.Runner,
+	t targets.Target,
+	pluginPath string,
+	policy targets.ComputerUsePolicy,
+	localTeamID string,
+) error {
+	sourcePath, ok := bundledAuthPluginSourcePath(t.AppPath, policy)
+	if !ok {
+		patch.Note(r, fmt.Sprintf("target=%s authorization plugin not found at %s and no bundled source is declared, skipping", t.ID, pluginPath))
+		return nil
+	}
+	sourceExecutablePath := filepath.Join(sourcePath, filepath.FromSlash(policy.AuthPluginExecutable))
+	if _, err := os.Stat(sourcePath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			patch.Note(r, fmt.Sprintf("target=%s authorization plugin source not found at %s, skipping", t.ID, sourcePath))
+			return nil
+		}
+		return logComputerUsePatchError(ctx, "patch.computer_use_auth_plugin_source_stat_failed", fmt.Errorf("stat authorization plugin source %s: %w", sourcePath, err))
+	}
+	patch.Note(r, fmt.Sprintf("target=%s install missing Computer Use authorization plugin from %s", t.ID, sourcePath))
+	repair, err := readComputerUseAuthPluginRepair(ctx, sourceExecutablePath, policy, localTeamID)
+	if err != nil {
+		return err
+	}
+	if err := stageInstallComputerUseAuthPlugin(ctx, r, sourcePath, pluginPath, sourceExecutablePath, policy, repair); err != nil {
+		return err
+	}
+	return verifyComputerUseAuthPlugin(ctx, r, pluginPath, policy, localTeamID)
+}
+
+func bundledAuthPluginSourcePath(hostAppPath string, policy targets.ComputerUsePolicy) (string, bool) {
+	pluginName := filepath.Base(policy.AuthPluginPath)
+	if pluginName == "" || pluginName == "." {
+		return "", false
+	}
+	helperPath := bundledComputerUseAppPath(hostAppPath, policy)
+	for _, signTarget := range policy.SignTargets {
+		if filepath.Base(filepath.FromSlash(signTarget.Path)) == pluginName {
+			return filepath.Join(helperPath, filepath.FromSlash(signTarget.Path)), true
+		}
+	}
+	return "", false
 }
 
 func readComputerUseAuthPluginRepair(
@@ -335,13 +380,15 @@ func readComputerUseAuthPluginRepair(
 func stageInstallComputerUseAuthPlugin(
 	ctx context.Context,
 	r *patch.Runner,
-	pluginPath string,
+	sourcePluginPath string,
+	destinationPluginPath string,
 	executablePath string,
 	policy targets.ComputerUsePolicy,
 	repair computerUseAuthPluginRepair,
 ) error {
 	r.Log.InfoContext(ctx, "patch.computer_use_auth_plugin.stage_install",
-		"plugin_path", pluginPath,
+		"source_plugin_path", sourcePluginPath,
+		"destination_plugin_path", destinationPluginPath,
 		"executable_path", executablePath,
 		"replacements", repair.Replacements)
 	tempDir, err := os.MkdirTemp("", "desktop-via-clyde-auth-plugin-*")
@@ -350,8 +397,8 @@ func stageInstallComputerUseAuthPlugin(
 	}
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
-	stagingPath := filepath.Join(tempDir, filepath.Base(pluginPath))
-	if err := r.Run(ctx, "/usr/bin/rsync", "-a", pluginPath+"/", stagingPath+"/"); err != nil {
+	stagingPath := filepath.Join(tempDir, filepath.Base(destinationPluginPath))
+	if err := r.Run(ctx, "/usr/bin/rsync", "-a", sourcePluginPath+"/", stagingPath+"/"); err != nil {
 		return logComputerUsePatchError(ctx, "patch.computer_use_auth_plugin_stage_failed", fmt.Errorf("stage authorization plugin: %w", err))
 	}
 	stagedExecutablePath := filepath.Join(stagingPath, filepath.FromSlash(policy.AuthPluginExecutable))
@@ -372,7 +419,7 @@ func stageInstallComputerUseAuthPlugin(
 	if err := signAndVerifyComputerUseAuthPlugin(ctx, r, stagingPath, id); err != nil {
 		return err
 	}
-	return installComputerUseAuthPlugin(ctx, r, stagingPath, pluginPath)
+	return installComputerUseAuthPlugin(ctx, r, stagingPath, destinationPluginPath)
 }
 
 func signAndVerifyComputerUseAuthPlugin(ctx context.Context, r *patch.Runner, stagingPath string, id string) error {
