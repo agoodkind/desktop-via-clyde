@@ -21,6 +21,7 @@ func maybeReuseInstalledRelease(
 	packageBinaryPath string,
 	packageVariant string,
 	commandName string,
+	version string,
 	head string,
 	target string,
 	buildMode BuildMode,
@@ -44,7 +45,7 @@ func maybeReuseInstalledRelease(
 	}
 	releasePath := matches[0]
 	notef(r, "codex-cli: found matching installed release "+releasePath)
-	reuseRejected, reuseReason := releaseReuseRejected(ctx, releasePath, target, packageBinaryPath, packageVariant)
+	reuseRejected, reuseReason := releaseReuseRejected(ctx, releasePath, target, packageBinaryPath, packageVariant, version)
 	if reuseRejected {
 		notef(r, "codex-cli: installed release reuse rejected: "+reuseReason)
 		return "", false, nil
@@ -65,8 +66,9 @@ func releaseReuseRejected(
 	target string,
 	packageBinaryPath string,
 	packageVariant string,
+	version string,
 ) (bool, string) {
-	verifyErr := verifyReleaseCandidate(ctx, releasePath, target, packageBinaryPath, packageVariant)
+	verifyErr := verifyReleaseCandidate(ctx, releasePath, target, packageBinaryPath, packageVariant, version)
 	if verifyErr == nil {
 		return false, ""
 	}
@@ -102,12 +104,17 @@ func verifyReleaseCandidate(
 	target string,
 	packageBinaryPath string,
 	packageVariant string,
+	version string,
 ) error {
 	log := codexcliLog.With("function", "verifyReleaseCandidate")
 	metadata, err := readPackageMetadata(releasePath, packageVariant)
 	if err != nil {
 		log.ErrorContext(ctx, "codexcli.verify_release_candidate.metadata_failed", "err", err)
 		return err
+	}
+	if metadata.Version != version {
+		log.ErrorContext(ctx, "codexcli.verify_release_candidate.version_mismatch", "err", fmt.Errorf("release version mismatch"))
+		return fmt.Errorf("release version mismatch: got %s want %s", metadata.Version, version)
 	}
 	if metadata.Target != target {
 		log.ErrorContext(ctx, "codexcli.verify_release_candidate.target_mismatch", "err", fmt.Errorf("release target mismatch"))

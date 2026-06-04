@@ -5,10 +5,12 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/patch"
@@ -35,14 +37,25 @@ func TestInstallDryRunUsesShallowGhCloneAndOriginMain(t *testing.T) {
 		t.Fatalf("Install dry-run: %v", err)
 	}
 	sourceDir := filepath.Join(cacheHome, "clyde", "desktop-via-clyde", "codex", "source")
-	codexRoot := filepath.Join(sourceDir, "codex-rs")
+	identity := newBuildIdentity(
+		"0.0.0",
+		"dryrun",
+		"dryrun",
+		"aarch64-apple-darwin",
+		BuildModeRelease,
+		"codex",
+		"codex",
+		dryRunBuildTime(),
+	)
+	buildDir := filepath.Join(filepath.Dir(sourceDir), "build", "source-dryrun-"+identity.BuildStamp+"-"+identity.BuildHash)
+	codexRoot := filepath.Join(buildDir, "codex-rs")
 	requireTraceCommand(t, trace, "gh", []string{"repo", "clone", "openai/codex", sourceDir, "--", "--depth", "1"})
 	requireTraceCommand(t, trace, "git", []string{"-C", sourceDir, "fetch", "--depth", "1", "--prune", "origin", "main"})
 	requireTraceCommand(t, trace, "git", []string{"-C", sourceDir, "checkout", "--detach", "FETCH_HEAD"})
 	requireTraceCommand(t, trace, "rustup", []string{"toolchain", "install"})
 	requireTraceCommand(t, trace, "cargo", []string{"build", "--target", "aarch64-apple-darwin", "--release", "--timings", "--bin", "codex", "-v"})
 	requireTraceCommand(t, trace, "python3", []string{
-		filepath.Join(sourceDir, "scripts", "build_codex_package.py"),
+		filepath.Join(buildDir, "scripts", "build_codex_package.py"),
 		"--target",
 		"aarch64-apple-darwin",
 		"--variant",
@@ -135,6 +148,237 @@ func TestFetchRefStripsOriginPrefix(t *testing.T) {
 	}
 }
 
+func TestReadCodexPythonRequirement(t *testing.T) {
+	sourceDir := t.TempDir()
+	writeFixtureFile(
+		t,
+		filepath.Join(sourceDir, "scripts", "pyproject.toml"),
+		"[project]\nrequires-python = \">=3.10\"\n",
+	)
+	got, err := readCodexPythonRequirement(sourceDir)
+	if err != nil {
+		t.Fatalf("readCodexPythonRequirement: %v", err)
+	}
+	if got != (pythonVersion{Major: 3, Minor: 10}) {
+		t.Fatalf("python requirement = %+v", got)
+	}
+}
+
+func TestFindCodexEntitlementsPath(t *testing.T) {
+	sourceDir := t.TempDir()
+	want := filepath.Join(sourceDir, ".github", "scripts", "macos-signing", "codex.entitlements.plist")
+	writeFixtureFile(t, want, "<plist/>")
+	got, err := findCodexEntitlementsPath(sourceDir)
+	if err != nil {
+		t.Fatalf("findCodexEntitlementsPath: %v", err)
+	}
+	if got != want {
+		t.Fatalf("entitlements path = %q, want %q", got, want)
+	}
+}
+
+func TestResolveCompatiblePythonCommandPrefersCompatiblePython3(t *testing.T) {
+	versionLookup := func(_ context.Context, name string) (pythonVersion, error) {
+		switch name {
+		case "python3":
+			return pythonVersion{Major: 3, Minor: 11}, nil
+		case "python3.13":
+			return pythonVersion{Major: 3, Minor: 13}, nil
+		default:
+			return pythonVersion{}, exec.ErrNotFound
+		}
+	}
+	got, err := resolveCompatiblePythonCommandFromCandidates(
+		context.Background(),
+		pythonVersion{Major: 3, Minor: 10},
+		[]string{"python3", "python3.13"},
+		versionLookup,
+	)
+	if err != nil {
+		t.Fatalf("resolveCompatiblePythonCommandFromCandidates: %v", err)
+	}
+	if got != "python3" {
+		t.Fatalf("python command = %q, want python3", got)
+	}
+}
+
+func TestResolveCompatiblePythonCommandChoosesNewestCompatibleFallback(t *testing.T) {
+	versionLookup := func(_ context.Context, name string) (pythonVersion, error) {
+		switch name {
+		case "python3":
+			return pythonVersion{Major: 3, Minor: 9}, nil
+		case "python3.11":
+			return pythonVersion{Major: 3, Minor: 11}, nil
+		case "python3.13":
+			return pythonVersion{Major: 3, Minor: 13}, nil
+		default:
+			return pythonVersion{}, exec.ErrNotFound
+		}
+	}
+	candidates := []string{"python3", "python3.11", "python3.13"}
+	got, err := resolveCompatiblePythonCommandFromCandidates(
+		context.Background(),
+		pythonVersion{Major: 3, Minor: 10},
+		candidates,
+		versionLookup,
+	)
+	if err != nil {
+		t.Fatalf("resolveCompatiblePythonCommandFromCandidates: %v", err)
+	}
+	if got != "python3.13" {
+		t.Fatalf("python command = %q, want python3.13", got)
+	}
+}
+
+func TestResolveCompatiblePythonCommandErrorsWithoutCompatibleInterpreter(t *testing.T) {
+	versionLookup := func(_ context.Context, name string) (pythonVersion, error) {
+		if name == "python3" {
+			return pythonVersion{Major: 3, Minor: 9}, nil
+		}
+		return pythonVersion{}, exec.ErrNotFound
+	}
+	_, err := resolveCompatiblePythonCommandFromCandidates(
+		context.Background(),
+		pythonVersion{Major: 3, Minor: 10},
+		[]string{"python3"},
+		versionLookup,
+	)
+	if err == nil || !strings.Contains(err.Error(), "Python 3.10 or newer") {
+		t.Fatalf("resolveCompatiblePythonCommandFromCandidates err = %v", err)
+	}
+}
+
+func TestDiscoverPythonCommandCandidates(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "first")
+	second := filepath.Join(root, "second")
+	if err := os.MkdirAll(first, 0o755); err != nil {
+		t.Fatalf("MkdirAll first: %v", err)
+	}
+	if err := os.MkdirAll(second, 0o755); err != nil {
+		t.Fatalf("MkdirAll second: %v", err)
+	}
+	writeFixtureFile(t, filepath.Join(first, "python3"), "")
+	writeFixtureFile(t, filepath.Join(first, "python3.11"), "")
+	writeFixtureFile(t, filepath.Join(second, "python3.13"), "")
+	writeFixtureFile(t, filepath.Join(second, "python3-config"), "")
+	got := discoverPythonCommandCandidates(first + string(os.PathListSeparator) + second)
+	want := []string{"python3", "python3.11", "python3.13"}
+	if !equalStrings(got, want) {
+		t.Fatalf("python candidates = %v, want %v", got, want)
+	}
+}
+
+func TestSelectLatestStableRustVersion(t *testing.T) {
+	output := []byte(strings.Join([]string{
+		"1111111111111111111111111111111111111111\trefs/tags/rust-v0.136.0",
+		"2222222222222222222222222222222222222222\trefs/tags/rust-v0.137.0",
+		"3333333333333333333333333333333333333333\trefs/tags/rust-v0.138.0-beta.1",
+		"4444444444444444444444444444444444444444\trefs/tags/v0.999.0",
+	}, "\n"))
+	got, err := selectLatestStableRustVersion(output)
+	if err != nil {
+		t.Fatalf("selectLatestStableRustVersion: %v", err)
+	}
+	if got.String() != "0.137.0" {
+		t.Fatalf("latest stable rust version = %s, want 0.137.0", got.String())
+	}
+}
+
+func TestBuildIdentityUsesStampedSemverPackageVersion(t *testing.T) {
+	buildTime := time.Date(2026, 6, 3, 21, 53, 51, 0, time.UTC)
+	identity := newBuildIdentity(
+		"0.137.0",
+		"80b65e994573",
+		"treehash",
+		"aarch64-apple-darwin",
+		BuildModeLocalFast,
+		"codex",
+		"codex",
+		buildTime,
+	)
+	wantHash := computeBuildHash(
+		"0.137.0",
+		"80b65e994573",
+		"treehash",
+		"aarch64-apple-darwin",
+		string(BuildModeLocalFast),
+		"codex",
+		"codex",
+		"20260603-215351",
+	)
+	wantVersion := "0.137.0-main.20260603-215351+head.80b65e994573.build." + wantHash
+	if identity.BuildStamp != "20260603-215351" {
+		t.Fatalf("BuildStamp = %q", identity.BuildStamp)
+	}
+	if identity.PackageVersion != wantVersion {
+		t.Fatalf("PackageVersion = %q, want %q", identity.PackageVersion, wantVersion)
+	}
+	if err := validateStampedPackageVersion(identity.PackageVersion); err != nil {
+		t.Fatalf("validateStampedPackageVersion: %v", err)
+	}
+	if len(identity.BuildHash) != buildHashLength {
+		t.Fatalf("BuildHash len = %d, want %d", len(identity.BuildHash), buildHashLength)
+	}
+}
+
+func TestBuildHashChangesWithStampAndBuildInputs(t *testing.T) {
+	baseValues := []string{
+		"0.137.0",
+		"80b65e994573",
+		"treehash",
+		"aarch64-apple-darwin",
+		string(BuildModeLocalFast),
+		"codex",
+		"codex",
+		"20260603-215351",
+	}
+	baseHash := computeBuildHash(baseValues...)
+	for index := range baseValues {
+		mutatedValues := append([]string{}, baseValues...)
+		mutatedValues[index] = mutatedValues[index] + "x"
+		if got := computeBuildHash(mutatedValues...); got == baseHash {
+			t.Fatalf("hash did not change when input %d changed", index)
+		}
+	}
+}
+
+func TestStampCodexBuildSourceWritesOnlyCargoToml(t *testing.T) {
+	buildDir := t.TempDir()
+	buildTime := time.Date(2026, 6, 3, 21, 53, 51, 0, time.UTC)
+	identity := newBuildIdentity(
+		"0.137.0",
+		"80b65e994573",
+		"treehash",
+		"aarch64-apple-darwin",
+		BuildModeLocalFast,
+		"codex",
+		"codex",
+		buildTime,
+	)
+	cargoPath := filepath.Join(buildDir, "codex-rs", "Cargo.toml")
+	versionPath := filepath.Join(buildDir, "codex-rs", "tui", "src", "version.rs")
+	mainPath := filepath.Join(buildDir, "codex-rs", "cli", "src", "main.rs")
+	writeFixtureFile(t, cargoPath, "[workspace]\nmembers = []\n\n[workspace.package]\nedition = \"2024\"\nversion = \"0.0.0\"\n")
+	writeFixtureFile(t, versionPath, "pub const CODEX_CLI_VERSION: &str = env!(\"CARGO_PKG_VERSION\");\n")
+	writeFixtureFile(t, mainPath, "mod doctor;\n")
+
+	if err := stampCodexBuildSource(buildDir, identity); err != nil {
+		t.Fatalf("stampCodexBuildSource: %v", err)
+	}
+
+	cargoToml := readFixtureFile(t, cargoPath)
+	if !strings.Contains(cargoToml, `version = "`+identity.PackageVersion+`"`) {
+		t.Fatalf("Cargo.toml missing stamped package version:\n%s", cargoToml)
+	}
+	if got := readFixtureFile(t, versionPath); got != "pub const CODEX_CLI_VERSION: &str = env!(\"CARGO_PKG_VERSION\");\n" {
+		t.Fatalf("version.rs was modified:\n%s", got)
+	}
+	if got := readFixtureFile(t, mainPath); got != "mod doctor;\n" {
+		t.Fatalf("main.rs was modified:\n%s", got)
+	}
+}
+
 func TestInstallPackageCreatesStandaloneLinks(t *testing.T) {
 	root := t.TempDir()
 	packageDir := filepath.Join(root, "package")
@@ -215,6 +459,38 @@ func TestReleaseDirUsesLocalFastSuffix(t *testing.T) {
 	path := releaseDir("/tmp/codex-home", "0.0.0", "abcdef012345", "aarch64-apple-darwin", BuildModeLocalFast)
 	if !strings.HasSuffix(path, "0.0.0-main-abcdef012345-aarch64-apple-darwin-local-fast") {
 		t.Fatalf("local-fast release dir = %q", path)
+	}
+}
+
+func TestReleaseNameIncludesStampedVersion(t *testing.T) {
+	got := releaseName(
+		"0.137.0-main.20260603-215351+head.abcdef012345.build.123456789abc",
+		"abcdef012345",
+		"aarch64-apple-darwin",
+		BuildModeLocalFast,
+	)
+	want := "0.137.0-main.20260603-215351+head.abcdef012345.build.123456789abc-main-abcdef012345-aarch64-apple-darwin-local-fast"
+	if got != want {
+		t.Fatalf("releaseName = %q, want %q", got, want)
+	}
+}
+
+func TestVerifyReleaseCandidateRejectsVersionMismatchBeforeReuse(t *testing.T) {
+	releasePath := t.TempDir()
+	metadata := `{"layoutVersion":1,"version":"0.0.0","target":"aarch64-apple-darwin","variant":"codex"}`
+	if err := os.WriteFile(filepath.Join(releasePath, "codex-package.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatalf("WriteFile metadata: %v", err)
+	}
+	err := verifyReleaseCandidate(
+		context.Background(),
+		releasePath,
+		"aarch64-apple-darwin",
+		"bin/codex",
+		"codex",
+		"0.137.0-main.20260603-215351+head.abcdef012345.build.123456789abc",
+	)
+	if err == nil || !strings.Contains(err.Error(), "release version mismatch") {
+		t.Fatalf("verifyReleaseCandidate err = %v", err)
 	}
 }
 
@@ -345,4 +621,23 @@ func installFixture(t *testing.T) {
 	t.Cleanup(func() {
 		config.SetCurrent(nil)
 	})
+}
+
+func writeFixtureFile(t *testing.T, path string, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile %s: %v", path, err)
+	}
+}
+
+func readFixtureFile(t *testing.T, path string) string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", path, err)
+	}
+	return string(body)
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -230,15 +231,11 @@ func Install(ctx context.Context, opts InstallOptions) error {
 	if err := cloneOrUpdateSource(ctx, r, opts.Repo, opts.SourceDir, opts.Ref); err != nil {
 		return err
 	}
-	head := "dryrun"
-	if !opts.DryRun {
-		headBytes, err := r.RunCaptureStdout(ctx, "git", "-C", opts.SourceDir, "rev-parse", "--short=12", "HEAD")
-		if err != nil {
-			return fmt.Errorf("read Codex source HEAD: %w", err)
-		}
-		head = strings.TrimSpace(string(headBytes))
-		notef(r, "codex-cli: source checkout is at HEAD "+head)
+	identity, err := resolveCodexBuildIdentity(ctx, r, opts, target, buildMode)
+	if err != nil {
+		return err
 	}
+	notef(r, "codex-cli: build identity version="+identity.PackageVersion+" built="+identity.BuildStamp+" head="+identity.Head+" build="+identity.BuildHash)
 	if !opts.DryRun {
 		reusedReleaseDir, reused, err := maybeReuseInstalledRelease(
 			ctx,
@@ -248,7 +245,8 @@ func Install(ctx context.Context, opts InstallOptions) error {
 			opts.PackageBinaryPath,
 			opts.PackageVariant,
 			opts.CommandName,
-			head,
+			identity.PackageVersion,
+			identity.Head,
 			target,
 			buildMode,
 			opts.ForceRebuild,
@@ -262,33 +260,11 @@ func Install(ctx context.Context, opts InstallOptions) error {
 		}
 	}
 
-	notef(r, "codex-cli: build upstream entrypoint")
-	entrypointPath, err := buildEntrypoint(ctx, r, opts.SourceDir, opts.CommandName, target, buildMode, opts.NoSccache)
+	metadata, err := buildStampedPackage(ctx, r, opts, target, buildMode, identity)
 	if err != nil {
 		return err
 	}
-	notef(r, "codex-cli: sign upstream entrypoint")
-	if err := signBinary(ctx, r, opts.SourceDir, entrypointPath); err != nil {
-		return err
-	}
-	notef(r, "codex-cli: build upstream package")
-	if err := buildPackage(ctx, r, opts.SourceDir, opts.PackageDir, opts.PackageVariant, target, entrypointPath); err != nil {
-		return err
-	}
-
-	notef(r, "codex-cli: read package metadata")
-	metadata := packageMetadata{
-		Version: "dryrun",
-		Target:  target,
-		Variant: opts.PackageVariant,
-	}
-	if !opts.DryRun {
-		metadata, err = readPackageMetadata(opts.PackageDir, opts.PackageVariant)
-		if err != nil {
-			return err
-		}
-	}
-	releaseDir := releaseDir(opts.PackageHome, metadata.Version, head, metadata.Target, buildMode)
+	releaseDir := releaseDir(opts.PackageHome, metadata.Version, identity.Head, metadata.Target, buildMode)
 	notef(r, "codex-cli: package version="+metadata.Version+" target="+metadata.Target+" release="+releaseDir)
 	notef(r, "codex-cli: install standalone package")
 	if err := installPackage(ctx, r, opts.PackageDir, releaseDir, opts.PackageHome, opts.InstallDir, opts.PackageBinaryPath, opts.CommandName); err != nil {
@@ -431,12 +407,21 @@ func buildPackage(
 ) error {
 	log := codexcliLog.With("function", "buildPackage")
 	script := filepath.Join(sourceDir, "scripts", "build_codex_package.py")
+	pythonCommand := "python3"
+	if !r.DryRun {
+		resolvedCommand, err := resolveCodexPythonCommand(ctx, sourceDir)
+		if err != nil {
+			log.ErrorContext(ctx, "codexcli.build_package.python_failed", "err", err)
+			return err
+		}
+		pythonCommand = resolvedCommand
+	}
 	notef(r, "codex-cli: build package at "+packageDir)
 	notef(r, "codex-cli: upstream package builder output follows")
 	if err := r.RunWithHeartbeat(ctx,
 		"codex-cli: building Codex package",
 		30*time.Second,
-		"python3",
+		pythonCommand,
 		script,
 		"--target",
 		target,
@@ -512,14 +497,14 @@ func buildEntrypoint(
 
 func signBinary(ctx context.Context, r *patch.Runner, sourceDir string, binaryPath string) error {
 	log := codexcliLog.With("function", "signBinary")
-	entitlementsPath := filepath.Join(
-		sourceDir,
-		".github",
-		"actions",
-		"macos-code-sign",
-		"codex.entitlements.plist",
-	)
+	entitlementsPath := filepath.Join(sourceDir, ".github", "scripts", "macos-signing", "codex.entitlements.plist")
 	if !r.DryRun {
+		resolvedEntitlementsPath, err := findCodexEntitlementsPath(sourceDir)
+		if err != nil {
+			log.ErrorContext(ctx, "codexcli.sign_binary.entitlements_lookup_failed", "err", err)
+			return err
+		}
+		entitlementsPath = resolvedEntitlementsPath
 		if _, err := os.Stat(binaryPath); err != nil {
 			log.ErrorContext(ctx, "codexcli.sign_binary.binary_missing", "err", err)
 			return fmt.Errorf("stat Codex binary: %w", err)
@@ -542,6 +527,38 @@ func signBinary(ctx context.Context, r *patch.Runner, sourceDir string, binaryPa
 		return fmt.Errorf("sign Codex CLI: %w", err)
 	}
 	return nil
+}
+
+func findCodexEntitlementsPath(sourceDir string) (string, error) {
+	log := codexcliLog.With("function", "findCodexEntitlementsPath")
+	githubDir := filepath.Join(sourceDir, ".github")
+	matches := make([]string, 0, 1)
+	err := filepath.WalkDir(githubDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || entry.Name() != "codex.entitlements.plist" {
+			return nil
+		}
+		matches = append(matches, path)
+		return nil
+	})
+	if err != nil {
+		log.Error("codexcli.find_codex_entitlements.walk_failed", "err", err, "path", githubDir)
+		return "", fmt.Errorf("find upstream Codex entitlements: %w", err)
+	}
+	sort.Strings(matches)
+	if len(matches) == 0 {
+		err := fmt.Errorf("find upstream Codex entitlements: codex.entitlements.plist not found under %s", githubDir)
+		log.Error("codexcli.find_codex_entitlements.missing", "err", err)
+		return "", err
+	}
+	if len(matches) > 1 {
+		err := fmt.Errorf("find upstream Codex entitlements: multiple matches: %s", strings.Join(matches, ", "))
+		log.Error("codexcli.find_codex_entitlements.ambiguous", "err", err)
+		return "", err
+	}
+	return matches[0], nil
 }
 
 func ensureRustToolchain(
@@ -590,7 +607,16 @@ func cargoBuildEnv(
 	}
 	defer cleanup()
 
-	output, err := r.RunCaptureStdout(ctx, "python3", scriptPath, sourceDir, target)
+	pythonCommand := "python3"
+	if !r.DryRun {
+		resolvedCommand, err := resolveCodexPythonCommand(ctx, sourceDir)
+		if err != nil {
+			log.ErrorContext(ctx, "codexcli.cargo_build_env.python_failed", "err", err)
+			return nil, "", false, err
+		}
+		pythonCommand = resolvedCommand
+	}
+	output, err := r.RunCaptureStdout(ctx, pythonCommand, scriptPath, sourceDir, target)
 	if err != nil {
 		log.ErrorContext(ctx, "codexcli.cargo_build_env.resolve_env_failed", "err", err)
 		return nil, "", false, fmt.Errorf("resolve Codex V8 environment: %w", err)
@@ -705,8 +731,12 @@ func releaseDir(packageHome string, version string, head string, target string, 
 		"packages",
 		"standalone",
 		"releases",
-		fmt.Sprintf("%s-main-%s-%s%s", version, head, target, buildModeReleaseSuffix(buildMode)),
+		releaseName(version, head, target, buildMode),
 	)
+}
+
+func releaseName(version string, head string, target string, buildMode BuildMode) string {
+	return fmt.Sprintf("%s-main-%s-%s%s", version, head, target, buildModeReleaseSuffix(buildMode))
 }
 
 func buildModeReleaseSuffix(buildMode BuildMode) string {
