@@ -24,7 +24,7 @@ func TestRootHelpListsTargetCommands(t *testing.T) {
 		t.Fatalf("executeRoot(--help): %v", err)
 	}
 
-	required := []string{"patch", "upgrade", "cursor", "codex", "claude", "codex-cli", "status"}
+	required := []string{"patch", "upgrade", "hard-reset", "cursor", "codex", "claude", "codex-cli", "status"}
 	for _, want := range required {
 		if !strings.Contains(output, want) {
 			t.Fatalf("root help missing %q\noutput:\n%s", want, output)
@@ -45,7 +45,7 @@ func TestTargetHelpListsOperations(t *testing.T) {
 		t.Fatalf("executeRoot(codex --help): %v", err)
 	}
 
-	required := []string{"patch", "upgrade", "keychain-migrate", "status"}
+	required := []string{"patch", "upgrade", "keychain-migrate", "hard-reset", "status"}
 	for _, want := range required {
 		if !strings.Contains(output, want) {
 			t.Fatalf("target help missing %q\noutput:\n%s", want, output)
@@ -143,10 +143,13 @@ func TestOperationHelpCommandsSucceed(t *testing.T) {
 		{"patch", "all", "--help"},
 		{"upgrade", "--help"},
 		{"upgrade", "all", "--help"},
+		{"hard-reset", "--help"},
+		{"hard-reset", "all", "--help"},
 		{"cursor", "upgrade", "--help"},
 		{"codex", "patch", "--help"},
 		{"codex", "upgrade", "--help"},
 		{"codex", "keychain-migrate", "--help"},
+		{"codex", "hard-reset", "--help"},
 		{"codex", "status", "--help"},
 		{"claude", "upgrade", "--help"},
 		{"codex-cli", "upgrade", "--help"},
@@ -194,6 +197,28 @@ func TestVerbFirstCommandsReturnError(t *testing.T) {
 		if !strings.Contains(err.Error(), "unknown command") {
 			t.Fatalf("executeRoot(%v) error = %q, want unknown command", args, err.Error())
 		}
+	}
+}
+
+func TestVerbFirstHardResetDispatchReadsDryRunFlag(t *testing.T) {
+	installFixture(t)
+
+	var got operations.Request
+	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
+		got = req
+		return nil
+	}, "hard-reset", "codex", "--dry-run")
+	if err != nil {
+		t.Fatalf("executeRootWithRunner(hard-reset codex): %v", err)
+	}
+	if got.Capability != "app.hard-reset" {
+		t.Fatalf("capability = %q, want app.hard-reset", got.Capability)
+	}
+	if got.App == nil || got.App.ID != "codex" {
+		t.Fatalf("app request = %#v", got.App)
+	}
+	if !got.Flags.Bool("dry-run") {
+		t.Fatal("dry-run = false, want true")
 	}
 }
 
@@ -427,6 +452,28 @@ func TestAppPatchDispatchDefaultsMigrateKeychainFalse(t *testing.T) {
 	}
 }
 
+func TestAppHardResetDispatchReadsDryRunFlag(t *testing.T) {
+	installFixture(t)
+
+	var got operations.Request
+	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
+		got = req
+		return nil
+	}, "codex", "hard-reset", "--dry-run")
+	if err != nil {
+		t.Fatalf("executeRootWithRunner(codex hard-reset): %v", err)
+	}
+	if got.Capability != "app.hard-reset" {
+		t.Fatalf("capability = %q, want app.hard-reset", got.Capability)
+	}
+	if got.App == nil || got.App.ID != "codex" {
+		t.Fatalf("app request = %#v", got.App)
+	}
+	if !got.Flags.Bool("dry-run") {
+		t.Fatal("dry-run = false, want true")
+	}
+}
+
 func TestAppPatchDispatchReadsMigrateKeychainFlag(t *testing.T) {
 	installFixture(t)
 
@@ -536,6 +583,42 @@ func TestUpgradeAllDryRunDispatchesBatchRequest(t *testing.T) {
 	}
 	if want := []string{"cursor.channel=stable", "codex-cli.codex-home=/tmp/codex-home"}; strings.Join(got.Sets, ",") != strings.Join(want, ",") {
 		t.Fatalf("sets = %#v, want %#v", got.Sets, want)
+	}
+}
+
+func TestHardResetAllDryRunDispatchesBatchRequest(t *testing.T) {
+	var got batchops.Request
+	output, err := executeRootWithBatchRunner(t, func(_ context.Context, req batchops.Request) error {
+		got = req
+		return nil
+	}, "hard-reset", "all", "--dry-run", "--target", "codex")
+	if err != nil {
+		t.Fatalf("executeRootWithBatchRunner(hard-reset all): %v\noutput:\n%s", err, output)
+	}
+	if got.Operation != batchops.OperationHardReset {
+		t.Fatalf("operation = %q, want %q", got.Operation, batchops.OperationHardReset)
+	}
+	if !got.DryRun {
+		t.Fatal("dry-run = false, want true")
+	}
+	if len(got.Targets) != 1 || got.Targets[0] != "codex" {
+		t.Fatalf("targets = %#v", got.Targets)
+	}
+}
+
+func TestRootStatusFiltersTargetArgument(t *testing.T) {
+	output, err := executeRoot(t, "status", "codex")
+	if err != nil {
+		t.Fatalf("executeRoot(status codex): %v\noutput:\n%s", err, output)
+	}
+	if !strings.Contains(output, "codex") {
+		t.Fatalf("status codex output missing codex\noutput:\n%s", output)
+	}
+	if strings.Contains(output, "claude") {
+		t.Fatalf("status codex output unexpectedly includes claude\noutput:\n%s", output)
+	}
+	if strings.Contains(output, "cursor") {
+		t.Fatalf("status codex output unexpectedly includes cursor\noutput:\n%s", output)
 	}
 }
 

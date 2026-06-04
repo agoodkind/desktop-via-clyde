@@ -5,6 +5,24 @@ team_id = "H3BMXM4W7H"
 [apps.cursor]
 app_path = "/Applications/Cursor.app"
 bundle_id = "com.todesktop.230313mzl4w4u92"
+helper_bundle_ids = [
+    "com.electron.reactive",
+    "com.github.Electron.framework",
+    "com.github.Electron.helper",
+    "com.github.Squirrel",
+    "com.todesktop.230313mzl4w4u92.helper",
+    "org.mantle.Mantle",
+]
+hard_reset_services = [
+    "Accessibility",
+    "AppleEvents",
+    "Camera",
+    "ListenEvent",
+    "Microphone",
+    "PostEvent",
+    "ScreenCapture",
+    "SystemPolicyAllFiles",
+]
 exec_name = "Cursor"
 keychain_services = ["Cursor Safe Storage"]
 
@@ -168,9 +186,45 @@ use = "status"
 short = "Print state for this target"
 capability = "app.status"
 
+[apps.cursor.operations.hard-reset]
+use = "hard-reset"
+short = "Reset configured macOS privacy grants for this target"
+capability = "app.hard-reset"
+
+[[apps.cursor.operations.hard-reset.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print reset commands without changing privacy grants"
+
 [apps.codex]
 app_path = "/Applications/Codex.app"
 bundle_id = "com.openai.codex.beta"
+bundle_id_aliases = ["com.openai.codex"]
+helper_bundle_ids = [
+    "com.openai.codex.framework",
+    "com.openai.codex.framework.AlertNotificationService",
+    "com.openai.codex.helper",
+    "com.openai.codex.helper.renderer",
+    "com.openai.sky.CUAService",
+    "com.openai.sky.CUAService.AuthorizationPlugin",
+    "com.openai.sky.CUAService.AuthorizationPluginInstaller",
+    "com.openai.sky.CUAService.cli",
+    "com.openai.sky.CUAService.guardian",
+    "org.sparkle-project.DownloaderService",
+    "org.sparkle-project.InstallerLauncher",
+    "org.sparkle-project.Sparkle",
+    "org.sparkle-project.Sparkle.Updater",
+]
+hard_reset_services = [
+    "Accessibility",
+    "AppleEvents",
+    "Camera",
+    "ListenEvent",
+    "Microphone",
+    "PostEvent",
+    "ScreenCapture",
+    "SystemPolicyAllFiles",
+]
 exec_name = "Codex (Beta)"
 keychain_services = ["Codex Safe Storage", "Codex Auth", "Codex MCP Credentials"]
 nested_sign_paths = [
@@ -186,6 +240,11 @@ nested_sign_paths = [
     "Contents/Resources/native/remote-control-device-key.node",
     "Contents/Resources/native/sky.node",
     "Contents/Resources/native/sparkle.node",
+    "Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Alerts).app",
+    "Contents/Frameworks/Codex Framework.framework/Helpers/Codex (GPU).app",
+    "Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Service).app",
+    "Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Renderer).app",
+    "Contents/Frameworks/Codex Framework.framework",
     "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc",
     "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc",
     "Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app",
@@ -318,6 +377,9 @@ team_requirement_plists = [
 ]
 
 [[apps.codex.computer_use.sign_targets]]
+path = "Contents/SharedSupport/Codex Computer Use Installer.app/Contents/Resources/CodexComputerUseAuthorizationPlugin.bundle"
+
+[[apps.codex.computer_use.sign_targets]]
 path = "Contents/SharedSupport/Codex Computer Use Installer.app"
 
 [[apps.codex.computer_use.sign_targets]]
@@ -406,9 +468,36 @@ use = "status"
 short = "Print state for this target"
 capability = "app.status"
 
+[apps.codex.operations.hard-reset]
+use = "hard-reset"
+short = "Reset configured macOS privacy grants for this target"
+capability = "app.hard-reset"
+
+[[apps.codex.operations.hard-reset.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print reset commands without changing privacy grants"
+
 [apps.claude]
 app_path = "/Applications/Claude.app"
 bundle_id = "com.anthropic.claudefordesktop"
+helper_bundle_ids = [
+    "com.anthropic.claudefordesktop.helper",
+    "com.electron.reactive",
+    "com.github.Electron.framework",
+    "com.github.Squirrel",
+    "org.mantle.Mantle",
+]
+hard_reset_services = [
+    "Accessibility",
+    "AppleEvents",
+    "Camera",
+    "ListenEvent",
+    "Microphone",
+    "PostEvent",
+    "ScreenCapture",
+    "SystemPolicyAllFiles",
+]
 exec_name = "Claude"
 keychain_services = ["Claude Safe Storage"]
 preserved_nested_code_paths = ["Contents/Frameworks/Squirrel.framework"]
@@ -575,6 +664,16 @@ usage = "override the target .app path for isolated testing"
 use = "status"
 short = "Print state for this target"
 capability = "app.status"
+
+[apps.claude.operations.hard-reset]
+use = "hard-reset"
+short = "Reset configured macOS privacy grants for this target"
+capability = "app.hard-reset"
+
+[[apps.claude.operations.hard-reset.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print reset commands without changing privacy grants"
 
 [clis.codex-cli.command]
 use = "codex-cli"

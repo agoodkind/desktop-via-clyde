@@ -30,6 +30,8 @@ const (
 	OperationPatch OperationName = "patch"
 	// OperationUpgrade identifies the aggregate upgrade command.
 	OperationUpgrade OperationName = "upgrade"
+	// OperationHardReset identifies the aggregate hard-reset command.
+	OperationHardReset OperationName = "hard-reset"
 )
 
 // Request describes one aggregate command execution.

@@ -11,6 +11,7 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/codexcli"
 	"goodkind.io/desktop-via-clyde/internal/codexclishim"
 	"goodkind.io/desktop-via-clyde/internal/computeruseext"
+	"goodkind.io/desktop-via-clyde/internal/hardreset"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/stdioteeshim"
@@ -56,6 +57,9 @@ func register() error {
 	}
 	if err := patch.RegisterOperations(); err != nil {
 		return logCompositionRegistrationError("register patch operations", err)
+	}
+	if err := hardreset.RegisterOperations(); err != nil {
+		return logCompositionRegistrationError("register hard-reset operations", err)
 	}
 	if err := computeruseext.RegisterLifecycleHooks(); err != nil {
 		return logCompositionRegistrationError("register computer use lifecycle hooks", err)

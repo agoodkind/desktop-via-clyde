@@ -3,6 +3,7 @@ package targets
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"goodkind.io/desktop-via-clyde/internal/config"
@@ -151,6 +152,11 @@ func TestNestedSignPathsPerTarget(t *testing.T) {
 			"Contents/Resources/native/remote-control-device-key.node",
 			"Contents/Resources/native/sky.node",
 			"Contents/Resources/native/sparkle.node",
+			"Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Alerts).app",
+			"Contents/Frameworks/Codex Framework.framework/Helpers/Codex (GPU).app",
+			"Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Service).app",
+			"Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Renderer).app",
+			"Contents/Frameworks/Codex Framework.framework",
 			"Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc",
 			"Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc",
 			"Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app",
@@ -223,6 +229,7 @@ func TestComputerUsePolicyPerTarget(t *testing.T) {
 			t.Errorf("Codex Computer Use patch binaries mismatch: got %v want %v", policy.TeamPatchBinaries, wantPatch)
 		}
 		wantSign := []string{
+			"Contents/SharedSupport/Codex Computer Use Installer.app/Contents/Resources/CodexComputerUseAuthorizationPlugin.bundle",
 			"Contents/SharedSupport/Codex Computer Use Installer.app",
 			"Contents/SharedSupport/SkyComputerUseClient.app",
 			"Contents/SharedSupport/CUALockScreenGuardian.app",
@@ -245,6 +252,41 @@ func TestComputerUsePolicyPerTarget(t *testing.T) {
 		}
 		if !stringSlicesEqual(mainHelper.Entitlements.RequiredBooleanEntitlements, wantMainRequired) {
 			t.Errorf("Codex Computer Use main helper required entitlements mismatch: got %v want %v", mainHelper.Entitlements.RequiredBooleanEntitlements, wantMainRequired)
+		}
+	}
+}
+
+func TestBundleIdentityMetadataPerTarget(t *testing.T) {
+	installFixture(t)
+	codex, err := lookupTarget("codex")
+	if err != nil {
+		t.Fatalf("Lookup(codex): %v", err)
+	}
+	if !stringSlicesEqual(codex.BundleIDAliases, []string{"com.openai.codex"}) {
+		t.Fatalf("codex bundle aliases = %v", codex.BundleIDAliases)
+	}
+	for _, want := range []string{
+		"com.openai.codex.framework",
+		"com.openai.codex.framework.AlertNotificationService",
+		"com.openai.codex.helper",
+		"com.openai.codex.helper.renderer",
+		"com.openai.sky.CUAService.AuthorizationPlugin",
+		"com.openai.sky.CUAService",
+	} {
+		if !slices.Contains(codex.HelperBundleIDs, want) {
+			t.Fatalf("codex helper bundle IDs missing %q: %v", want, codex.HelperBundleIDs)
+		}
+	}
+	for _, targetID := range []string{"cursor", "codex", "claude"} {
+		target, err := lookupTarget(targetID)
+		if err != nil {
+			t.Fatalf("Lookup(%s): %v", targetID, err)
+		}
+		if !slices.Contains(target.HardResetServices, "ScreenCapture") {
+			t.Fatalf("%s hard reset services missing ScreenCapture: %v", targetID, target.HardResetServices)
+		}
+		if !slices.Contains(target.HardResetServices, "SystemPolicyAllFiles") {
+			t.Fatalf("%s hard reset services missing SystemPolicyAllFiles: %v", targetID, target.HardResetServices)
 		}
 	}
 }

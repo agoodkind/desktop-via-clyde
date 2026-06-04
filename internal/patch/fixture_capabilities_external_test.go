@@ -25,6 +25,7 @@ func registerFixtureCapabilitiesOnce() error {
 		"app.patch",
 		"app.upgrade",
 		"app.keychain-migrate",
+		"app.hard-reset",
 		"app.status",
 		"standalone-cli.install",
 		"standalone-cli.status",

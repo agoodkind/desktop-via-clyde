@@ -101,6 +101,9 @@ type Target struct {
 	Operations               map[string]spec.OperationSpec
 	AppPath                  string
 	BundleID                 string
+	BundleIDAliases          []string
+	HelperBundleIDs          []string
+	HardResetServices        []string
 	ExecName                 string
 	KeychainServices         []string
 	NestedSignPaths          []string
@@ -168,6 +171,9 @@ func buildTarget(app spec.AppSpec) Target {
 		Operations:               cloneOperations(app.Operations),
 		AppPath:                  app.AppPath,
 		BundleID:                 app.BundleID,
+		BundleIDAliases:          cloneStrings(app.BundleIDAliases),
+		HelperBundleIDs:          cloneStrings(app.HelperBundleIDs),
+		HardResetServices:        cloneStrings(app.HardResetServices),
 		ExecName:                 app.ExecName,
 		KeychainServices:         cloneStrings(app.KeychainServices),
 		NestedSignPaths:          cloneStrings(app.NestedSignPaths),

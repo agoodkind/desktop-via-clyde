@@ -74,8 +74,9 @@ func BuildRoot(
 	})
 	clioutput.PersistentFlag(root)
 
-	root.AddCommand(newBatchParentCmd(out, batchops.OperationPatch, batchRunner))
-	root.AddCommand(newBatchParentCmd(out, batchops.OperationUpgrade, batchRunner))
+	root.AddCommand(newBatchParentCmd(out, batchops.OperationPatch, batchRunner, runner))
+	root.AddCommand(newBatchParentCmd(out, batchops.OperationUpgrade, batchRunner, runner))
+	root.AddCommand(newBatchParentCmd(out, batchops.OperationHardReset, batchRunner, runner))
 	for _, configuredTarget := range targets.All() {
 		target, lookupErr := targets.Lookup(configuredTarget.ID)
 		if lookupErr != nil {
@@ -90,7 +91,12 @@ func BuildRoot(
 	return root
 }
 
-func newBatchParentCmd(out io.Writer, operation batchops.OperationName, runner BatchRunner) *cobra.Command {
+func newBatchParentCmd(
+	out io.Writer,
+	operation batchops.OperationName,
+	batchRunner BatchRunner,
+	operationRunner OperationRunner,
+) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   string(operation),
 		Short: fmt.Sprintf("Run %s across configured targets", operation),
@@ -99,7 +105,17 @@ func newBatchParentCmd(out io.Writer, operation batchops.OperationName, runner B
 			return cmd.Help()
 		},
 	}
-	cmd.AddCommand(newBatchAllCmd(out, operation, runner))
+	cmd.AddCommand(newBatchAllCmd(out, operation, batchRunner))
+	if operation == batchops.OperationHardReset {
+		for _, target := range targets.All() {
+			operationSpec, ok := target.Operations[string(operation)]
+			if !ok {
+				continue
+			}
+			targetCopy := target
+			cmd.AddCommand(newVerbFirstTargetOperationCmd(out, operationSpec, &targetCopy, operationRunner))
+		}
+	}
 	return cmd
 }
 
@@ -176,10 +192,35 @@ func newOperationCmd(out io.Writer, operation spec.OperationSpec, target *target
 	return cmd
 }
 
+func newVerbFirstTargetOperationCmd(
+	out io.Writer,
+	operation spec.OperationSpec,
+	target *targets.Target,
+	runner OperationRunner,
+) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     target.Command.Use,
+		Aliases: append([]string(nil), target.Command.Aliases...),
+		Short:   fmt.Sprintf("Run %s for %s", operation.Use, target.ID),
+		Args:    cobra.NoArgs,
+	}
+	handler := operationHandler{
+		out:       out,
+		operation: operation,
+		target:    target,
+		program:   nil,
+		runner:    runner,
+	}
+	cmdflags.Register(cmd, operation.Flags)
+	cmd.RunE = handler.run
+	return cmd
+}
+
 func newStatusCmd(out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "status",
+		Use:   "status [target...]",
 		Short: "Print per-target state (clean, patched, drifted) and bundle metadata",
+		Args:  cobra.ArbitraryArgs,
 	}
 	cmd.RunE = statusHandler{out: out}.run
 	return cmd
@@ -193,8 +234,8 @@ func (h operationHandler) run(cmd *cobra.Command, _ []string) error {
 	return runOperation(cmd.Context(), cmd, h.out, h.operation, h.target, h.program, h.runner)
 }
 
-func (h statusHandler) run(cmd *cobra.Command, _ []string) error {
-	return runStatus(cmd.Context(), cmd, h.out)
+func (h statusHandler) run(cmd *cobra.Command, args []string) error {
+	return runStatus(cmd.Context(), cmd, h.out, args)
 }
 
 func runBatchAll(
@@ -334,12 +375,17 @@ func runOperation(
 	return nil
 }
 
-func runStatus(ctx context.Context, cmd *cobra.Command, out io.Writer) error {
+func runStatus(ctx context.Context, cmd *cobra.Command, out io.Writer, targetIDs []string) error {
 	format, err := readOutputFormat(ctx, cmd)
 	if err != nil {
 		return err
 	}
-	report, err := statusreport.BuildAll(ctx)
+	var report statusreport.Report
+	if len(targetIDs) == 0 {
+		report, err = statusreport.BuildAll(ctx)
+	} else {
+		report, err = statusreport.BuildTargets(ctx, targetIDs)
+	}
 	if err != nil {
 		slog.WarnContext(ctx, "clispec.status.build_failed", "err", err)
 		return fmt.Errorf("build status report: %w", err)

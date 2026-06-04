@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
+	"goodkind.io/desktop-via-clyde/internal/bundleidentity"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/clock"
 	shimembed "goodkind.io/desktop-via-clyde/internal/embed"
@@ -437,8 +439,11 @@ func codesignRuntimeArgs(id string, codePath string) []string {
 }
 
 func stepResignNestedCode(ctx context.Context, r *Runner, t targets.Target, id string) error {
-	for _, relPath := range t.NestedSignPaths {
-		codePath := filepath.Join(t.AppPath, filepath.FromSlash(relPath))
+	codePaths, err := nestedCodeSignPaths(ctx, r, t)
+	if err != nil {
+		return err
+	}
+	for _, codePath := range codePaths {
 		if !r.DryRun {
 			if _, err := os.Stat(codePath); err != nil {
 				if errors.Is(err, os.ErrNotExist) {
@@ -464,6 +469,62 @@ func stepResignNestedCode(ctx context.Context, r *Runner, t targets.Target, id s
 		}
 	}
 	return nil
+}
+
+func nestedCodeSignPaths(ctx context.Context, r *Runner, t targets.Target) ([]string, error) {
+	items := make([]nestedCodeSignPath, 0, len(t.NestedSignPaths))
+	for _, relPath := range t.NestedSignPaths {
+		items = append(items, nestedCodeSignPath{
+			Path: filepath.Join(t.AppPath, filepath.FromSlash(relPath)),
+		})
+	}
+
+	entries, err := bundleidentity.Scan(ctx, t.AppPath, bundleidentity.ScanOptions{
+		IncludeSignatures: false,
+		SignatureReader:   nil,
+	})
+	if err != nil {
+		return nil, logPatchError(ctx, "patch.runtime_identity_scan_failed", fmt.Errorf("scan runtime bundle identities: %w", err))
+	}
+	for _, entry := range bundleidentity.RuntimeNestedEntries(entries, t.AppPath, t.PreservedNestedCodePaths) {
+		items = append(items, nestedCodeSignPath{Path: entry.RootPath})
+	}
+
+	results := dedupeNestedCodeSignPaths(items)
+	if len(results) > len(t.NestedSignPaths) {
+		notef(r, fmt.Sprintf("target=%s discovered %d runtime bundle code objects for signing", t.ID, len(results)-len(t.NestedSignPaths)))
+	}
+	return results, nil
+}
+
+type nestedCodeSignPath struct {
+	Path string
+}
+
+func dedupeNestedCodeSignPaths(items []nestedCodeSignPath) []string {
+	seen := map[string]bool{}
+	results := make([]string, 0, len(items))
+	for _, item := range items {
+		cleanPath := filepath.Clean(item.Path)
+		key := cleanPath
+		if resolved, err := filepath.EvalSymlinks(cleanPath); err == nil {
+			key = filepath.Clean(resolved)
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		results = append(results, cleanPath)
+	}
+	sort.Slice(results, func(i int, j int) bool {
+		leftDepth := strings.Count(filepath.ToSlash(results[i]), "/")
+		rightDepth := strings.Count(filepath.ToSlash(results[j]), "/")
+		if leftDepth == rightDepth {
+			return results[i] < results[j]
+		}
+		return leftDepth > rightDepth
+	})
+	return results
 }
 
 func resolveSignIdentity(ctx context.Context, dryRun bool) (string, error) {
@@ -685,6 +746,9 @@ func stepVerify(ctx context.Context, r *Runner, t targets.Target) error {
 	if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--verbose=2", t.AppPath); err != nil {
 		return logPatchError(ctx, "patch.verify_app_bundle_failed", fmt.Errorf("verify app bundle %s: %w", t.AppPath, err))
 	}
+	if err := verifyRuntimeBundleTeams(ctx, r, t); err != nil {
+		return err
+	}
 	if err := verifyRequiredEntitlements(ctx, r, t); err != nil {
 		return err
 	}
@@ -697,6 +761,35 @@ func stepVerify(ctx context.Context, r *Runner, t targets.Target) error {
 		return logPatchError(ctx, "patch.shim_dry_run_failed", fmt.Errorf("shim dry-run: %w", err))
 	}
 	notef(r, fmt.Sprintf("target=%s shim dry-run output:\n%s", t.ID, string(out)))
+	return nil
+}
+
+func verifyRuntimeBundleTeams(ctx context.Context, r *Runner, t targets.Target) error {
+	entries, err := bundleidentity.Scan(ctx, t.AppPath, bundleidentity.ScanOptions{
+		IncludeSignatures: true,
+		SignatureReader:   nil,
+	})
+	if err != nil {
+		return logPatchError(ctx, "patch.verify_runtime_identity_scan_failed", fmt.Errorf("scan runtime bundle identities: %w", err))
+	}
+	localTeamID := strings.TrimSpace(paths.SignTeamID())
+	for _, entry := range entries {
+		if !entry.RuntimeCode {
+			continue
+		}
+		if bundleidentity.IsPreserved(entry.RelativePath, t.PreservedNestedCodePaths) {
+			continue
+		}
+		if entry.SignatureError != "" {
+			return logPatchError(ctx, "patch.verify_runtime_identity_signature_failed",
+				fmt.Errorf("runtime bundle %s at %s signature read failed: %s", entry.BundleID, entry.RelativePath, entry.SignatureError))
+		}
+		if entry.TeamID != localTeamID {
+			return logPatchError(ctx, "patch.verify_runtime_identity_team_failed",
+				fmt.Errorf("runtime bundle %s at %s signed by team %s, want %s", entry.BundleID, entry.RelativePath, entry.TeamID, localTeamID))
+		}
+	}
+	notef(r, fmt.Sprintf("target=%s runtime bundle identities signed by team %s", t.ID, localTeamID))
 	return nil
 }
 

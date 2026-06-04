@@ -29,6 +29,9 @@ type decodedAppSpec struct {
 	Operations               map[string]spec.OperationSpec `toml:"operations"`
 	AppPath                  string                        `toml:"app_path"`
 	BundleID                 string                        `toml:"bundle_id"`
+	BundleIDAliases          []string                      `toml:"bundle_id_aliases"`
+	HelperBundleIDs          []string                      `toml:"helper_bundle_ids"`
+	HardResetServices        []string                      `toml:"hard_reset_services"`
 	ExecName                 string                        `toml:"exec_name"`
 	KeychainServices         []string                      `toml:"keychain_services"`
 	NestedSignPaths          []string                      `toml:"nested_sign_paths"`
@@ -73,6 +76,9 @@ func convertDecodedConfig(decoded decodedConfig) spec.Config {
 			Operations:               app.Operations,
 			AppPath:                  app.AppPath,
 			BundleID:                 app.BundleID,
+			BundleIDAliases:          app.BundleIDAliases,
+			HelperBundleIDs:          app.HelperBundleIDs,
+			HardResetServices:        app.HardResetServices,
 			ExecName:                 app.ExecName,
 			KeychainServices:         app.KeychainServices,
 			NestedSignPaths:          app.NestedSignPaths,
@@ -145,6 +151,9 @@ func normalizeAndValidateApp(id string, app *spec.AppSpec) error {
 
 	app.AppPath = cleanExpandedPath(strings.TrimSpace(app.AppPath))
 	app.BundleID = strings.TrimSpace(app.BundleID)
+	app.BundleIDAliases = normalizeStringSlice(app.BundleIDAliases)
+	app.HelperBundleIDs = normalizeStringSlice(app.HelperBundleIDs)
+	app.HardResetServices = normalizeStringSlice(app.HardResetServices)
 	app.ExecName = strings.TrimSpace(app.ExecName)
 	app.KeychainServices = normalizeStringSlice(app.KeychainServices)
 	app.NestedSignPaths = normalizeStringSlice(app.NestedSignPaths)

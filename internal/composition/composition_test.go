@@ -8,6 +8,7 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/codexcli"
 	"goodkind.io/desktop-via-clyde/internal/codexclishim"
 	"goodkind.io/desktop-via-clyde/internal/extensions"
+	"goodkind.io/desktop-via-clyde/internal/hardreset"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/upgrade"
@@ -18,6 +19,7 @@ func TestRegisterLinksEveryCatalogCapability(t *testing.T) {
 		t.Fatalf("Register(): %v", err)
 	}
 	wantOperations := []string{
+		hardreset.AppHardResetCapability,
 		patch.AppKeychainMigrateCapability,
 		patch.AppPatchCapability,
 		operations.AppStatusCapability,
