@@ -38,6 +38,18 @@ func TestRewriteTeamScopedEntitlementsNoopWithoutLocalTeam(t *testing.T) {
 	}
 }
 
+func TestRewriteTeamScopedEntitlementsConvertsAlreadyLocalWildcard(t *testing.T) {
+	xml := `<key>com.apple.application-identifier</key><string>H3BMXM4W7H.com.openai.codex.beta</string>` +
+		`<key>keychain-access-groups</key><array><string>H3BMXM4W7H.*</string></array>`
+	got := rewriteTeamScopedEntitlements(xml, "H3BMXM4W7H")
+	if strings.Contains(got, ".*</string>") {
+		t.Fatalf("already-local wildcard should be converted to explicit:\n%s", got)
+	}
+	if !strings.Contains(got, "<string>H3BMXM4W7H.com.openai.codex.beta</string>") {
+		t.Fatalf("expected explicit app-id group:\n%s", got)
+	}
+}
+
 var disableLibraryValidationPolicy = targets.EntitlementsPolicy{
 	RequiredBooleanEntitlements: []string{
 		"com.apple.security.cs.disable-library-validation",

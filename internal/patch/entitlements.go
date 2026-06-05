@@ -60,13 +60,13 @@ func rewriteTeamScopedEntitlements(xml, localTeam string) string {
 	if localTeam == "" {
 		return xml
 	}
-	upstreamTeam, bundleID := deriveUpstreamTeamAndBundle(xml)
-	if upstreamTeam == "" || upstreamTeam == localTeam {
+	sourceTeam, bundleID := deriveUpstreamTeamAndBundle(xml)
+	if sourceTeam == "" {
 		return xml
 	}
 	result := xml
 	for _, key := range teamScopedRewriteKeys {
-		result = rewriteEntitlementKeyValues(result, key, upstreamTeam, localTeam, bundleID)
+		result = rewriteEntitlementKeyValues(result, key, sourceTeam, localTeam, bundleID)
 	}
 	return result
 }
