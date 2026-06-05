@@ -54,26 +54,6 @@ func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
 	requireTraceAction(t, trace, computeruseext.ActionSignComputerUseHelper, bundledHelperPath)
 }
 
-func TestCodexNestedSignPathsIncludeTCCActiveResourceExecutables(t *testing.T) {
-	tg, err := lookupTarget(t, "codex")
-	if err != nil {
-		t.Fatalf("Lookup(codex): %v", err)
-	}
-
-	required := []string{
-		"Contents/Resources/codex",
-		"Contents/Resources/codex_chronicle",
-		"Contents/Resources/node",
-		"Contents/Resources/node_repl",
-		"Contents/Resources/native/bare-modifier-monitor",
-	}
-	for _, want := range required {
-		if !containsString(tg.NestedSignPaths, want) {
-			t.Fatalf("codex NestedSignPaths missing %q", want)
-		}
-	}
-}
-
 func TestPatchDryRunScansComputerUseCacheHelpers(t *testing.T) {
 	tg, err := lookupTarget(t, "codex")
 	if err != nil {
@@ -195,15 +175,6 @@ func TestPatchDryRunSkipsKeychainPreviewUnlessMigrateRequested(t *testing.T) {
 	if !strings.Contains(migrateText, "would restore keychain access") {
 		t.Fatalf("dry-run output missing keychain restore preview\noutput:\n%s", migrateText)
 	}
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 func requireTraceAction(t *testing.T, trace *patch.Trace, action patch.Action, path string) {

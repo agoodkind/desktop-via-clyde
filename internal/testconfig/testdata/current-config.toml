@@ -207,30 +207,9 @@ helper_bundle_ids = [
 ]
 exec_name = "Codex (Beta)"
 keychain_services = ["Codex Safe Storage", "Codex Auth", "Codex MCP Credentials"]
-nested_sign_paths = [
-    "Contents/Resources/codex",
-    "Contents/Resources/codex_chronicle",
-    "Contents/Resources/node",
-    "Contents/Resources/node_repl",
-    "Contents/Resources/rg",
-    "Contents/Resources/native/bare-modifier-monitor",
-    "Contents/Resources/native/browser-use-peer-authorization.node",
-    "Contents/Resources/native/devicecheck.node",
-    "Contents/Resources/native/launch-services-helper",
-    "Contents/Resources/native/remote-control-device-key.node",
-    "Contents/Resources/native/sky.node",
-    "Contents/Resources/native/sparkle.node",
-    "Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Alerts).app",
-    "Contents/Frameworks/Codex Framework.framework/Helpers/Codex (GPU).app",
-    "Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Service).app",
-    "Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Renderer).app",
-    "Contents/Frameworks/Codex Framework.framework",
-    "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc",
-    "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc",
-    "Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app",
-    "Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
-    "Contents/Frameworks/Sparkle.framework",
-]
+# nested_sign_paths is intentionally omitted. discoverMachOCodeSignPaths and
+# bundleidentity.RuntimeNestedEntries auto-detect every nested code object to
+# sign, so app updates that add binaries no longer require a config change.
 
 [apps.codex.command]
 use = "codex"

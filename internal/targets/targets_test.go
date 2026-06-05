@@ -139,30 +139,7 @@ func TestNestedSignPathsPerTarget(t *testing.T) {
 	installFixture(t)
 	want := map[string][]string{
 		"cursor": nil,
-		"codex": {
-			"Contents/Resources/codex",
-			"Contents/Resources/codex_chronicle",
-			"Contents/Resources/node",
-			"Contents/Resources/node_repl",
-			"Contents/Resources/rg",
-			"Contents/Resources/native/bare-modifier-monitor",
-			"Contents/Resources/native/browser-use-peer-authorization.node",
-			"Contents/Resources/native/devicecheck.node",
-			"Contents/Resources/native/launch-services-helper",
-			"Contents/Resources/native/remote-control-device-key.node",
-			"Contents/Resources/native/sky.node",
-			"Contents/Resources/native/sparkle.node",
-			"Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Alerts).app",
-			"Contents/Frameworks/Codex Framework.framework/Helpers/Codex (GPU).app",
-			"Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Service).app",
-			"Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Renderer).app",
-			"Contents/Frameworks/Codex Framework.framework",
-			"Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc",
-			"Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc",
-			"Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app",
-			"Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
-			"Contents/Frameworks/Sparkle.framework",
-		},
+		"codex":  nil,
 		"claude": nil,
 	}
 	for _, tg := range All() {
