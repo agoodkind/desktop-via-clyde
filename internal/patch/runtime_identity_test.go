@@ -118,6 +118,66 @@ func TestNestedCodeSignPathsAddsMachOFilesAndSkipsMainRealAndPreserved(t *testin
 	}
 }
 
+func TestNestedCodeSignPathsSkipsDSYMDebugBundles(t *testing.T) {
+	appPath := filepath.Join(t.TempDir(), "App.app")
+	writeMachOFile(t, filepath.Join(appPath, "Contents/MacOS/App"))
+	realNode := filepath.Join(appPath, "Contents/Resources/app.asar.unpacked/node_modules/node-pty/build/Release/pty.node")
+	writeMachOFile(t, realNode)
+	dsymDwarf := filepath.Join(appPath, "Contents/Resources/app.asar.unpacked/node_modules/node-pty/build/Release/pty.node.dSYM/Contents/Resources/DWARF/pty.node")
+	writeMachOFile(t, dsymDwarf)
+
+	runner := NewRunner(context.Background(), true, io.Discard)
+	target := targets.Target{
+		ID:       "fake",
+		AppPath:  appPath,
+		ExecName: "App",
+	}
+	paths, err := nestedCodeSignPaths(context.Background(), runner, target)
+	if err != nil {
+		t.Fatalf("nestedCodeSignPaths: %v", err)
+	}
+	if !slices.Contains(paths, realNode) {
+		t.Fatalf("expected real .node %s to be signed; got %v", realNode, paths)
+	}
+	if slices.Contains(paths, dsymDwarf) {
+		t.Fatalf("dSYM DWARF Mach-O %s must not be signed; got %v", dsymDwarf, paths)
+	}
+}
+
+func TestNestedCodeSignPathsDiscoversTCCActiveResourceExecutables(t *testing.T) {
+	// TCC-active resource executables must always be signed. They are no longer
+	// hardcoded in config, so discovery must find them by Mach-O magic.
+	appPath := filepath.Join(t.TempDir(), "Codex.app")
+	writeMachOFile(t, filepath.Join(appPath, "Contents/MacOS/Codex (Beta)"))
+	required := []string{
+		"Contents/Resources/codex",
+		"Contents/Resources/codex_chronicle",
+		"Contents/Resources/node",
+		"Contents/Resources/node_repl",
+		"Contents/Resources/native/bare-modifier-monitor",
+	}
+	for _, rel := range required {
+		writeMachOFile(t, filepath.Join(appPath, filepath.FromSlash(rel)))
+	}
+
+	runner := NewRunner(context.Background(), true, io.Discard)
+	target := targets.Target{
+		ID:       "codex",
+		AppPath:  appPath,
+		ExecName: "Codex (Beta)",
+	}
+	signPaths, err := nestedCodeSignPaths(context.Background(), runner, target)
+	if err != nil {
+		t.Fatalf("nestedCodeSignPaths: %v", err)
+	}
+	for _, rel := range required {
+		want := filepath.Join(appPath, filepath.FromSlash(rel))
+		if !slices.Contains(signPaths, want) {
+			t.Fatalf("discovery missed TCC-active executable %q in %v", rel, signPaths)
+		}
+	}
+}
+
 func TestIsMachOFileRecognizesThinAndUniversalMagic(t *testing.T) {
 	for name, data := range map[string][]byte{
 		"thin64":    {0xcf, 0xfa, 0xed, 0xfe},
