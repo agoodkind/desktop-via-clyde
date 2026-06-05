@@ -242,6 +242,7 @@ proxy_port = 48727
 ca_certificate = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
 no_proxy = "localhost,127.0.0.1,::1,[::1]"
 launch_working_directory = "/Users/agoodkind"
+ignore_dry_run_signal = "SIGKILL"
 
 [[apps.codex.launch_policy.environment]]
 action = "set"
