@@ -307,6 +307,9 @@ func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Op
 	if err := stepRestorePreservedNestedCode(ctx, r, *t, preservedRoot); err != nil {
 		return logPatchError(ctx, "patch.restore_preserved_nested_code_failed", fmt.Errorf("restore preserved nested code: %w", err))
 	}
+	if err := stepEmbedProvisioningProfile(ctx, r, *t); err != nil {
+		return logPatchError(ctx, "patch.embed_provisioning_profile_failed", fmt.Errorf("embed provisioning profile: %w", err))
+	}
 	if err := stepResign(ctx, r, *t, entFile); err != nil {
 		return logPatchError(ctx, "patch.resign_failed", fmt.Errorf("re-sign: %w", err))
 	}
@@ -387,6 +390,24 @@ func stepMoveToReal(ctx context.Context, r *Runner, t targets.Target) error {
 	}
 	if err := os.Rename(main, realPath); err != nil {
 		return logPatchError(ctx, "patch.rename_real_failed", fmt.Errorf("rename %s -> %s: %w", main, realPath, err))
+	}
+	return nil
+}
+
+// stepEmbedProvisioningProfile replaces Contents/embedded.provisionprofile with
+// the target's configured profile before re-signing. The original app ships an
+// upstream-team profile that does not match the local signing team, so a locally
+// generated profile must take its place for team-scoped entitlements to validate.
+func stepEmbedProvisioningProfile(ctx context.Context, r *Runner, t targets.Target) error {
+	patchLog.DebugContext(ctx, "patch.embed_provisioning_profile.boundary", "target", t.ID)
+	if t.ProvisioningProfile == "" {
+		return nil
+	}
+	source := filepath.Clean(t.ProvisioningProfile)
+	destination := filepath.Join(t.AppPath, "Contents", "embedded.provisionprofile")
+	notef(r, fmt.Sprintf("target=%s embed provisioning profile %s -> %s", t.ID, source, destination))
+	if err := r.Run(ctx, "/bin/cp", "-f", source, destination); err != nil {
+		return logPatchError(ctx, "patch.embed_provisioning_profile_copy_failed", fmt.Errorf("copy provisioning profile %s to %s: %w", source, destination, err))
 	}
 	return nil
 }

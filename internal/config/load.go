@@ -35,6 +35,7 @@ type decodedAppSpec struct {
 	KeychainServices         []string                      `toml:"keychain_services"`
 	NestedSignPaths          []string                      `toml:"nested_sign_paths"`
 	PreservedNestedCodePaths []string                      `toml:"preserved_nested_code_paths"`
+	ProvisioningProfile      string                        `toml:"provisioning_profile"`
 	Entitlements             spec.EntitlementsSpec         `toml:"entitlements"`
 	Updater                  spec.UpdaterSpec              `toml:"updater"`
 	LaunchPolicy             spec.LaunchPolicySpec         `toml:"launch_policy"`
@@ -81,6 +82,7 @@ func convertDecodedConfig(decoded decodedConfig) spec.Config {
 			KeychainServices:         app.KeychainServices,
 			NestedSignPaths:          app.NestedSignPaths,
 			PreservedNestedCodePaths: app.PreservedNestedCodePaths,
+			ProvisioningProfile:      app.ProvisioningProfile,
 			Entitlements:             app.Entitlements,
 			Updater:                  app.Updater,
 			LaunchPolicy:             app.LaunchPolicy,
@@ -148,6 +150,7 @@ func normalizeAndValidateApp(id string, app *spec.AppSpec) error {
 	}
 
 	app.AppPath = cleanExpandedPath(strings.TrimSpace(app.AppPath))
+	app.ProvisioningProfile = cleanExpandedPath(strings.TrimSpace(app.ProvisioningProfile))
 	app.BundleID = strings.TrimSpace(app.BundleID)
 	app.BundleIDAliases = normalizeStringSlice(app.BundleIDAliases)
 	app.HelperBundleIDs = normalizeStringSlice(app.HelperBundleIDs)

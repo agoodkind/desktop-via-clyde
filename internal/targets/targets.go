@@ -107,6 +107,7 @@ type Target struct {
 	KeychainServices         []string
 	NestedSignPaths          []string
 	PreservedNestedCodePaths []string
+	ProvisioningProfile      string
 	Entitlements             *EntitlementsPolicy
 	Updater                  Updater
 	Extensions               extensions.Target
@@ -176,6 +177,7 @@ func buildTarget(app spec.AppSpec) Target {
 		KeychainServices:         cloneStrings(app.KeychainServices),
 		NestedSignPaths:          cloneStrings(app.NestedSignPaths),
 		PreservedNestedCodePaths: cloneStrings(app.PreservedNestedCodePaths),
+		ProvisioningProfile:      app.ProvisioningProfile,
 		Entitlements:             buildEntitlements(app.Entitlements),
 		Updater:                  buildUpdater(app.Updater),
 		Extensions:               extensions.BuildTarget(app.Extensions),

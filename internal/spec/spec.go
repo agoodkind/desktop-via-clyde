@@ -107,6 +107,7 @@ type AppSpec struct {
 	KeychainServices         []string                 `toml:"keychain_services"`
 	NestedSignPaths          []string                 `toml:"nested_sign_paths"`
 	PreservedNestedCodePaths []string                 `toml:"preserved_nested_code_paths"`
+	ProvisioningProfile      string                   `toml:"provisioning_profile"`
 	Entitlements             EntitlementsSpec         `toml:"entitlements"`
 	Updater                  UpdaterSpec              `toml:"updater"`
 	LaunchPolicy             LaunchPolicySpec         `toml:"launch_policy"`
