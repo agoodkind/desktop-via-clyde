@@ -126,6 +126,7 @@ func newRootCmdWithRunners(
 		traceHeaderWritten = true
 		_, _ = io.WriteString(cmd.OutOrStdout(), header+"\n")
 	}
+	root.AddCommand(newProvisionProfileCmd(out))
 	return root
 }
 
