@@ -7,6 +7,37 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
 
+func TestRewriteTeamScopedEntitlementsConvertsWildcardToExplicit(t *testing.T) {
+	xml := `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>` +
+		`<key>com.apple.application-identifier</key><string>2DC432GLL2.com.openai.codex.beta</string>` +
+		`<key>com.apple.developer.team-identifier</key><string>2DC432GLL2</string>` +
+		`<key>keychain-access-groups</key><array><string>2DC432GLL2.*</string><string>2DC432GLL2.com.openai.shared</string></array>` +
+		`</dict></plist>`
+	got := rewriteTeamScopedEntitlements(xml, "H3BMXM4W7H")
+	for _, want := range []string{
+		"<string>H3BMXM4W7H.com.openai.codex.beta</string>",
+		"<string>H3BMXM4W7H</string>",
+		"<string>H3BMXM4W7H.com.openai.shared</string>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rewrite missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "2DC432GLL2") {
+		t.Fatalf("upstream team should be absent after rewrite:\n%s", got)
+	}
+	if strings.Contains(got, ".*</string>") {
+		t.Fatalf("wildcard keychain group should be explicit:\n%s", got)
+	}
+}
+
+func TestRewriteTeamScopedEntitlementsNoopWithoutLocalTeam(t *testing.T) {
+	xml := `<key>com.apple.application-identifier</key><string>2DC432GLL2.com.openai.codex.beta</string>`
+	if got := rewriteTeamScopedEntitlements(xml, ""); got != xml {
+		t.Fatalf("expected no-op without local team, got:\n%s", got)
+	}
+}
+
 var disableLibraryValidationPolicy = targets.EntitlementsPolicy{
 	RequiredBooleanEntitlements: []string{
 		"com.apple.security.cs.disable-library-validation",

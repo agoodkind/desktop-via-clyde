@@ -45,6 +45,17 @@ const (
 
 var issuerIDPattern = regexp.MustCompile("issuer ID `([0-9a-fA-F-]+)`")
 
+// appleNamePattern matches characters Apple rejects in App ID and profile names,
+// which allow only alphanumeric characters and spaces.
+var appleNamePattern = regexp.MustCompile(`[^A-Za-z0-9 ]+`)
+
+// sanitizeAppleName converts an arbitrary label into an Apple-valid name by
+// replacing every disallowed run with a single space.
+func sanitizeAppleName(name string) string {
+	cleaned := appleNamePattern.ReplaceAllString(name, " ")
+	return strings.Join(strings.Fields(cleaned), " ")
+}
+
 // Credentials identifies an App Store Connect API key and its issuer.
 type Credentials struct {
 	KeyID    string
@@ -200,7 +211,8 @@ func ProvisionDeveloperIDProfile(ctx context.Context, bundleIdentifier, profileN
 	if err != nil {
 		return err
 	}
-	bundleID, err := client.EnsureBundleID(ctx, bundleIdentifier, profileName)
+	displayName := sanitizeAppleName(profileName)
+	bundleID, err := client.EnsureBundleID(ctx, bundleIdentifier, displayName)
 	if err != nil {
 		return err
 	}
@@ -208,7 +220,7 @@ func ProvisionDeveloperIDProfile(ctx context.Context, bundleIdentifier, profileN
 	if err != nil {
 		return err
 	}
-	profile, err := client.CreateDirectProfile(ctx, bundleID.ID, certificate.ID, profileName)
+	profile, err := client.CreateDirectProfile(ctx, bundleID.ID, certificate.ID, displayName)
 	if err != nil {
 		return err
 	}

@@ -45,16 +45,8 @@ func TestEntitlementsPolicyPerTarget(t *testing.T) {
 	installFixture(t)
 	wantStrip := map[string][]string{
 		"cursor": {},
-		"codex": {
-			"com.apple.application-identifier",
-			"com.apple.developer.team-identifier",
-			"keychain-access-groups",
-		},
-		"claude": {
-			"com.apple.application-identifier",
-			"com.apple.developer.team-identifier",
-			"keychain-access-groups",
-		},
+		"codex":  {},
+		"claude": {},
 	}
 	wantRequired := map[string][]string{
 		"cursor": {

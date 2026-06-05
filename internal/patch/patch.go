@@ -400,11 +400,17 @@ func stepMoveToReal(ctx context.Context, r *Runner, t targets.Target) error {
 // generated profile must take its place for team-scoped entitlements to validate.
 func stepEmbedProvisioningProfile(ctx context.Context, r *Runner, t targets.Target) error {
 	patchLog.DebugContext(ctx, "patch.embed_provisioning_profile.boundary", "target", t.ID)
+	destination := filepath.Join(t.AppPath, "Contents", "embedded.provisionprofile")
 	if t.ProvisioningProfile == "" {
+		// No local profile is configured. Remove any stale upstream-team profile so
+		// the Developer ID signature self-asserts explicit team-prefixed entitlements.
+		notef(r, fmt.Sprintf("target=%s remove stale provisioning profile %s", t.ID, destination))
+		if err := r.Run(ctx, "/bin/rm", "-f", destination); err != nil {
+			return logPatchError(ctx, "patch.remove_provisioning_profile_failed", fmt.Errorf("remove stale provisioning profile %s: %w", destination, err))
+		}
 		return nil
 	}
 	source := filepath.Clean(t.ProvisioningProfile)
-	destination := filepath.Join(t.AppPath, "Contents", "embedded.provisionprofile")
 	notef(r, fmt.Sprintf("target=%s embed provisioning profile %s -> %s", t.ID, source, destination))
 	if err := r.Run(ctx, "/bin/cp", "-f", source, destination); err != nil {
 		return logPatchError(ctx, "patch.embed_provisioning_profile_copy_failed", fmt.Errorf("copy provisioning profile %s to %s: %w", source, destination, err))

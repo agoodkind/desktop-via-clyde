@@ -216,11 +216,7 @@ use = "codex"
 short = "Operate on /Applications/Codex.app"
 
 [apps.codex.entitlements]
-strip = [
-    "com.apple.application-identifier",
-    "com.apple.developer.team-identifier",
-    "keychain-access-groups",
-]
+strip = []
 required_boolean = [
     "com.apple.security.automation.apple-events",
     "com.apple.security.cs.disable-library-validation",
@@ -457,11 +453,7 @@ use = "claude"
 short = "Operate on /Applications/Claude.app"
 
 [apps.claude.entitlements]
-strip = [
-    "com.apple.application-identifier",
-    "com.apple.developer.team-identifier",
-    "keychain-access-groups",
-]
+strip = []
 required_boolean = ["com.apple.security.cs.disable-library-validation"]
 
 [apps.claude.updater]

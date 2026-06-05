@@ -39,16 +39,20 @@ func TestStepEmbedProvisioningProfileReplacesEmbeddedProfile(t *testing.T) {
 	}
 }
 
-func TestStepEmbedProvisioningProfileSkipsWhenUnset(t *testing.T) {
+func TestStepEmbedProvisioningProfileRemovesStaleWhenUnset(t *testing.T) {
 	appPath := filepath.Join(t.TempDir(), "App.app")
-	if err := os.MkdirAll(filepath.Join(appPath, "Contents"), 0o755); err != nil {
+	embedded := filepath.Join(appPath, "Contents", "embedded.provisionprofile")
+	if err := os.MkdirAll(filepath.Dir(embedded), 0o755); err != nil {
 		t.Fatalf("mkdir Contents: %v", err)
+	}
+	if err := os.WriteFile(embedded, []byte("STALE-UPSTREAM-PROFILE"), 0o644); err != nil {
+		t.Fatalf("write stale profile: %v", err)
 	}
 	runner := NewRunner(context.Background(), false, io.Discard)
 	if err := stepEmbedProvisioningProfile(context.Background(), runner, targets.Target{ID: "fake", AppPath: appPath}); err != nil {
 		t.Fatalf("stepEmbedProvisioningProfile: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(appPath, "Contents", "embedded.provisionprofile")); !os.IsNotExist(err) {
-		t.Fatalf("expected no embedded profile to be written when unset, stat err=%v", err)
+	if _, err := os.Stat(embedded); !os.IsNotExist(err) {
+		t.Fatalf("expected stale embedded profile to be removed when unset, stat err=%v", err)
 	}
 }

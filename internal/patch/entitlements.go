@@ -40,7 +40,81 @@ func augmentEntitlements(in []byte, policy targets.EntitlementsPolicy) ([]byte, 
 		s = updated
 	}
 
+	s = rewriteTeamScopedEntitlements(s, paths.SignTeamID())
 	return []byte(s), nil
+}
+
+var entitlementStringRe = regexp.MustCompile(`<string>([^<]*)</string>`)
+
+var teamScopedRewriteKeys = []string{
+	"com.apple.application-identifier",
+	"com.apple.developer.team-identifier",
+	"keychain-access-groups",
+}
+
+// rewriteTeamScopedEntitlements rewrites team-scoped entitlement values from the
+// app's upstream team to localTeam. Wildcard keychain groups become explicit, so a
+// Developer ID signature can self-assert them without a provisioning profile.
+func rewriteTeamScopedEntitlements(xml, localTeam string) string {
+	localTeam = strings.TrimSpace(localTeam)
+	if localTeam == "" {
+		return xml
+	}
+	upstreamTeam, bundleID := deriveUpstreamTeamAndBundle(xml)
+	if upstreamTeam == "" || upstreamTeam == localTeam {
+		return xml
+	}
+	result := xml
+	for _, key := range teamScopedRewriteKeys {
+		result = rewriteEntitlementKeyValues(result, key, upstreamTeam, localTeam, bundleID)
+	}
+	return result
+}
+
+func deriveUpstreamTeamAndBundle(xml string) (string, string) {
+	re := regexp.MustCompile(`<key>\s*com\.apple\.application-identifier\s*</key>\s*<string>([^<]*)</string>`)
+	matches := re.FindStringSubmatch(xml)
+	if len(matches) != 2 {
+		return "", ""
+	}
+	team, bundle, found := strings.Cut(strings.TrimSpace(matches[1]), ".")
+	if !found {
+		return "", ""
+	}
+	return team, bundle
+}
+
+func rewriteEntitlementKeyValues(xml, key, upstreamTeam, localTeam, bundleID string) string {
+	quotedKey := regexp.QuoteMeta(key)
+	rewriteBlock := func(block string) string {
+		return entitlementStringRe.ReplaceAllStringFunc(block, func(element string) string {
+			matches := entitlementStringRe.FindStringSubmatch(element)
+			if len(matches) != 2 {
+				return element
+			}
+			return "<string>" + rewriteTeamScopedValue(matches[1], upstreamTeam, localTeam, bundleID) + "</string>"
+		})
+	}
+	scalarRe := regexp.MustCompile(`<key>\s*` + quotedKey + `\s*</key>\s*<string>[^<]*</string>`)
+	result := scalarRe.ReplaceAllStringFunc(xml, rewriteBlock)
+	arrayRe := regexp.MustCompile(`(?s)<key>\s*` + quotedKey + `\s*</key>\s*<array>.*?</array>`)
+	return arrayRe.ReplaceAllStringFunc(result, rewriteBlock)
+}
+
+func rewriteTeamScopedValue(value, upstreamTeam, localTeam, bundleID string) string {
+	value = strings.TrimSpace(value)
+	if value == upstreamTeam {
+		return localTeam
+	}
+	prefix := upstreamTeam + "."
+	if !strings.HasPrefix(value, prefix) {
+		return value
+	}
+	rest := strings.TrimPrefix(value, prefix)
+	if rest == "*" {
+		return localTeam + "." + bundleID
+	}
+	return localTeam + "." + rest
 }
 
 func ensureBooleanEntitlement(s string, key string) (string, error) {
