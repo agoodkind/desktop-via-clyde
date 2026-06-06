@@ -18,45 +18,61 @@ import (
 	"goodkind.io/gklog/correlation"
 )
 
-func TestRootHelpListsTargetCommands(t *testing.T) {
+func TestRootHelpListsVerbCommands(t *testing.T) {
 	output, err := executeRoot(t, "--help")
 	if err != nil {
 		t.Fatalf("executeRoot(--help): %v", err)
 	}
 
-	required := []string{"patch", "upgrade", "hard-reset", "cursor", "codex", "claude", "codex-cli", "status"}
+	required := []string{"patch", "upgrade", "hard-reset", "keychain-migrate", "status", "provision"}
 	for _, want := range required {
-		if !strings.Contains(output, want) {
-			t.Fatalf("root help missing %q\noutput:\n%s", want, output)
+		if !strings.Contains(output, "\n  "+want+" ") {
+			t.Fatalf("root help missing verb %q\noutput:\n%s", want, output)
 		}
 	}
 
-	forbidden := []string{"unpatch", "keychain-migrate", strings.Join([]string{"mitm", "hook"}, "-")}
+	forbidden := []string{"cursor", "codex", "claude", "codex-cli"}
 	for _, want := range forbidden {
 		if strings.Contains(output, "\n  "+want+" ") {
-			t.Fatalf("root help unexpectedly lists %q\noutput:\n%s", want, output)
+			t.Fatalf("root help unexpectedly lists noun %q at top level\noutput:\n%s", want, output)
 		}
 	}
 }
 
-func TestTargetHelpListsOperations(t *testing.T) {
-	output, err := executeRoot(t, "codex", "--help")
+func TestVerbHelpListsTargetNouns(t *testing.T) {
+	patchOutput, err := executeRoot(t, "patch", "--help")
 	if err != nil {
-		t.Fatalf("executeRoot(codex --help): %v", err)
+		t.Fatalf("executeRoot(patch --help): %v", err)
+	}
+	for _, want := range []string{"all", "cursor", "codex", "claude"} {
+		if !strings.Contains(patchOutput, "\n  "+want+" ") {
+			t.Fatalf("patch help missing noun %q\noutput:\n%s", want, patchOutput)
+		}
 	}
 
-	required := []string{"patch", "upgrade", "keychain-migrate", "hard-reset", "status"}
-	for _, want := range required {
-		if !strings.Contains(output, want) {
-			t.Fatalf("target help missing %q\noutput:\n%s", want, output)
+	upgradeOutput, err := executeRoot(t, "upgrade", "--help")
+	if err != nil {
+		t.Fatalf("executeRoot(upgrade --help): %v", err)
+	}
+	if !strings.Contains(upgradeOutput, "\n  codex-cli ") {
+		t.Fatalf("upgrade help missing codex-cli noun\noutput:\n%s", upgradeOutput)
+	}
+
+	statusOutput, err := executeRoot(t, "status", "--help")
+	if err != nil {
+		t.Fatalf("executeRoot(status --help): %v", err)
+	}
+	for _, want := range []string{"all", "codex", "codex-cli"} {
+		if !strings.Contains(statusOutput, "\n  "+want+" ") {
+			t.Fatalf("status help missing noun %q\noutput:\n%s", want, statusOutput)
 		}
 	}
 }
 
 func TestCursorUpgradeHelpShowsDevChannelDefault(t *testing.T) {
-	output, err := executeRoot(t, "cursor", "upgrade", "--help")
+	output, err := executeRoot(t, "upgrade", "cursor", "--help")
 	if err != nil {
-		t.Fatalf("executeRoot(cursor upgrade --help): %v", err)
+		t.Fatalf("executeRoot(upgrade cursor --help): %v", err)
 	}
 	if !strings.Contains(output, "--channel string") {
 		t.Fatalf("cursor upgrade help missing --channel\noutput:\n%s", output)
@@ -67,9 +83,9 @@ func TestCursorUpgradeHelpShowsDevChannelDefault(t *testing.T) {
 }
 
 func TestCodexUpgradeHelpShowsBetaChannelDefault(t *testing.T) {
-	output, err := executeRoot(t, "codex", "upgrade", "--help")
+	output, err := executeRoot(t, "upgrade", "codex", "--help")
 	if err != nil {
-		t.Fatalf("executeRoot(codex upgrade --help): %v", err)
+		t.Fatalf("executeRoot(upgrade codex --help): %v", err)
 	}
 	if !strings.Contains(output, "--channel string") {
 		t.Fatalf("codex upgrade help missing --channel\noutput:\n%s", output)
@@ -80,9 +96,9 @@ func TestCodexUpgradeHelpShowsBetaChannelDefault(t *testing.T) {
 }
 
 func TestClaudeUpgradeHelpOmitsChannelFlag(t *testing.T) {
-	output, err := executeRoot(t, "claude", "upgrade", "--help")
+	output, err := executeRoot(t, "upgrade", "claude", "--help")
 	if err != nil {
-		t.Fatalf("executeRoot(claude upgrade --help): %v", err)
+		t.Fatalf("executeRoot(upgrade claude --help): %v", err)
 	}
 	if strings.Contains(output, "--channel") {
 		t.Fatalf("claude upgrade help unexpectedly lists --channel\noutput:\n%s", output)
@@ -112,18 +128,23 @@ func TestRootHelpUsesResponseWrapper(t *testing.T) {
 	if !strings.HasPrefix(output, "trace_id=") {
 		t.Fatalf("root help missing response header\noutput:\n%s", output)
 	}
+	if count := strings.Count(output, "trace_id="); count != 1 {
+		t.Fatalf("root help trace header count = %d, want 1\noutput:\n%s", count, output)
+	}
 	if !strings.Contains(output, "--output-format string") {
 		t.Fatalf("root help missing inherited output format flag\noutput:\n%s", output)
 	}
 }
 
-func TestClaudeHelpDoesNotListBundledCLITeeEntrypoint(t *testing.T) {
-	output, err := executeRoot(t, "claude", "--help")
-	if err != nil {
-		t.Fatalf("executeRoot(claude --help): %v", err)
-	}
-	if strings.Contains(output, "bundled-cli-tee") {
-		t.Fatalf("claude help unexpectedly lists bundled-cli-tee\noutput:\n%s", output)
+func TestVerbHelpEmitsSingleTraceHeader(t *testing.T) {
+	for _, args := range [][]string{{"patch", "--help"}, {"status", "--help"}, {"upgrade", "codex", "--help"}} {
+		output, err := executeRoot(t, args...)
+		if err != nil {
+			t.Fatalf("executeRoot(%v): %v", args, err)
+		}
+		if count := strings.Count(output, "trace_id="); count != 1 {
+			t.Fatalf("executeRoot(%v) trace header count = %d, want 1\noutput:\n%s", args, count, output)
+		}
 	}
 }
 
@@ -145,16 +166,20 @@ func TestOperationHelpCommandsSucceed(t *testing.T) {
 		{"upgrade", "all", "--help"},
 		{"hard-reset", "--help"},
 		{"hard-reset", "all", "--help"},
-		{"cursor", "upgrade", "--help"},
-		{"codex", "patch", "--help"},
-		{"codex", "upgrade", "--help"},
-		{"codex", "keychain-migrate", "--help"},
-		{"codex", "hard-reset", "--help"},
-		{"codex", "status", "--help"},
-		{"claude", "upgrade", "--help"},
-		{"codex-cli", "upgrade", "--help"},
-		{"codex-cli", "install", "--help"},
-		{"codex-cli", "status", "--help"},
+		{"keychain-migrate", "--help"},
+		{"status", "--help"},
+		{"status", "all", "--help"},
+		{"upgrade", "cursor", "--help"},
+		{"patch", "codex", "--help"},
+		{"upgrade", "codex", "--help"},
+		{"keychain-migrate", "codex", "--help"},
+		{"hard-reset", "codex", "--help"},
+		{"status", "codex", "--help"},
+		{"upgrade", "claude", "--help"},
+		{"upgrade", "codex-cli", "--help"},
+		{"status", "codex-cli", "--help"},
+		{"provision", "--help"},
+		{"provision", "profile", "--help"},
 	} {
 		if _, err := executeRoot(t, args...); err != nil {
 			t.Fatalf("executeRoot(%v): %v", args, err)
@@ -162,34 +187,47 @@ func TestOperationHelpCommandsSucceed(t *testing.T) {
 	}
 }
 
-func TestCodexCLIHelpListsUpgradeWithInstallAlias(t *testing.T) {
-	output, err := executeRoot(t, "codex-cli", "--help")
+func TestUpgradeAndStatusVerbHelpListCodexCLINoun(t *testing.T) {
+	upgradeOutput, err := executeRoot(t, "upgrade", "--help")
 	if err != nil {
-		t.Fatalf("executeRoot(codex-cli --help): %v", err)
+		t.Fatalf("executeRoot(upgrade --help): %v", err)
 	}
-	if !strings.Contains(output, "upgrade") {
-		t.Fatalf("codex-cli help missing upgrade verb\noutput:\n%s", output)
+	if !strings.Contains(upgradeOutput, "\n  codex-cli ") {
+		t.Fatalf("upgrade help missing codex-cli noun\noutput:\n%s", upgradeOutput)
 	}
-	if !strings.Contains(output, "status") {
-		t.Fatalf("codex-cli help missing status verb\noutput:\n%s", output)
+	statusOutput, err := executeRoot(t, "status", "--help")
+	if err != nil {
+		t.Fatalf("executeRoot(status --help): %v", err)
+	}
+	if !strings.Contains(statusOutput, "\n  codex-cli ") {
+		t.Fatalf("status help missing codex-cli noun\noutput:\n%s", statusOutput)
 	}
 }
 
 func TestCodexCLIUpgradeHelpAdvertisesLocalFastDefault(t *testing.T) {
-	output, err := executeRoot(t, "codex-cli", "upgrade", "--help")
+	output, err := executeRoot(t, "upgrade", "codex-cli", "--help")
 	if err != nil {
-		t.Fatalf("executeRoot(codex-cli upgrade --help): %v", err)
+		t.Fatalf("executeRoot(upgrade codex-cli --help): %v", err)
 	}
 	if !strings.Contains(output, "--build-mode") {
-		t.Fatalf("codex-cli upgrade help missing --build-mode flag\noutput:\n%s", output)
+		t.Fatalf("upgrade codex-cli help missing --build-mode flag\noutput:\n%s", output)
 	}
 	if !strings.Contains(output, "local-fast") {
-		t.Fatalf("codex-cli upgrade help should advertise local-fast as default\noutput:\n%s", output)
+		t.Fatalf("upgrade codex-cli help should advertise local-fast as default\noutput:\n%s", output)
 	}
 }
 
-func TestVerbFirstCommandsReturnError(t *testing.T) {
-	for _, args := range [][]string{{"patch", "codex"}, {"upgrade", "codex"}, {"keychain-migrate", "codex"}} {
+func TestNounFirstCommandsReturnError(t *testing.T) {
+	for _, args := range [][]string{
+		{"codex", "patch"},
+		{"codex", "upgrade"},
+		{"codex", "keychain-migrate"},
+		{"codex", "status"},
+		{"cursor", "patch"},
+		{"codex-cli", "upgrade"},
+		{"codex-cli", "install"},
+		{"codex-cli", "status"},
+	} {
 		output, err := executeRoot(t, args...)
 		if err == nil {
 			t.Fatalf("executeRoot(%v) unexpectedly succeeded\noutput:\n%s", args, output)
@@ -263,9 +301,9 @@ func TestRootHelpRendersConfiguredFakeCommands(t *testing.T) {
 	})
 	t.Cleanup(func() { config.SetCurrent(nil) })
 
-	output, err := executeRootNoFixture("beta-tool", "see", "--help")
+	output, err := executeRootNoFixture("inspect", "beta-tool", "--help")
 	if err != nil {
-		t.Fatalf("executeRootNoFixture(beta-tool see --help): %v", err)
+		t.Fatalf("executeRootNoFixture(inspect beta-tool --help): %v", err)
 	}
 	assertContainsOutput(t, output, "beta-tool")
 	assertContainsOutput(t, output, "inspect")
@@ -274,10 +312,8 @@ func TestRootHelpRendersConfiguredFakeCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeRootNoFixture(--help): %v", err)
 	}
-	assertContainsOutput(t, rootOutput, "patch")
-	assertContainsOutput(t, rootOutput, "upgrade")
-	assertContainsOutput(t, rootOutput, "alpha-app")
-	assertContainsOutput(t, rootOutput, "beta-tool")
+	assertContainsOutput(t, rootOutput, "\n  check ")
+	assertContainsOutput(t, rootOutput, "\n  inspect ")
 }
 
 func TestFakeOperationHelpShowsConfiguredFlag(t *testing.T) {
@@ -313,9 +349,9 @@ func TestFakeOperationHelpShowsConfiguredFlag(t *testing.T) {
 	})
 	t.Cleanup(func() { config.SetCurrent(nil) })
 
-	output, err := executeRootNoFixture("alpha-app", "check", "--help")
+	output, err := executeRootNoFixture("check", "alpha-app", "--help")
 	if err != nil {
-		t.Fatalf("executeRootNoFixture(alpha-app check --help): %v", err)
+		t.Fatalf("executeRootNoFixture(check alpha-app --help): %v", err)
 	}
 	assertContainsOutput(t, output, "--scope string")
 }
@@ -359,7 +395,7 @@ func TestFakeAppOperationDispatchUsesConfiguredCapabilityAndFlags(t *testing.T) 
 	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
 		got = req
 		return nil
-	}, "aa", "inspect", "--app-path", "/tmp/Alpha.app", "--scope", "full", "--dry-run")
+	}, "check", "aa", "--app-path", "/tmp/Alpha.app", "--scope", "full", "--dry-run")
 	if err != nil {
 		t.Fatalf("executeRootWithRunner(fake app dispatch): %v", err)
 	}
@@ -409,7 +445,7 @@ func TestFakeCLIOperationDispatchUsesConfiguredAliasAndFlags(t *testing.T) {
 	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
 		got = req
 		return nil
-	}, "beta-tool", "see", "--visible-mode", "detail")
+	}, "inspect", "beta-tool", "--visible-mode", "detail")
 	if err != nil {
 		t.Fatalf("executeRootWithRunner(fake CLI dispatch): %v", err)
 	}
@@ -437,9 +473,9 @@ func TestAppPatchDispatchDefaultsMigrateKeychainFalse(t *testing.T) {
 	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
 		got = req
 		return nil
-	}, "codex", "patch", "--dry-run")
+	}, "patch", "codex", "--dry-run")
 	if err != nil {
-		t.Fatalf("executeRootWithRunner(codex patch): %v", err)
+		t.Fatalf("executeRootWithRunner(patch codex): %v", err)
 	}
 	if got.Capability != "app.patch" {
 		t.Fatalf("capability = %q, want app.patch", got.Capability)
@@ -459,9 +495,9 @@ func TestAppHardResetDispatchReadsDryRunFlag(t *testing.T) {
 	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
 		got = req
 		return nil
-	}, "codex", "hard-reset", "--dry-run")
+	}, "hard-reset", "codex", "--dry-run")
 	if err != nil {
-		t.Fatalf("executeRootWithRunner(codex hard-reset): %v", err)
+		t.Fatalf("executeRootWithRunner(hard-reset codex): %v", err)
 	}
 	if got.Capability != "app.hard-reset" {
 		t.Fatalf("capability = %q, want app.hard-reset", got.Capability)
@@ -481,9 +517,9 @@ func TestAppPatchDispatchReadsMigrateKeychainFlag(t *testing.T) {
 	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
 		got = req
 		return nil
-	}, "codex", "patch", "--dry-run", "--migrate-keychain")
+	}, "patch", "codex", "--dry-run", "--migrate-keychain")
 	if err != nil {
-		t.Fatalf("executeRootWithRunner(codex patch --migrate-keychain): %v", err)
+		t.Fatalf("executeRootWithRunner(patch codex --migrate-keychain): %v", err)
 	}
 	if !got.Flags.Bool("migrate-keychain") {
 		t.Fatal("migrate-keychain = false, want true")
@@ -497,9 +533,9 @@ func TestAppUpgradeDispatchDefaultsMigrateKeychainFalse(t *testing.T) {
 	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
 		got = req
 		return nil
-	}, "codex", "upgrade", "--dry-run")
+	}, "upgrade", "codex", "--dry-run")
 	if err != nil {
-		t.Fatalf("executeRootWithRunner(codex upgrade): %v", err)
+		t.Fatalf("executeRootWithRunner(upgrade codex): %v", err)
 	}
 	if got.Capability != "app.upgrade" {
 		t.Fatalf("capability = %q, want app.upgrade", got.Capability)
@@ -519,9 +555,9 @@ func TestAppUpgradeDispatchReadsMigrateKeychainFlag(t *testing.T) {
 	_, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
 		got = req
 		return nil
-	}, "codex", "upgrade", "--dry-run", "--migrate-keychain")
+	}, "upgrade", "codex", "--dry-run", "--migrate-keychain")
 	if err != nil {
-		t.Fatalf("executeRootWithRunner(codex upgrade --migrate-keychain): %v", err)
+		t.Fatalf("executeRootWithRunner(upgrade codex --migrate-keychain): %v", err)
 	}
 	if !got.Flags.Bool("migrate-keychain") {
 		t.Fatal("migrate-keychain = false, want true")
@@ -606,19 +642,104 @@ func TestHardResetAllDryRunDispatchesBatchRequest(t *testing.T) {
 	}
 }
 
-func TestRootStatusFiltersTargetArgument(t *testing.T) {
-	output, err := executeRoot(t, "status", "codex")
+func TestStatusAllRendersAggregateReport(t *testing.T) {
+	for _, args := range [][]string{{"status"}, {"status", "all"}} {
+		output, err := executeRoot(t, args...)
+		if err != nil {
+			t.Fatalf("executeRoot(%v): %v\noutput:\n%s", args, err, output)
+		}
+		if !strings.Contains(output, "state file:") {
+			t.Fatalf("executeRoot(%v) missing aggregate state file line\noutput:\n%s", args, output)
+		}
+		for _, want := range []string{"cursor", "codex", "claude"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("executeRoot(%v) aggregate report missing %q\noutput:\n%s", args, want, output)
+			}
+		}
+		if count := strings.Count(output, "trace_id="); count != 1 {
+			t.Fatalf("executeRoot(%v) trace header count = %d, want 1\noutput:\n%s", args, count, output)
+		}
+	}
+}
+
+func TestStatusAggregateEmitsSingleTraceHeaderViaExecuteContext(t *testing.T) {
+	for _, args := range [][]string{{"status"}, {"status", "all"}} {
+		installFixture(t)
+		var out bytes.Buffer
+		base, _ := correlation.Ensure(context.Background(), "")
+		root := newRootCmdWithRunners(base, &out, &out, operations.Run, func(_ context.Context, _ batchops.Request) error { return nil })
+		root.SetArgs(args)
+		if err := root.ExecuteContext(root.Context()); err != nil {
+			t.Fatalf("ExecuteContext(%v): %v\noutput:\n%s", args, err, out.String())
+		}
+		output := out.String()
+		if count := strings.Count(output, "trace_id="); count != 1 {
+			t.Fatalf("ExecuteContext(%v) trace header count = %d, want 1\noutput:\n%s", args, count, output)
+		}
+	}
+}
+
+func TestStatusTargetDispatchesPerTargetOperation(t *testing.T) {
+	installFixture(t)
+
+	var got operations.Request
+	output, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
+		got = req
+		return nil
+	}, "status", "codex")
 	if err != nil {
-		t.Fatalf("executeRoot(status codex): %v\noutput:\n%s", err, output)
+		t.Fatalf("executeRootWithRunner(status codex): %v\noutput:\n%s", err, output)
 	}
-	if !strings.Contains(output, "codex") {
-		t.Fatalf("status codex output missing codex\noutput:\n%s", output)
+	if got.Capability != "app.status" {
+		t.Fatalf("capability = %q, want app.status", got.Capability)
 	}
-	if strings.Contains(output, "claude") {
-		t.Fatalf("status codex output unexpectedly includes claude\noutput:\n%s", output)
+	if got.App == nil || got.App.ID != "codex" {
+		t.Fatalf("app request = %#v", got.App)
 	}
-	if strings.Contains(output, "cursor") {
-		t.Fatalf("status codex output unexpectedly includes cursor\noutput:\n%s", output)
+	if got.CLI != nil {
+		t.Fatalf("CLI request = %#v, want nil", got.CLI)
+	}
+	if count := strings.Count(output, "trace_id="); count > 1 {
+		t.Fatalf("status codex trace header count = %d, want at most 1\noutput:\n%s", count, output)
+	}
+}
+
+func TestStatusCodexCLIDispatchesStandaloneStatus(t *testing.T) {
+	installFixture(t)
+
+	var got operations.Request
+	output, err := executeRootWithRunner(func(_ context.Context, req operations.Request) error {
+		got = req
+		return nil
+	}, "status", "codex-cli")
+	if err != nil {
+		t.Fatalf("executeRootWithRunner(status codex-cli): %v\noutput:\n%s", err, output)
+	}
+	if got.Capability != "standalone-cli.status" {
+		t.Fatalf("capability = %q, want standalone-cli.status", got.Capability)
+	}
+	if got.CLI == nil || got.CLI.ID != "codex-cli" {
+		t.Fatalf("CLI request = %#v", got.CLI)
+	}
+	if got.App != nil {
+		t.Fatalf("app request = %#v, want nil", got.App)
+	}
+}
+
+func TestOperationErrorEmitsSingleTraceHeader(t *testing.T) {
+	installFixture(t)
+
+	output, err := executeRootWithRunner(func(_ context.Context, _ operations.Request) error {
+		return errors.New("boom")
+	}, "patch", "codex", "--dry-run")
+	if err == nil {
+		t.Fatalf("executeRootWithRunner(patch codex) unexpectedly succeeded\noutput:\n%s", output)
+	}
+	if !strings.HasPrefix(output, "trace_id=") {
+		t.Fatalf("operation error output missing leading trace header\noutput:\n%s", output)
+	}
+	if count := strings.Count(output, "trace_id="); count != 1 {
+		t.Fatalf("operation error trace header count = %d, want 1\noutput:\n%s", count, output)
 	}
 }
 

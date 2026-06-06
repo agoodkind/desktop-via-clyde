@@ -95,32 +95,6 @@ func BuildTarget(ctx context.Context, target targets.Target) (Report, error) {
 	}, nil
 }
 
-// BuildTargets loads and builds one report for selected app target IDs.
-func BuildTargets(ctx context.Context, targetIDs []string) (Report, error) {
-	multiState, err := state.Load(paths.StateFile())
-	if err != nil {
-		statusReportLog.ErrorContext(ctx, "statusreport.load_selected_state_failed", "err", err)
-		return Report{}, fmt.Errorf("load state file %s: %w", paths.StateFile(), err)
-	}
-	report := Report{
-		StateFile: paths.StateFile(),
-		Targets:   make([]TargetStatus, 0, len(targetIDs)),
-	}
-	for _, targetID := range normalizedTargetIDs(targetIDs) {
-		target, err := targets.Lookup(targetID)
-		if err != nil {
-			statusReportLog.ErrorContext(ctx, "statusreport.lookup_selected_target_failed", "target", targetID, "err", err)
-			return Report{}, fmt.Errorf("lookup target %s: %w", targetID, err)
-		}
-		item, err := buildTargetStatus(ctx, target, multiState)
-		if err != nil {
-			return Report{}, err
-		}
-		report.Targets = append(report.Targets, item)
-	}
-	return report, nil
-}
-
 // WriteText renders one human-readable report.
 func WriteText(out io.Writer, report Report) error {
 	if _, err := fmt.Fprintf(out, "state file: %s\n", report.StateFile); err != nil {
@@ -197,20 +171,6 @@ func buildTargetStatus(ctx context.Context, target targets.Target, multiState st
 		result.Notes += fmt.Sprintf("; current version %s != patched %s", currentVersion, entry.PatchedVersion)
 	}
 	return result, nil
-}
-
-func normalizedTargetIDs(targetIDs []string) []string {
-	seen := map[string]bool{}
-	results := make([]string, 0, len(targetIDs))
-	for _, targetID := range targetIDs {
-		trimmed := strings.TrimSpace(targetID)
-		if trimmed == "" || seen[trimmed] {
-			continue
-		}
-		seen[trimmed] = true
-		results = append(results, trimmed)
-	}
-	return results
 }
 
 func runtimeBundleStatuses(ctx context.Context, target targets.Target, expectLocalTeam bool) []RuntimeBundleStatus {

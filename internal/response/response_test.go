@@ -1,24 +1,33 @@
 package response
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
 	"goodkind.io/gklog/correlation"
 )
 
-func TestTextPlacesMetadataFirst(t *testing.T) {
-	ctx := correlation.WithContext(context.Background(), correlation.Context{
+func TestWriteTextHeaderOnceEmitsHeaderExactlyOnce(t *testing.T) {
+	base := correlation.WithContext(context.Background(), correlation.Context{
 		RequestID:    "req-123",
 		TraceID:      correlation.TraceID("11111111111111111111111111111111"),
 		SpanID:       correlation.SpanID("2222222222222222"),
 		ParentSpanID: correlation.SpanID("3333333333333333"),
 	})
+	ctx := WithTextHeaderGuard(base)
 
-	got := Text(ctx, "payload\n")
-	want := "trace_id=11111111111111111111111111111111 span_id=2222222222222222 parent_span_id=3333333333333333 request_id=req-123\npayload\n"
-	if got != want {
-		t.Fatalf("Text() = %q, want %q", got, want)
+	var out bytes.Buffer
+	if err := WriteTextHeaderOnce(ctx, &out); err != nil {
+		t.Fatalf("WriteTextHeaderOnce() first call error = %v", err)
+	}
+	if err := WriteTextHeaderOnce(ctx, &out); err != nil {
+		t.Fatalf("WriteTextHeaderOnce() second call error = %v", err)
+	}
+
+	want := "trace_id=11111111111111111111111111111111 span_id=2222222222222222 parent_span_id=3333333333333333 request_id=req-123\n"
+	if out.String() != want {
+		t.Fatalf("WriteTextHeaderOnce() output = %q, want %q", out.String(), want)
 	}
 }
 

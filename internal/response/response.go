@@ -9,9 +9,48 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"goodkind.io/gklog/correlation"
 )
+
+type textHeaderGuard struct {
+	mu      sync.Mutex
+	written bool
+}
+
+type textHeaderGuardKey struct{}
+
+// WithTextHeaderGuard returns a context carrying a one-shot text header guard so
+// that WriteTextHeaderOnce emits the correlation header at most once per command
+// execution, regardless of how many components try to write it.
+func WithTextHeaderGuard(ctx context.Context) context.Context {
+	return context.WithValue(ctx, textHeaderGuardKey{}, &textHeaderGuard{mu: sync.Mutex{}, written: false})
+}
+
+// WriteTextHeaderOnce writes the text metadata header line for ctx, but only the
+// first time it is called for a context carrying a guard from WithTextHeaderGuard.
+// It is the single component responsible for emitting the text trace header, so
+// callers never need to prepend the header themselves.
+func WriteTextHeaderOnce(ctx context.Context, out io.Writer) error {
+	header := FromContext(ctx).HeaderLine()
+	if header == "" {
+		return nil
+	}
+	if guard, ok := ctx.Value(textHeaderGuardKey{}).(*textHeaderGuard); ok {
+		guard.mu.Lock()
+		defer guard.mu.Unlock()
+		if guard.written {
+			return nil
+		}
+		guard.written = true
+	}
+	if _, err := io.WriteString(out, header+"\n"); err != nil {
+		slog.WarnContext(ctx, "response.write_text_header_failed", "err", err)
+		return fmt.Errorf("response: write text header: %w", err)
+	}
+	return nil
+}
 
 // Metadata is the user-visible subset of the current correlation context.
 type Metadata struct {
@@ -67,27 +106,6 @@ func (metadata Metadata) HeaderLine() string {
 		return ""
 	}
 	return strings.Join(fields, " ")
-}
-
-// Text prepends the metadata header when one exists.
-func Text(ctx context.Context, body string) string {
-	header := FromContext(ctx).HeaderLine()
-	if header == "" {
-		return body
-	}
-	if body == "" {
-		return header + "\n"
-	}
-	return header + "\n" + body
-}
-
-// WriteText writes one text response.
-func WriteText(ctx context.Context, out io.Writer, body string) error {
-	if _, err := io.WriteString(out, Text(ctx, body)); err != nil {
-		slog.WarnContext(ctx, "response.write_text_failed", "err", err)
-		return fmt.Errorf("response: write text: %w", err)
-	}
-	return nil
 }
 
 // JSON wraps payload with _meta metadata.

@@ -3,7 +3,6 @@
 package clispec
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -70,52 +69,204 @@ func BuildRoot(
 	root.SetErr(errOut)
 	root.SetContext(ctx)
 	root.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
-		_ = response.WriteText(cmd.Context(), cmd.OutOrStdout(), helpText(cmd))
+		_ = response.WriteTextHeaderOnce(cmd.Context(), cmd.OutOrStdout())
+		_, _ = io.WriteString(cmd.OutOrStdout(), helpText(cmd))
 	})
 	clioutput.PersistentFlag(root)
 
-	root.AddCommand(newBatchParentCmd(out, batchops.OperationPatch, batchRunner, runner))
-	root.AddCommand(newBatchParentCmd(out, batchops.OperationUpgrade, batchRunner, runner))
-	root.AddCommand(newBatchParentCmd(out, batchops.OperationHardReset, batchRunner, runner))
-	for _, configuredTarget := range targets.All() {
-		target, lookupErr := targets.Lookup(configuredTarget.ID)
-		if lookupErr != nil {
-			continue
-		}
-		root.AddCommand(newAppCmd(out, target, runner))
+	for _, group := range collectVerbGroups() {
+		root.AddCommand(newVerbCmd(out, group, runner, batchRunner))
 	}
-	for _, program := range targets.AllCLIs() {
-		root.AddCommand(newCLICmd(out, program, runner))
-	}
-	root.AddCommand(newStatusCmd(out))
 	return root
 }
 
-func newBatchParentCmd(
+// verbChild is one per-target noun under a verb-first parent command.
+type verbChild struct {
+	noun      spec.CommandSpec
+	operation spec.OperationSpec
+	target    *targets.Target
+	program   *targets.CLIProgram
+}
+
+// verbGroup is one verb-first parent command and the targets that declare it.
+type verbGroup struct {
+	name     string
+	children []verbChild
+}
+
+// collectVerbGroups gathers every configured app and CLI operation into
+// verb-first parent groups keyed by the operation's command verb, ordered with
+// the aggregate operations first and status last.
+func collectVerbGroups() []verbGroup {
+	groups := map[string]*verbGroup{}
+	addChild := func(verb string, child verbChild) {
+		group, ok := groups[verb]
+		if !ok {
+			group = &verbGroup{name: verb, children: nil}
+			groups[verb] = group
+		}
+		group.children = append(group.children, child)
+	}
+	for _, app := range targets.All() {
+		appCopy := app
+		for _, operation := range sortedOperations(app.Operations) {
+			addChild(operation.Use, verbChild{
+				noun:      app.Command,
+				operation: operation,
+				target:    &appCopy,
+				program:   nil,
+			})
+		}
+	}
+	for _, program := range targets.AllCLIs() {
+		programCopy := program
+		for _, operation := range sortedOperations(program.Operations) {
+			addChild(operation.Use, verbChild{
+				noun:      program.Command,
+				operation: operation,
+				target:    nil,
+				program:   &programCopy,
+			})
+		}
+	}
+	return orderVerbGroups(groups)
+}
+
+func orderVerbGroups(groups map[string]*verbGroup) []verbGroup {
+	names := make([]string, 0, len(groups))
+	for name := range groups {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		return verbLess(names[i], names[j])
+	})
+	ordered := make([]verbGroup, 0, len(names))
+	for _, name := range names {
+		ordered = append(ordered, *groups[name])
+	}
+	return ordered
+}
+
+func verbLess(left string, right string) bool {
+	leftRank, leftBatch := batchVerbRank(left)
+	rightRank, rightBatch := batchVerbRank(right)
+	if leftBatch && rightBatch {
+		return leftRank < rightRank
+	}
+	if leftBatch != rightBatch {
+		return leftBatch
+	}
+	leftStatus := left == statusVerb
+	rightStatus := right == statusVerb
+	if leftStatus != rightStatus {
+		return rightStatus
+	}
+	return left < right
+}
+
+const statusVerb = "status"
+
+func batchVerbRank(verb string) (int, bool) {
+	switch batchops.OperationName(verb) {
+	case batchops.OperationPatch:
+		return 0, true
+	case batchops.OperationUpgrade:
+		return 1, true
+	case batchops.OperationHardReset:
+		return 2, true
+	default:
+		return 0, false
+	}
+}
+
+func isBatchVerb(verb string) bool {
+	_, ok := batchVerbRank(verb)
+	return ok
+}
+
+func newVerbCmd(out io.Writer, group verbGroup, runner OperationRunner, batchRunner BatchRunner) *cobra.Command {
+	if isBatchVerb(group.name) {
+		return newBatchVerbCmd(out, group, batchRunner, runner)
+	}
+	if group.name == statusVerb {
+		return newStatusVerbCmd(out, group, runner)
+	}
+	return newPlainVerbCmd(out, group, runner)
+}
+
+func newBatchVerbCmd(
 	out io.Writer,
-	operation batchops.OperationName,
+	group verbGroup,
 	batchRunner BatchRunner,
 	operationRunner OperationRunner,
 ) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   string(operation),
-		Short: fmt.Sprintf("Run %s across configured targets", operation),
+		Use:   group.name,
+		Short: fmt.Sprintf("Run %s across configured targets", group.name),
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
 	}
-	cmd.AddCommand(newBatchAllCmd(out, operation, batchRunner))
-	if operation == batchops.OperationHardReset {
-		for _, target := range targets.All() {
-			operationSpec, ok := target.Operations[string(operation)]
-			if !ok {
-				continue
-			}
-			targetCopy := target
-			cmd.AddCommand(newVerbFirstTargetOperationCmd(out, operationSpec, &targetCopy, operationRunner))
-		}
+	cmd.AddCommand(newBatchAllCmd(out, batchops.OperationName(group.name), batchRunner))
+	for _, child := range group.children {
+		cmd.AddCommand(newVerbChildCmd(out, child, operationRunner))
 	}
+	return cmd
+}
+
+func newPlainVerbCmd(out io.Writer, group verbGroup, runner OperationRunner) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   group.name,
+		Short: fmt.Sprintf("Run %s for one configured target", group.name),
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
+	}
+	for _, child := range group.children {
+		cmd.AddCommand(newVerbChildCmd(out, child, runner))
+	}
+	return cmd
+}
+
+func newStatusVerbCmd(out io.Writer, group verbGroup, runner OperationRunner) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "status [target]",
+		Short: "Print per-target state (clean, patched, drifted) and bundle metadata",
+		Args:  cobra.NoArgs,
+		RunE:  statusHandler{out: out}.run,
+	}
+	allCmd := &cobra.Command{
+		Use:   "all",
+		Short: "Print state for every configured target",
+		Args:  cobra.NoArgs,
+		RunE:  statusHandler{out: out}.run,
+	}
+	cmd.AddCommand(allCmd)
+	for _, child := range group.children {
+		cmd.AddCommand(newVerbChildCmd(out, child, runner))
+	}
+	return cmd
+}
+
+func newVerbChildCmd(out io.Writer, child verbChild, runner OperationRunner) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     child.noun.Use,
+		Aliases: append([]string(nil), child.noun.Aliases...),
+		Short:   fmt.Sprintf("Run %s for %s", child.operation.Use, child.noun.Use),
+		Hidden:  child.noun.Hidden,
+		Args:    cobra.NoArgs,
+	}
+	handler := operationHandler{
+		out:       out,
+		operation: child.operation,
+		target:    child.target,
+		program:   child.program,
+		runner:    runner,
+	}
+	cmdflags.Register(cmd, child.operation.Flags)
+	cmd.RunE = handler.run
 	return cmd
 }
 
@@ -135,97 +286,6 @@ func newBatchAllCmd(out io.Writer, operation batchops.OperationName, runner Batc
 	return cmd
 }
 
-func newAppCmd(out io.Writer, target targets.Target, runner OperationRunner) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:     target.Command.Use,
-		Aliases: append([]string(nil), target.Command.Aliases...),
-		Short:   target.Command.Short,
-		Long:    target.Command.Long,
-		Hidden:  target.Command.Hidden,
-		Args:    cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmd.Help()
-		},
-	}
-	for _, operation := range sortedOperations(target.Operations) {
-		cmd.AddCommand(newOperationCmd(out, operation, &target, nil, runner))
-	}
-	return cmd
-}
-
-func newCLICmd(out io.Writer, program targets.CLIProgram, runner OperationRunner) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:     program.Command.Use,
-		Aliases: append([]string(nil), program.Command.Aliases...),
-		Short:   program.Command.Short,
-		Long:    program.Command.Long,
-		Hidden:  program.Command.Hidden,
-		Args:    cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmd.Help()
-		},
-	}
-	for _, operation := range sortedOperations(program.Operations) {
-		cmd.AddCommand(newOperationCmd(out, operation, nil, &program, runner))
-	}
-	return cmd
-}
-
-func newOperationCmd(out io.Writer, operation spec.OperationSpec, target *targets.Target, program *targets.CLIProgram, runner OperationRunner) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:     operation.Use,
-		Aliases: append([]string(nil), operation.Aliases...),
-		Short:   operation.Short,
-		Long:    operation.Long,
-		Hidden:  operation.Hidden,
-		Args:    cobra.NoArgs,
-	}
-	handler := operationHandler{
-		out:       out,
-		operation: operation,
-		target:    target,
-		program:   program,
-		runner:    runner,
-	}
-	cmdflags.Register(cmd, operation.Flags)
-	cmd.RunE = handler.run
-	return cmd
-}
-
-func newVerbFirstTargetOperationCmd(
-	out io.Writer,
-	operation spec.OperationSpec,
-	target *targets.Target,
-	runner OperationRunner,
-) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:     target.Command.Use,
-		Aliases: append([]string(nil), target.Command.Aliases...),
-		Short:   fmt.Sprintf("Run %s for %s", operation.Use, target.ID),
-		Args:    cobra.NoArgs,
-	}
-	handler := operationHandler{
-		out:       out,
-		operation: operation,
-		target:    target,
-		program:   nil,
-		runner:    runner,
-	}
-	cmdflags.Register(cmd, operation.Flags)
-	cmd.RunE = handler.run
-	return cmd
-}
-
-func newStatusCmd(out io.Writer) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "status [target...]",
-		Short: "Print per-target state (clean, patched, drifted) and bundle metadata",
-		Args:  cobra.ArbitraryArgs,
-	}
-	cmd.RunE = statusHandler{out: out}.run
-	return cmd
-}
-
 func (h batchAllHandler) run(cmd *cobra.Command, _ []string) error {
 	return runBatchAll(cmd.Context(), cmd, h.out, h.operation, h.runner)
 }
@@ -234,8 +294,8 @@ func (h operationHandler) run(cmd *cobra.Command, _ []string) error {
 	return runOperation(cmd.Context(), cmd, h.out, h.operation, h.target, h.program, h.runner)
 }
 
-func (h statusHandler) run(cmd *cobra.Command, args []string) error {
-	return runStatus(cmd.Context(), cmd, h.out, args)
+func (h statusHandler) run(cmd *cobra.Command, _ []string) error {
+	return runStatus(cmd.Context(), cmd, h.out)
 }
 
 func runBatchAll(
@@ -375,17 +435,12 @@ func runOperation(
 	return nil
 }
 
-func runStatus(ctx context.Context, cmd *cobra.Command, out io.Writer, targetIDs []string) error {
+func runStatus(ctx context.Context, cmd *cobra.Command, out io.Writer) error {
 	format, err := readOutputFormat(ctx, cmd)
 	if err != nil {
 		return err
 	}
-	var report statusreport.Report
-	if len(targetIDs) == 0 {
-		report, err = statusreport.BuildAll(ctx)
-	} else {
-		report, err = statusreport.BuildTargets(ctx, targetIDs)
-	}
+	report, err := statusreport.BuildAll(ctx)
 	if err != nil {
 		slog.WarnContext(ctx, "clispec.status.build_failed", "err", err)
 		return fmt.Errorf("build status report: %w", err)
@@ -406,12 +461,11 @@ func writeStatus(ctx context.Context, out io.Writer, format clioutput.Format, re
 		}
 		return nil
 	}
-	var body bytes.Buffer
-	if err := statusreport.WriteText(&body, report); err != nil {
-		slog.WarnContext(ctx, "clispec.status.write_text_buffer_failed", "err", err)
-		return fmt.Errorf("write status report: %w", err)
+	if err := response.WriteTextHeaderOnce(ctx, out); err != nil {
+		slog.WarnContext(ctx, "clispec.status.write_header_failed", "err", err)
+		return fmt.Errorf("write status header: %w", err)
 	}
-	if err := response.WriteText(ctx, out, body.String()); err != nil {
+	if err := statusreport.WriteText(out, report); err != nil {
 		slog.WarnContext(ctx, "clispec.status.write_text_failed", "err", err)
 		return fmt.Errorf("write status text: %w", err)
 	}

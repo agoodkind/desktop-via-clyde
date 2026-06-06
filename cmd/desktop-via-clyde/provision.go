@@ -20,14 +20,29 @@ type provisionProfileHandler struct {
 	profileName string
 }
 
-// newProvisionProfileCmd builds the one-time command that generates a Developer
-// ID provisioning profile through App Store Connect and writes it to a local
-// path. The patch flow then embeds that local profile, so patching itself never
-// contacts Apple.
+// newProvisionCmd builds the verb-first `provision` parent that groups the
+// App Store Connect provisioning subcommands.
+func newProvisionCmd(out io.Writer) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "provision",
+		Short: "Generate provisioning assets via App Store Connect",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
+	}
+	cmd.AddCommand(newProvisionProfileCmd(out))
+	return cmd
+}
+
+// newProvisionProfileCmd builds the one-time `provision profile` command that
+// generates a Developer ID provisioning profile through App Store Connect and
+// writes it to a local path. The patch flow then embeds that local profile, so
+// patching itself never contacts Apple.
 func newProvisionProfileCmd(out io.Writer) *cobra.Command {
 	handler := &provisionProfileHandler{out: out}
 	cmd := &cobra.Command{
-		Use:   "provision-profile",
+		Use:   "profile",
 		Short: "Generate a Developer ID provisioning profile via App Store Connect",
 	}
 	cmd.RunE = handler.run

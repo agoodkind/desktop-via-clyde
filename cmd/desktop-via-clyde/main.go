@@ -80,7 +80,11 @@ func run() int {
 	config.SetCurrent(loadedConfig)
 
 	root := newRootCmd(ctx, os.Stdout, os.Stderr)
-	if err := root.ExecuteContext(ctx); err != nil {
+	// newRootCmd installs the one-shot text-header guard on the command context
+	// via BuildRoot's SetContext, so execute with root.Context() rather than the
+	// pre-guard ctx; passing a fresh context to ExecuteContext would overwrite
+	// c.ctx and drop the guard, making the status path emit a second trace header.
+	if err := root.ExecuteContext(root.Context()); err != nil {
 		logger.ErrorContext(ctx, "cli.execute.failed", slog.Any("err", err))
 		writeRuntimeMessage(ctx, os.Stderr, outputFormat, "error: "+err.Error())
 		_ = closer.Close()
@@ -103,30 +107,22 @@ func newRootCmdWithRunners(
 	batchRunner batchOperationRunner,
 ) *cobra.Command {
 	normalizedCtx, _ := correlation.Ensure(ctx, "")
+	guardedCtx := response.WithTextHeaderGuard(normalizedCtx)
 	root := clispec.BuildRoot(
-		normalizedCtx,
+		guardedCtx,
 		out,
 		errOut,
 		clispec.OperationRunner(runner),
 		clispec.BatchRunner(batchRunner),
 	)
-	traceHeaderWritten := false
 	root.PersistentPreRun = func(cmd *cobra.Command, _ []string) {
-		if traceHeaderWritten {
-			return
-		}
-		format, err := readOutputFormat(normalizedCtx, cmd)
+		format, err := readOutputFormat(guardedCtx, cmd)
 		if err != nil || format == clioutput.FormatJSON {
 			return
 		}
-		header := response.FromContext(normalizedCtx).HeaderLine()
-		if header == "" {
-			return
-		}
-		traceHeaderWritten = true
-		_, _ = io.WriteString(cmd.OutOrStdout(), header+"\n")
+		_ = response.WriteTextHeaderOnce(guardedCtx, cmd.OutOrStdout())
 	}
-	root.AddCommand(newProvisionProfileCmd(out))
+	root.AddCommand(newProvisionCmd(out))
 	return root
 }
 
