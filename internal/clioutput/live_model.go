@@ -56,8 +56,18 @@ func newLiveModel() liveModel {
 		started:   "",
 		targets:   map[string]*targetState{},
 		order:     []string{},
-		spinner:   spinner.New(spinner.WithSpinner(spinner.Dot)),
+		spinner:   spinner.New(spinner.WithSpinner(reversedDotSpinner())),
 	}
+}
+
+// reversedDotSpinner returns the bubbles Dot spinner with its frame order
+// reversed, so the loading animation rotates in the opposite direction.
+func reversedDotSpinner() spinner.Spinner {
+	frames := append([]string(nil), spinner.Dot.Frames...)
+	for left, right := 0, len(frames)-1; left < right; left, right = left+1, right-1 {
+		frames[left], frames[right] = frames[right], frames[left]
+	}
+	return spinner.Spinner{Frames: frames, FPS: spinner.Dot.FPS}
 }
 
 func (m *liveModel) apply(event Event) {
