@@ -49,9 +49,6 @@ func register() error {
 	if err := bundledclitee.RegisterValidators(); err != nil {
 		return logCompositionRegistrationError("register bundled CLI tee validators", err)
 	}
-	if err := upgrade.RegisterValidators(); err != nil {
-		return logCompositionRegistrationError("register upgrade validators", err)
-	}
 	if err := operations.RegisterCoreHandlers(); err != nil {
 		return logCompositionRegistrationError("register core operation handlers", err)
 	}
@@ -70,9 +67,6 @@ func register() error {
 	if err := upgrade.RegisterOperations(); err != nil {
 		return logCompositionRegistrationError("register upgrade operations", err)
 	}
-	if err := upgrade.RegisterBootstrapStrategies(); err != nil {
-		return logCompositionRegistrationError("register upgrade bootstrap strategies", err)
-	}
 	if err := codexcli.RegisterOperations(); err != nil {
 		return logCompositionRegistrationError("register Codex CLI operations", err)
 	}
@@ -86,15 +80,6 @@ func validateLinkedCapabilities() error {
 	for _, capability := range catalog.OperationCapabilities() {
 		if _, ok := operations.Lookup(capability); !ok {
 			return fmt.Errorf("operation capability %q has no registered handler", capability)
-		}
-	}
-	registeredBootstrap := map[string]bool{}
-	for _, capability := range upgrade.RegisteredBootstrapStrategies() {
-		registeredBootstrap[capability] = true
-	}
-	for _, capability := range catalog.BootstrapCapabilities() {
-		if !registeredBootstrap[capability] {
-			return fmt.Errorf("bootstrap capability %q has no registered strategy", capability)
 		}
 	}
 	registeredPostPatch := map[string]bool{}

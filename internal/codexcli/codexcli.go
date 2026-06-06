@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/catalog"
+	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
@@ -88,6 +89,7 @@ type InstallOptions struct {
 	ForceRebuild      bool
 	Out               io.Writer
 	LogOut            io.Writer
+	Progress          clioutput.Progress
 	Trace             *patch.Trace
 }
 
@@ -119,6 +121,7 @@ func InstallOperation(ctx context.Context, req operations.Request) error {
 		ForceRebuild:      req.Flags.Bool("force-rebuild"),
 		Out:               req.Out,
 		LogOut:            req.LogOut,
+		Progress:          req.Progress,
 		Trace:             nil,
 	}); err != nil {
 		codexcliLog.ErrorContext(ctx, "codexcli.install_operation_failed", "err", err)
@@ -283,6 +286,7 @@ func newInstallRunner(ctx context.Context, opts InstallOptions) *patch.Runner {
 	if opts.LogOut != nil {
 		runner.RawOut = opts.LogOut
 	}
+	runner.Progress = opts.Progress
 	return runner
 }
 
@@ -324,6 +328,10 @@ func Status(ctx context.Context, opts StatusOptions) error {
 }
 
 func notef(r *patch.Runner, message string) {
+	if r.Progress != nil {
+		r.Progress.Step(message)
+		return
+	}
 	prefix := "[run]"
 	if r.DryRun {
 		prefix = "[dry-run]"

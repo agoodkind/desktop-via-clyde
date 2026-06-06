@@ -203,11 +203,6 @@ func (t Target) PreLaunchPolicyHookCapabilities() []string {
 	return t.Extensions.PreLaunchPolicyHookCapabilities()
 }
 
-// BootstrapCapability returns the optional bootstrap strategy capability.
-func (t Target) BootstrapCapability() string {
-	return t.Extensions.BootstrapCapability()
-}
-
 func buildUpdater(updater spec.UpdaterSpec) Updater {
 	return Updater{
 		Kind:              updater.Kind,

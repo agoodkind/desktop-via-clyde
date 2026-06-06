@@ -34,9 +34,6 @@ func registerFixtureCapabilitiesOnce() error {
 			return fmt.Errorf("register operation capability %s: %w", capability, err)
 		}
 	}
-	if err := catalog.RegisterBootstrapCapability("clean-main-binary"); err != nil {
-		return fmt.Errorf("register clean-main-binary bootstrap capability: %w", err)
-	}
 	if err := catalog.RegisterPatchHookCapability("bundled-cli-tee"); err != nil {
 		return fmt.Errorf("register bundled-cli-tee patch hook capability: %w", err)
 	}
@@ -51,9 +48,6 @@ func registerFixtureCapabilitiesOnce() error {
 	}
 	if err := extensions.RegisterAppValidator("computer_use", extensions.ValidateComputerUse); err != nil {
 		return fmt.Errorf("register computer_use validator: %w", err)
-	}
-	if err := extensions.RegisterAppValidator("original_dr_bootstrap_capability", extensions.ValidateOriginalDRBootstrapCapability); err != nil {
-		return fmt.Errorf("register original_dr_bootstrap_capability validator: %w", err)
 	}
 	return nil
 }

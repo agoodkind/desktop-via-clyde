@@ -1,7 +1,6 @@
 package devpreflight
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -9,8 +8,23 @@ import (
 	"strings"
 	"testing"
 
+	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
+
+// recordingProgress captures milestone details so tests can assert on the
+// guidance the preflight emits without a live renderer.
+type recordingProgress struct {
+	steps []string
+}
+
+func (p *recordingProgress) Step(detail string)                       { p.steps = append(p.steps, detail) }
+func (p *recordingProgress) Skip(detail string)                       { p.steps = append(p.steps, detail) }
+func (p *recordingProgress) Fail(detail string)                       { p.steps = append(p.steps, detail) }
+func (p *recordingProgress) SetOutcome(_ clioutput.Outcome, _ string) {}
+
+func (p *recordingProgress) String() string { return strings.Join(p.steps, "\n") }
+func (p *recordingProgress) Len() int       { return len(p.steps) }
 
 // withStubs swaps the package seams for the duration of one test so the preflight
 // never touches ~/Desktop or contacts App Store Connect, then restores them.
@@ -40,10 +54,10 @@ func TestWarnSkipsWhenNotEnabled(t *testing.T) {
 		t.Fatalf("generator must not be called when development signing is disabled")
 		return "", nil
 	})
-	var out bytes.Buffer
-	Warn(context.Background(), &out, false, targets.Target{ID: "codex"})
-	if out.Len() != 0 {
-		t.Fatalf("expected no output for a target without development signing, got %q", out.String())
+	progress := &recordingProgress{}
+	Warn(context.Background(), progress, false, targets.Target{ID: "codex"})
+	if progress.Len() != 0 {
+		t.Fatalf("expected no output for a target without development signing, got %q", progress.String())
 	}
 }
 
@@ -61,10 +75,10 @@ func TestWarnSilentWhenAssetsPresent(t *testing.T) {
 	tg.DevelopmentSigning.P12Path = p12
 	tg.DevelopmentSigning.P12PasswordFile = password
 
-	var out bytes.Buffer
-	Warn(context.Background(), &out, false, tg)
-	if out.Len() != 0 {
-		t.Fatalf("expected no output when every asset is present, got %q", out.String())
+	progress := &recordingProgress{}
+	Warn(context.Background(), progress, false, tg)
+	if progress.Len() != 0 {
+		t.Fatalf("expected no output when every asset is present, got %q", progress.String())
 	}
 }
 
@@ -73,9 +87,9 @@ func TestWarnCredentialsMissingNamesFiles(t *testing.T) {
 		t.Fatalf("generator must not run without credentials")
 		return "", nil
 	})
-	var out bytes.Buffer
-	Warn(context.Background(), &out, false, enabledTarget())
-	text := out.String()
+	progress := &recordingProgress{}
+	Warn(context.Background(), progress, false, enabledTarget())
+	text := progress.String()
 	for _, want := range []string{"WARNING", "AuthKey_<KEY_ID>.p8", "README.md", "-34018", "Continuing."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %q in credentials-missing warning: %q", want, text)
@@ -88,10 +102,10 @@ func TestWarnCredentialsPresentSuggestsAutoGenerate(t *testing.T) {
 		t.Fatalf("generator must not run unless auto_generate is set")
 		return "", nil
 	})
-	var out bytes.Buffer
-	Warn(context.Background(), &out, false, enabledTarget())
-	if !strings.Contains(out.String(), "auto_generate=true") {
-		t.Fatalf("expected the auto_generate suggestion, got %q", out.String())
+	progress := &recordingProgress{}
+	Warn(context.Background(), progress, false, enabledTarget())
+	if !strings.Contains(progress.String(), "auto_generate=true") {
+		t.Fatalf("expected the auto_generate suggestion, got %q", progress.String())
 	}
 }
 
@@ -104,13 +118,13 @@ func TestWarnAutoGenerateRunsGenerator(t *testing.T) {
 	tg := enabledTarget()
 	tg.DevelopmentSigning.AutoGenerate = true
 
-	var out bytes.Buffer
-	Warn(context.Background(), &out, false, tg)
+	progress := &recordingProgress{}
+	Warn(context.Background(), progress, false, tg)
 	if !called {
 		t.Fatalf("expected the generator to run when auto_generate is set and credentials are present")
 	}
-	if !strings.Contains(out.String(), "generated development-signing assets") {
-		t.Fatalf("expected a generation-success note, got %q", out.String())
+	if !strings.Contains(progress.String(), "generated development-signing assets") {
+		t.Fatalf("expected a generation-success note, got %q", progress.String())
 	}
 }
 
@@ -122,10 +136,10 @@ func TestWarnAutoGenerateSkippedOnDryRun(t *testing.T) {
 	tg := enabledTarget()
 	tg.DevelopmentSigning.AutoGenerate = true
 
-	var out bytes.Buffer
-	Warn(context.Background(), &out, true, tg)
-	if !strings.Contains(out.String(), "auto_generate=true") {
-		t.Fatalf("expected the dry run to suggest auto_generate without generating, got %q", out.String())
+	progress := &recordingProgress{}
+	Warn(context.Background(), progress, true, tg)
+	if !strings.Contains(progress.String(), "auto_generate=true") {
+		t.Fatalf("expected the dry run to suggest auto_generate without generating, got %q", progress.String())
 	}
 }
 
@@ -136,9 +150,9 @@ func TestWarnAutoGenerateFailureIsNonBlocking(t *testing.T) {
 	tg := enabledTarget()
 	tg.DevelopmentSigning.AutoGenerate = true
 
-	var out bytes.Buffer
-	Warn(context.Background(), &out, false, tg)
-	text := out.String()
+	progress := &recordingProgress{}
+	Warn(context.Background(), progress, false, tg)
+	text := progress.String()
 	if !strings.Contains(text, "generation failed") {
 		t.Fatalf("expected a non-blocking failure note, got %q", text)
 	}

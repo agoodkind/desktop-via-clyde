@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 	"goodkind.io/desktop-via-clyde/internal/bundleidentity"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
+	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/clock"
 	"goodkind.io/desktop-via-clyde/internal/devpreflight"
 	"goodkind.io/desktop-via-clyde/internal/devsign"
@@ -29,9 +30,6 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/targets"
 	"goodkind.io/gklog"
 )
-
-// ErrMissingStateEntry reports that the requested target has no persisted patch state.
-var ErrMissingStateEntry = errors.New("missing target state entry")
 
 const (
 	// AppPatchCapability is the operation capability for app patching.
@@ -74,27 +72,13 @@ func RegisterOperations() error {
 	return nil
 }
 
-// MissingStateEntryError names the missing target when state is absent.
-type MissingStateEntryError struct {
-	TargetID string
-}
-
-// Error reports the missing target state entry with a repair hint.
-func (e MissingStateEntryError) Error() string {
-	return fmt.Sprintf("no state entry for target %s; run `desktop-via-clyde patch %s` first", e.TargetID, e.TargetID)
-}
-
-// Is lets callers match MissingStateEntryError against ErrMissingStateEntry.
-func (e MissingStateEntryError) Is(target error) bool {
-	return target == ErrMissingStateEntry
-}
-
 // Options controls a patch invocation.
 type Options struct {
 	DryRun          bool
 	MigrateKeychain bool
 	Out             io.Writer
 	LogOut          io.Writer
+	Progress        clioutput.Progress
 	Trace           *Trace
 }
 
@@ -116,6 +100,7 @@ func Operation(ctx context.Context, req operations.Request) error {
 		MigrateKeychain: req.Flags.Bool("migrate-keychain"),
 		Out:             req.Out,
 		LogOut:          req.LogOut,
+		Progress:        req.Progress,
 		Trace:           nil,
 	}); err != nil {
 		patchLog.ErrorContext(ctx, "patch.operation_failed", "err", err)
@@ -144,8 +129,12 @@ func runUpgradeForMissingBundle(ctx context.Context, req operations.Request) err
 	flags.SetBool("dry-run", req.Flags.Bool("dry-run"))
 	flags.SetBool("migrate-keychain", req.Flags.Bool("migrate-keychain"))
 	flags.SetString("channel", "")
-	if req.Out != nil {
-		if _, err := fmt.Fprintf(req.Out, "[run] target=%s app missing at %s; running upgrade before patch\n", req.App.ID, req.App.AppPath); err != nil {
+	notice := fmt.Sprintf("target=%s app missing at %s; running upgrade before patch", req.App.ID, req.App.AppPath)
+	switch {
+	case req.Progress != nil:
+		req.Progress.Step(notice)
+	case req.Out != nil:
+		if _, err := fmt.Fprintf(req.Out, "[run] %s\n", notice); err != nil {
 			patchLog.ErrorContext(ctx, "patch.write_missing_bundle_upgrade_notice_failed", "target", req.App.ID, "app_path", req.App.AppPath, "err", err)
 			return fmt.Errorf("write missing bundle upgrade notice: %w", err)
 		}
@@ -153,6 +142,7 @@ func runUpgradeForMissingBundle(ctx context.Context, req operations.Request) err
 	return handler(ctx, operations.Request{
 		Out:        req.Out,
 		LogOut:     req.LogOut,
+		Progress:   req.Progress,
 		App:        req.App,
 		CLI:        nil,
 		Capability: "app.upgrade",
@@ -171,6 +161,7 @@ func KeychainMigrateOperation(ctx context.Context, req operations.Request) error
 		MigrateKeychain: true,
 		Out:             req.Out,
 		LogOut:          req.LogOut,
+		Progress:        req.Progress,
 		Trace:           nil,
 	}); err != nil {
 		patchLog.ErrorContext(ctx, "patch.keychain_migrate_operation_failed", "err", err)
@@ -195,6 +186,7 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	if opts.LogOut != nil {
 		r.RawOut = opts.LogOut
 	}
+	r.Progress = opts.Progress
 	r.Trace = opts.Trace
 	log.InfoContext(ctx, "patch.start", "app_path", t.AppPath, "dry_run", opts.DryRun, "migrate_keychain", opts.MigrateKeychain)
 
@@ -203,7 +195,7 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	// the bundle swap) reach this point, so wiring the check here covers both
 	// without a second call site. It never returns an error: a target without
 	// credentials continues on the standard shim plus Developer ID path.
-	devpreflight.Warn(ctx, r.Out, opts.DryRun, t)
+	devpreflight.Warn(ctx, r.Progress, opts.DryRun, t)
 
 	if !opts.DryRun {
 		if _, err := os.Stat(t.AppPath); err != nil {
@@ -274,7 +266,7 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 		// object, so it must be the last signing action: any earlier placement
 		// lets a later nested re-sign (post-bundle or post-patch hooks) invalidate
 		// the seal.
-		if err := devsign.Reseal(ctx, r, devsign.Options{DryRun: r.DryRun, Out: r.Out}, t, devPlan); err != nil {
+		if err := devsign.Reseal(ctx, r, devsign.Options{DryRun: r.DryRun, Out: r.Out, Progress: r.Progress}, t, devPlan); err != nil {
 			return logPatchError(ctx, "patch.development_signing_reseal_failed", fmt.Errorf("reseal development-signed bundle: %w", err))
 		}
 		if err := stepVerifyDevelopmentSigned(ctx, r, t); err != nil {
@@ -326,6 +318,7 @@ func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Op
 		MigrateKeychain: opts.MigrateKeychain,
 		Out:             r.Out,
 		LogOut:          r.RawOut,
+		Progress:        r.Progress,
 		Trace:           r.Trace,
 	}); err != nil {
 		return nil, logPatchError(ctx, "patch.pre_resign_hook_failed", fmt.Errorf("run pre-resign hooks: %w", err))
@@ -363,7 +356,7 @@ func maybeApplyDevelopmentSigning(ctx context.Context, r *Runner, t *targets.Tar
 		return nil, nil
 	}
 	notef(r, fmt.Sprintf("target=%s development signing enabled; applying enrollment-fix overlay (skipping shim, move-to-real, and Developer ID re-sign)", t.ID))
-	plan, err := devsign.ApplyNestedMutations(ctx, r, devsign.Options{DryRun: r.DryRun, Out: r.Out}, *t)
+	plan, err := devsign.ApplyNestedMutations(ctx, r, devsign.Options{DryRun: r.DryRun, Out: r.Out, Progress: r.Progress}, *t)
 	if err != nil {
 		return nil, logPatchError(ctx, "patch.development_signing_failed", fmt.Errorf("apply development signing: %w", err))
 	}
@@ -377,6 +370,7 @@ func KeychainMigrate(ctx context.Context, t targets.Target, opts Options) error 
 	}
 	log := gklog.LoggerFromContext(ctx).With("subcomponent", "keychain-migrate", "target", t.ID)
 	r := NewRunner(ctx, opts.DryRun, opts.Out)
+	r.Progress = opts.Progress
 	r.Trace = opts.Trace
 	notef(r, fmt.Sprintf("target=%s keychain access repair", t.ID))
 	log.InfoContext(ctx, "keychain_migrate.start", "app_path", t.AppPath, "dry_run", opts.DryRun)
@@ -693,10 +687,6 @@ func stepWriteState(ctx context.Context, r *Runner, t targets.Target, version st
 	if r.DryRun {
 		return nil
 	}
-	if strings.TrimSpace(originalDR) == "" {
-		return logPatchErrorNoContext("patch.original_dr_missing_before_state_write",
-			fmt.Errorf("target=%s has no clean upstream DesignatedRequirement to write", t.ID))
-	}
 	updateErr := state.Update(paths.StateFile(), func(ms state.MultiState) (state.MultiState, error) {
 		ms.Targets[t.ID] = state.TargetState{
 			PatchedVersion:                version,
@@ -710,24 +700,6 @@ func stepWriteState(ctx context.Context, r *Runner, t targets.Target, version st
 		return logPatchError(ctx, "patch.save_state_failed", fmt.Errorf("save state file: %w", updateErr))
 	}
 	return nil
-}
-
-// OriginalDesignatedRequirement returns the recorded upstream
-// DesignatedRequirement for t from state.json.
-func OriginalDesignatedRequirement(ctx context.Context, t targets.Target) (string, error) {
-	ms, err := state.Load(paths.StateFile())
-	if err != nil {
-		return "", logPatchError(ctx, "patch.original_dr_load_state_failed", fmt.Errorf("load state.json: %w", err))
-	}
-	entry, ok := ms.Targets[t.ID]
-	if !ok {
-		return "", MissingStateEntryError{TargetID: t.ID}
-	}
-	if entry.OriginalDesignatedRequirement != "" {
-		return entry.OriginalDesignatedRequirement, nil
-	}
-	return "", logPatchErrorNoContext("patch.original_dr_state_missing",
-		fmt.Errorf("state entry for target %s has no recorded clean upstream DesignatedRequirement", t.ID))
 }
 
 // DesignatedRequirement returns the designated requirement string for one code object.
@@ -755,6 +727,12 @@ func DesignatedRequirement(ctx context.Context, codePath string) (string, error)
 
 var readDesignatedRequirement = DesignatedRequirement
 
+// resolveOriginalDRForPatch captures the upstream DesignatedRequirement for
+// display only; nothing gates on it. It prefers the recorded value, then reads
+// from the original executable, which lives at <exec>.real once the bundle is
+// patched and at the main binary slot on a clean bundle. Capture is best effort:
+// a missing or local-team DR records empty and the patch continues. Only a
+// genuine filesystem stat error (not NotExist) is propagated.
 func resolveOriginalDRForPatch(ctx context.Context, r *Runner, t targets.Target) (string, error) {
 	ms, err := state.Load(paths.StateFile())
 	if err != nil {
@@ -767,32 +745,31 @@ func resolveOriginalDRForPatch(ctx context.Context, r *Runner, t targets.Target)
 		}
 	}
 
+	source := paths.MainBinaryPath(t)
 	realExists, err := realBinaryExists(ctx, t)
 	if err != nil {
 		return "", err
 	}
 	if realExists {
-		return "", logPatchErrorNoContext("patch.original_dr_state_missing_real_exists",
-			fmt.Errorf("target=%s has %s but state lacks a clean upstream DesignatedRequirement; reinstall the vendor app and patch again", t.ID, paths.RealBinaryPath(t)))
+		source = paths.RealBinaryPath(t)
 	}
-
-	mainPath := paths.MainBinaryPath(t)
-	notef(r, fmt.Sprintf("target=%s capture upstream DR from clean executable %s", t.ID, mainPath))
+	notef(r, fmt.Sprintf("target=%s capture upstream DR for display from %s", t.ID, source))
 	if r.DryRun {
-		if _, err := os.Stat(mainPath); err != nil {
+		if _, err := os.Stat(source); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return "", nil
 			}
-			return "", logPatchError(ctx, "patch.original_dr_main_binary_stat_failed", fmt.Errorf("stat clean executable %s: %w", mainPath, err))
+			return "", logPatchError(ctx, "patch.original_dr_source_stat_failed", fmt.Errorf("stat upstream executable %s: %w", source, err))
 		}
 	}
-	dr, err := readDesignatedRequirement(ctx, mainPath)
+	dr, err := readDesignatedRequirement(ctx, source)
 	if err != nil {
-		return "", logPatchError(ctx, "patch.original_dr_capture_failed", fmt.Errorf("capture designated requirement from clean executable: %w", err))
+		notef(r, fmt.Sprintf("target=%s could not capture upstream DR from %s (continuing without it): %v", t.ID, source, err))
+		return "", nil
 	}
 	if designatedRequirementIdentifiesLocalTeam(dr) {
-		return "", logPatchErrorNoContext("patch.original_dr_identifies_local_team",
-			fmt.Errorf("target=%s DesignatedRequirement identifies local signing team %s, not upstream", t.ID, paths.SignTeamID()))
+		notef(r, fmt.Sprintf("target=%s captured DR identifies local signing team; recording no upstream DR", t.ID))
+		return "", nil
 	}
 	return dr, nil
 }

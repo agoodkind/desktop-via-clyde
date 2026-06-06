@@ -11,18 +11,20 @@ import (
 	"strings"
 	"time"
 
+	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/clock"
 	"goodkind.io/gklog"
 )
 
 // Runner abstracts process execution so dry-run and real-run share one path.
 type Runner struct {
-	DryRun bool
-	Out    io.Writer
-	RawOut io.Writer
-	Log    *slog.Logger
-	Trace  *Trace
-	ctxFn  func() context.Context
+	DryRun   bool
+	Out      io.Writer
+	RawOut   io.Writer
+	Progress clioutput.Progress
+	Log      *slog.Logger
+	Trace    *Trace
+	ctxFn    func() context.Context
 }
 
 // Action names one workflow action in the structured test trace.
@@ -56,11 +58,12 @@ func NewRunner(ctx context.Context, dryRun bool, out io.Writer) *Runner {
 		out = os.Stdout
 	}
 	return &Runner{
-		DryRun: dryRun,
-		Out:    out,
-		RawOut: out,
-		Log:    gklog.LoggerFromContext(ctx),
-		Trace:  nil,
+		DryRun:   dryRun,
+		Out:      out,
+		RawOut:   out,
+		Progress: nil,
+		Log:      gklog.LoggerFromContext(ctx),
+		Trace:    nil,
 		ctxFn: func() context.Context {
 			if ctx == nil {
 				return context.Background()
@@ -366,7 +369,19 @@ func (r *Runner) logError(ctx context.Context, msg string, err error, attrs ...s
 }
 
 func notef(r *Runner, message string) {
+	if r.Progress != nil {
+		r.Progress.Step(message)
+		return
+	}
 	fmt.Fprintf(r.Out, "%s %s\n", r.prefix(), message)
+}
+
+// MarkSkipped records that the target's run had nothing to do, so the renderer
+// reports it as skipped instead of ok. It is a no-op without a progress sink.
+func MarkSkipped(r *Runner, detail string) {
+	if r.Progress != nil {
+		r.Progress.SetOutcome(clioutput.OutcomeSkipped, detail)
+	}
 }
 
 func traceAction(r *Runner, action Action, target string, path string) {

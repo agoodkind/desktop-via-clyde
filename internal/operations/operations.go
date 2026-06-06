@@ -69,6 +69,7 @@ func (f FlagValues) Bool(name string) bool {
 type Request struct {
 	Out        io.Writer
 	LogOut     io.Writer
+	Progress   clioutput.Progress
 	App        *targets.Target
 	CLI        *targets.CLIProgram
 	Capability string

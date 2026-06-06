@@ -33,10 +33,6 @@ func TestRegisterLinksEveryCatalogCapability(t *testing.T) {
 			t.Fatalf("operation %q has no handler", capability)
 		}
 	}
-	assertEqualStrings(t, upgrade.RegisteredBootstrapStrategies(), []string{
-		upgrade.CleanMainBinaryBootstrapCapability,
-	})
-	assertEqualStrings(t, catalog.BootstrapCapabilities(), upgrade.RegisteredBootstrapStrategies())
 	assertEqualStrings(t, patch.RegisteredPostPatchHooks(), []string{
 		bundledclitee.HookCapability,
 	})
@@ -49,7 +45,6 @@ func TestRegisterLinksEveryCatalogCapability(t *testing.T) {
 		"bundled_cli_tee",
 		"codex_cli_shim",
 		"computer_use",
-		"original_dr_bootstrap_capability",
 	})
 }
 

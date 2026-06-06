@@ -1,10 +1,8 @@
 package upgrade
 
 import (
+	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,30 +11,35 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
+	"text/template"
 
+	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/config"
-	"goodkind.io/desktop-via-clyde/internal/extensions"
 	"goodkind.io/desktop-via-clyde/internal/patch"
-	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/spec"
-	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
-)
-
-const (
-	anthropicRequirement = `identifier "com.anthropic.claudefordesktop" and anchor apple generic and certificate leaf[subject.OU] = Q6L2SF6YDW`
-	goodkindRequirement  = `identifier "com.anthropic.claudefordesktop" and anchor apple generic and certificate leaf[subject.OU] = H3BMXM4W7H`
 )
 
 func TestMain(m *testing.M) {
 	if err := registerFixtureCapabilities(); err != nil {
 		panic(err)
 	}
-	if err := RegisterBootstrapStrategies(); err != nil {
-		panic(err)
-	}
 	os.Exit(m.Run())
+}
+
+// recordingProgress captures the terminal outcome an operation declares so tests
+// can assert it without a live renderer.
+type recordingProgress struct {
+	outcome    clioutput.Outcome
+	outcomeSet bool
+}
+
+func (p *recordingProgress) Step(string) {}
+func (p *recordingProgress) Skip(string) {}
+func (p *recordingProgress) Fail(string) {}
+func (p *recordingProgress) SetOutcome(outcome clioutput.Outcome, _ string) {
+	p.outcome = outcome
+	p.outcomeSet = true
 }
 
 func TestParseHTTPPathJSONManifest(t *testing.T) {
@@ -78,9 +81,6 @@ func TestParseSparkleAppcast(t *testing.T) {
 	}
 	if !strings.HasSuffix(got.URL, "Codex-darwin-arm64-26.519.41501.zip") {
 		t.Fatalf("URL = %q, want full Codex zip", got.URL)
-	}
-	if got.Signature == "" {
-		t.Fatalf("Signature is empty")
 	}
 }
 
@@ -171,23 +171,7 @@ func TestRunTreatsHTTPPathNoUpdateAsSkippedSuccess(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(server.Close)
-	appPath := filepath.Join(t.TempDir(), "Cursor.app")
-	contentsDir := filepath.Join(appPath, "Contents")
-	if err := os.MkdirAll(contentsDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll Contents: %v", err)
-	}
-	infoPlist := `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleVersion</key>
-  <string>3.7.2</string>
-</dict>
-</plist>
-`
-	if err := os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(infoPlist), 0o644); err != nil {
-		t.Fatalf("WriteFile Info.plist: %v", err)
-	}
+	appPath := writeBundleVersion(t, "Cursor.app", "3.7.2")
 	tg := targets.Target{
 		ID:      "cursor",
 		AppPath: appPath,
@@ -202,7 +186,8 @@ func TestRunTreatsHTTPPathNoUpdateAsSkippedSuccess(t *testing.T) {
 		},
 	}
 	var out strings.Builder
-	if err := Run(context.Background(), tg, Options{Out: &out}); err != nil {
+	progress := &recordingProgress{}
+	if err := Run(context.Background(), tg, Options{Out: &out, Progress: progress}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	output := out.String()
@@ -210,6 +195,47 @@ func TestRunTreatsHTTPPathNoUpdateAsSkippedSuccess(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q\noutput:\n%s", want, output)
 		}
+	}
+	if !progress.outcomeSet || progress.outcome != clioutput.OutcomeSkipped {
+		t.Fatalf("outcome = %q set=%v, want skipped", progress.outcome, progress.outcomeSet)
+	}
+}
+
+func TestRunAlreadyOnLatestVersionReportsSkipped(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"url":"https://example.invalid/Cursor.zip","name":"3.7.2"}`))
+	}))
+	t.Cleanup(server.Close)
+	appPath := writeBundleVersion(t, "Cursor.app", "3.7.2")
+	// A patched bundle keeps the original executable at <exec>.real.
+	realPath := filepath.Join(appPath, "Contents", "MacOS", "Cursor.real")
+	if err := os.WriteFile(realPath, []byte("clean"), 0o755); err != nil {
+		t.Fatalf("WriteFile real binary: %v", err)
+	}
+	tg := targets.Target{
+		ID:       "cursor",
+		AppPath:  appPath,
+		ExecName: "Cursor",
+		Updater: targets.Updater{
+			Kind:           targets.UpdaterHTTPPathJSONManifest,
+			URLTemplate:    server.URL + "/api/update/{version}/{channel}",
+			UserAgent:      "desktop-via-clyde-test/{version}",
+			DefaultChannel: "dev",
+			Channels: []spec.UpdaterChannel{
+				{Name: "dev"},
+			},
+		},
+	}
+	var out strings.Builder
+	progress := &recordingProgress{}
+	if err := Run(context.Background(), tg, Options{Out: &out, Progress: progress}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out.String(), "already on version 3.7.2; nothing to do") {
+		t.Fatalf("output missing already-on-version note\noutput:\n%s", out.String())
+	}
+	if !progress.outcomeSet || progress.outcome != clioutput.OutcomeSkipped {
+		t.Fatalf("outcome = %q set=%v, want skipped", progress.outcome, progress.outcomeSet)
 	}
 }
 
@@ -254,225 +280,11 @@ func TestRunMissingBundleDryRunInstallsFromUpdater(t *testing.T) {
 		"target=codex current version=0.0.0 updater=sparkle_appcast",
 		"target=codex app missing",
 		"target=codex manifest: name=3044",
-		"target=codex capture upstream DR from downloaded executable",
 		"target=codex patch complete",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q\noutput:\n%s", want, output)
 		}
-	}
-}
-
-func TestLoadOriginalDRUsesStateEntry(t *testing.T) {
-	installFixture(t)
-	t.Setenv("HOME", t.TempDir())
-	tg := targets.Target{
-		ID:       "claude",
-		AppPath:  "/Applications/Claude.app",
-		ExecName: "Claude",
-	}
-	multiState := state.MultiState{
-		Targets: map[string]state.TargetState{
-			"claude": {
-				PatchedVersion:                "1.8089.1",
-				PatchedAt:                     time.Unix(0, 0).UTC(),
-				SignIdentity:                  paths.SignIdentity(),
-				OriginalDesignatedRequirement: anthropicRequirement,
-			},
-		},
-	}
-	if err := state.Update(paths.StateFile(), func(_ state.MultiState) (state.MultiState, error) {
-		return multiState, nil
-	}); err != nil {
-		t.Fatalf("state.Update: %v", err)
-	}
-	got, err := loadOriginalDR(context.Background(), tg)
-	if err != nil {
-		t.Fatalf("loadOriginalDR: %v", err)
-	}
-	if got != anthropicRequirement {
-		t.Fatalf("loadOriginalDR = %q, want %q", got, anthropicRequirement)
-	}
-}
-
-func TestLoadOriginalDRBootstrapsCleanClaude(t *testing.T) {
-	installFixture(t)
-	t.Setenv("HOME", t.TempDir())
-	tg := testClaudeTarget(t)
-	restore := replaceReadDesignatedRequirement(func(_ context.Context, path string) (string, error) {
-		if path != paths.MainBinaryPath(tg) {
-			t.Fatalf("readDesignatedRequirement path = %q, want %q", path, paths.MainBinaryPath(tg))
-		}
-		return anthropicRequirement, nil
-	})
-	t.Cleanup(restore)
-	got, err := loadOriginalDR(context.Background(), tg)
-	if err != nil {
-		t.Fatalf("loadOriginalDR: %v", err)
-	}
-	if got != anthropicRequirement {
-		t.Fatalf("loadOriginalDR = %q, want %q", got, anthropicRequirement)
-	}
-}
-
-func TestLoadOriginalDRRejectsMissingStateWithRealBinary(t *testing.T) {
-	installFixture(t)
-	t.Setenv("HOME", t.TempDir())
-	tg := testClaudeTarget(t)
-	if err := os.WriteFile(paths.RealBinaryPath(tg), []byte("patched"), 0o755); err != nil {
-		t.Fatalf("WriteFile real binary: %v", err)
-	}
-	_, err := loadOriginalDR(context.Background(), tg)
-	if err == nil {
-		t.Fatal("expected missing state plus real binary error")
-	}
-	if !strings.Contains(err.Error(), "has no state entry") {
-		t.Fatalf("error = %q, want missing state text", err.Error())
-	}
-}
-
-func TestLoadOriginalDRRejectsLocalRequirementBootstrap(t *testing.T) {
-	installFixture(t)
-	t.Setenv("HOME", t.TempDir())
-	tg := testClaudeTarget(t)
-	restore := replaceReadDesignatedRequirement(func(context.Context, string) (string, error) {
-		return goodkindRequirement, nil
-	})
-	t.Cleanup(restore)
-	_, err := loadOriginalDR(context.Background(), tg)
-	if err == nil {
-		t.Fatal("expected local signing requirement error")
-	}
-	if !strings.Contains(err.Error(), paths.SignTeamID()) {
-		t.Fatalf("error = %q, want local team id", err.Error())
-	}
-}
-
-func TestVerifyDownloadSignature(t *testing.T) {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
-	tmpDir := t.TempDir()
-	zipPath := filepath.Join(tmpDir, "Codex.zip")
-	data := []byte("zip bytes")
-	if err := os.WriteFile(zipPath, data, 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	signature := ed25519.Sign(privateKey, data)
-	tg := targets.Target{
-		ID: "codex",
-		Updater: targets.Updater{
-			SparklePublicKey: base64.StdEncoding.EncodeToString(publicKey),
-		},
-	}
-	manifest := updateManifest{
-		Signature: base64.StdEncoding.EncodeToString(signature),
-	}
-	ok, err := verifyDownloadSignature(patch.NewRunner(context.Background(), false, io.Discard), tg, manifest, zipPath, false)
-	if err != nil {
-		t.Fatalf("verifyDownloadSignature: %v", err)
-	}
-	if !ok {
-		t.Fatalf("verifyDownloadSignature ok = false, want true")
-	}
-}
-
-func testClaudeTarget(t *testing.T) targets.Target {
-	t.Helper()
-	appPath := filepath.Join(t.TempDir(), "Claude.app")
-	macosDir := filepath.Join(appPath, "Contents", "MacOS")
-	if err := os.MkdirAll(macosDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll MacOS: %v", err)
-	}
-	tg := targets.Target{
-		ID:       "claude",
-		AppPath:  appPath,
-		ExecName: "Claude",
-		Extensions: extensions.Target{
-			OriginalDRBootstrapCapability: "clean-main-binary",
-		},
-	}
-	if err := os.WriteFile(paths.MainBinaryPath(tg), []byte("clean"), 0o755); err != nil {
-		t.Fatalf("WriteFile main binary: %v", err)
-	}
-	return tg
-}
-
-func replaceReadDesignatedRequirement(fn func(context.Context, string) (string, error)) func() {
-	original := readDesignatedRequirement
-	readDesignatedRequirement = fn
-	return func() {
-		readDesignatedRequirement = original
-	}
-}
-
-func lookupConfiguredTarget(t *testing.T, id string) targets.Target {
-	t.Helper()
-	installFixture(t)
-	for _, target := range targets.All() {
-		if target.ID == id {
-			return target
-		}
-	}
-	t.Fatalf("missing target %q", id)
-	return targets.Target{}
-}
-
-func TestVerifySparkleSignatureAllowsExtractedBundleKeyRotation(t *testing.T) {
-	oldPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey old: %v", err)
-	}
-	newPublicKey, newPrivateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey new: %v", err)
-	}
-	tmpDir := t.TempDir()
-	zipPath := filepath.Join(tmpDir, "Codex.zip")
-	data := []byte("zip bytes")
-	if err := os.WriteFile(zipPath, data, 0o644); err != nil {
-		t.Fatalf("WriteFile zip: %v", err)
-	}
-	signature := ed25519.Sign(newPrivateKey, data)
-	tg := targets.Target{
-		ID:      "codex",
-		AppPath: filepath.Join(tmpDir, "Current.app"),
-		Updater: targets.Updater{
-			SparklePublicKey: base64.StdEncoding.EncodeToString(oldPublicKey),
-		},
-	}
-	manifest := updateManifest{
-		Signature: base64.StdEncoding.EncodeToString(signature),
-	}
-	verified, err := verifyDownloadSignature(patch.NewRunner(context.Background(), false, io.Discard), tg, manifest, zipPath, false)
-	if err != nil {
-		t.Fatalf("verifyDownloadSignature: %v", err)
-	}
-	if verified {
-		t.Fatalf("verifyDownloadSignature verified old key, want false before extracted key")
-	}
-
-	extractedInfoDir := filepath.Join(tmpDir, "Extracted.app", "Contents")
-	if err := os.MkdirAll(extractedInfoDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll extracted info: %v", err)
-	}
-	infoPlist := `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleVersion</key>
-  <string>3044</string>
-  <key>SUPublicEDKey</key>
-  <string>` + base64.StdEncoding.EncodeToString(newPublicKey) + `</string>
-</dict>
-</plist>
-`
-	if err := os.WriteFile(filepath.Join(extractedInfoDir, "Info.plist"), []byte(infoPlist), 0o644); err != nil {
-		t.Fatalf("WriteFile Info.plist: %v", err)
-	}
-	if err := verifyExtractedSparkleSignature(patch.NewRunner(context.Background(), false, io.Discard), manifest, zipPath, filepath.Join(tmpDir, "Extracted.app"), verified, false); err != nil {
-		t.Fatalf("verifyExtractedSparkleSignature: %v", err)
 	}
 }
 
@@ -535,6 +347,51 @@ func TestExtractZipAcceptsSingleDifferentlyNamedAppRoot(t *testing.T) {
 	if got != want {
 		t.Fatalf("extractZip path = %q, want %q", got, want)
 	}
+}
+
+func writeBundleVersion(t *testing.T, bundleName, version string) string {
+	t.Helper()
+	appPath := filepath.Join(t.TempDir(), bundleName)
+	contentsDir := filepath.Join(appPath, "Contents")
+	if err := os.MkdirAll(filepath.Join(contentsDir, "MacOS"), 0o755); err != nil {
+		t.Fatalf("MkdirAll Contents: %v", err)
+	}
+	infoPlist := renderBundleInfoPlist(t, map[string]string{"Version": version})
+	if err := os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(infoPlist), 0o644); err != nil {
+		t.Fatalf("WriteFile Info.plist: %v", err)
+	}
+	return appPath
+}
+
+// renderBundleInfoPlist loads the bundle Info.plist template from testdata and
+// substitutes the supplied values, keeping the plist XML out of the Go source.
+func renderBundleInfoPlist(t *testing.T, data map[string]string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", "bundle-info.plist.tmpl"))
+	if err != nil {
+		t.Fatalf("read bundle-info plist template: %v", err)
+	}
+	tmpl, err := template.New("bundle-info").Parse(string(raw))
+	if err != nil {
+		t.Fatalf("parse bundle-info plist template: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		t.Fatalf("execute bundle-info plist template: %v", err)
+	}
+	return buf.String()
+}
+
+func lookupConfiguredTarget(t *testing.T, id string) targets.Target {
+	t.Helper()
+	installFixture(t)
+	for _, target := range targets.All() {
+		if target.ID == id {
+			return target
+		}
+	}
+	t.Fatalf("missing target %q", id)
+	return targets.Target{}
 }
 
 func installFixture(t *testing.T) {

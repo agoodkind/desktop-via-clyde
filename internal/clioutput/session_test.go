@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 )
@@ -24,13 +23,9 @@ func TestSessionJSONEmitsTypedRunEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	writer := session.ProgressWriter("codex")
-	if _, err := writer.Write([]byte("[run] prepared shim\n")); err != nil {
-		t.Fatalf("Write prepared shim: %v", err)
-	}
-	if _, err := writer.Write([]byte("[run] skipped relaunch\n")); err != nil {
-		t.Fatalf("Write skipped relaunch: %v", err)
-	}
+	progress := session.TargetProgress("codex")
+	progress.Step("prepared shim")
+	progress.Skip("skipped relaunch")
 	if err := session.Close([]TargetResult{NewTargetResult("codex", "app", nil, 0)}); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -80,440 +75,135 @@ func TestSessionTextRendersCoherentNonTTYLines(t *testing.T) {
 	}
 }
 
-func TestSessionProgressWriterRendersInstalledVersionEndToEnd(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-
-	var out bytes.Buffer
-	session, err := NewSession(context.Background(), SessionOptions{
-		Out:       &out,
-		Format:    FormatJSON,
-		Operation: "upgrade",
-		Scope:     "all",
-		Parallel:  1,
-		DryRun:    true,
-	})
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-
-	for _, target := range []string{"cursor", "codex"} {
-		targetLog, _, err := session.OpenTargetLog(target)
-		if err != nil {
-			t.Fatalf("OpenTargetLog %s: %v", target, err)
-		}
-		if err := targetLog.Close(); err != nil {
-			t.Fatalf("Close target log %s: %v", target, err)
-		}
-	}
-
-	cursorWriter := session.ProgressWriter("cursor")
-	for _, line := range []string{
-		"[run] target=cursor current version=3.7.6 channel=dev updater=cursor\n",
-		"[run] target=cursor no update available on dev channel; nothing to do\n",
-	} {
-		if _, err := cursorWriter.Write([]byte(line)); err != nil {
-			t.Fatalf("Write cursor progress line: %v", err)
-		}
-	}
-
-	codexWriter := session.ProgressWriter("codex")
-	if _, err := codexWriter.Write([]byte("[run] target=codex already on version 3436; nothing to do\n")); err != nil {
-		t.Fatalf("Write codex progress line: %v", err)
-	}
-
-	if err := session.Close([]TargetResult{
-		NewTargetResult("cursor", "app", nil, 0),
-		NewTargetResult("codex", "app", nil, 0),
-	}); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	model := modelFromSessionLog(t, session.runLogPath)
-	assertTargetRow(t, model, tableRow{
-		Target: "cursor",
-		State:  "skipped",
-		Step:   "no update available",
-		Detail: "installed version: 3.7.6",
-	})
-	assertTargetRow(t, model, tableRow{
-		Target: "codex",
-		State:  "skipped",
-		Step:   "no update available",
-		Detail: "installed version: 3436",
-	})
-}
-
-func TestLiveModelKeepsSkippedStatusAfterTargetDone(t *testing.T) {
+// TestLiveModelSubStepSkipDoesNotChangeTargetOK is the regression guard for the
+// core bug: a skipped (or failed) sub-step must never set the target's terminal
+// status. Only the authoritative EventTargetDone does.
+func TestLiveModelSubStepSkipDoesNotChangeTargetOK(t *testing.T) {
 	model := newLiveModel()
-	started := NewEvent(EventRunStarted, "upgrade")
-	started.Target = "cursor"
-	started.RunLog = "/tmp/run.jsonl"
-	model.apply(started)
-	targetStarted := NewEvent(EventTargetStarted, "upgrade")
-	targetStarted.Target = "cursor"
-	targetStarted.LogFile = "/tmp/cursor.log"
-	model.apply(targetStarted)
-	applyDoneStep(&model, "cursor", "current_version_3_7_6", "target=cursor current version=3.7.6 channel=dev updater=cursor")
-	skipped := NewEvent(EventStepSkipped, "upgrade")
-	skipped.Target = "cursor"
-	skipped.Step = "no_update_available"
-	skipped.Status = statusSkipped
-	skipped.Detail = "target=cursor no update available on dev channel; nothing to do"
-	model.apply(skipped)
+	model.apply(runStarted())
+	model.apply(targetStarted("cursor"))
+
+	skip := NewEvent(EventStepSkipped, "upgrade")
+	skip.Target = "cursor"
+	skip.Status = statusSkipped
+	skip.Detail = "target=cursor skipped nested entitlements identifier com.github.Electron.framework"
+	model.apply(skip)
+
 	done := NewEvent(EventTargetDone, "upgrade")
 	done.Target = "cursor"
 	done.Status = statusOK
+	done.Detail = "target=cursor upgrade to 1.11187.4 complete"
 	model.apply(done)
 
+	assertRowState(t, &model, "cursor", statusOK)
+	if detail := rowDetail(t, &model, "cursor"); !strings.Contains(detail, "upgrade to 1.11187.4 complete") {
+		t.Fatalf("cursor detail = %q, want upgrade-complete text", detail)
+	}
+}
+
+func TestLiveModelTargetDoneSkippedRendersSkipped(t *testing.T) {
+	model := newLiveModel()
+	model.apply(runStarted())
+	model.apply(targetStarted("cursor"))
+	done := NewEvent(EventTargetDone, "upgrade")
+	done.Target = "cursor"
+	done.Status = statusSkipped
+	done.Detail = "target=cursor already on version 3.7.6; nothing to do"
+	model.apply(done)
+
+	assertRowState(t, &model, "cursor", statusSkipped)
+}
+
+func TestLiveModelTargetDoneFailureRendersFailed(t *testing.T) {
+	model := newLiveModel()
+	model.apply(runStarted())
+	model.apply(targetStarted("codex"))
+	done := NewEvent(EventTargetDone, "upgrade")
+	done.Target = "codex"
+	done.Status = statusFailed
+	done.Detail = "patch clean bundle after version check: boom"
+	model.apply(done)
+
+	assertRowState(t, &model, "codex", statusFailed)
+	if detail := rowDetail(t, &model, "codex"); !strings.Contains(detail, "boom") {
+		t.Fatalf("codex detail = %q, want failure text", detail)
+	}
+}
+
+// TestLiveModelAggregateMatchesTerminalStatuses verifies the aggregate counts
+// come from the per-target terminal statuses and that ok+skipped+failed equals
+// the target count.
+func TestLiveModelAggregateMatchesTerminalStatuses(t *testing.T) {
+	model := newLiveModel()
+	model.apply(runStarted())
+	for _, id := range []string{"claude", "codex", "cursor"} {
+		model.apply(targetStarted(id))
+	}
+	applyDone(&model, "claude", statusOK)
+	applyDone(&model, "codex", statusSkipped)
+	applyDone(&model, "cursor", statusFailed)
+	model.apply(NewEvent(EventRunDone, "upgrade"))
+
+	okCount, skippedCount, failedCount, activeCount := model.targetCounts()
+	if okCount != 1 || skippedCount != 1 || failedCount != 1 || activeCount != 0 {
+		t.Fatalf("counts ok=%d skipped=%d failed=%d active=%d, want 1/1/1/0", okCount, skippedCount, failedCount, activeCount)
+	}
+	if okCount+skippedCount+failedCount != len(model.targets) {
+		t.Fatalf("terminal counts sum %d != target count %d", okCount+skippedCount+failedCount, len(model.targets))
+	}
 	output := model.View()
-	for _, want := range []string{"Upgrade", "running", "1 target", "cursor", "skipped", "no update available", "installed version: 3.7.6"} {
+	for _, want := range []string{"1 ok", "1 skipped", "1 failed", "finished"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("view missing %q\nview:\n%s", want, output)
 		}
 	}
-	if strings.Contains(output, "dev channel") {
-		t.Fatalf("view contains raw updater no-update detail\nview:\n%s", output)
-	}
-	if strings.Contains(output, "100%") {
-		t.Fatalf("view contains fake progress percentage\nview:\n%s", output)
-	}
 }
 
-func TestLiveModelRendersAggregateUpgradeTableAndLogs(t *testing.T) {
-	model := newLiveModel()
-	started := NewEvent(EventRunStarted, "upgrade")
-	started.Time = "2026-06-03T08:40:43-07:00"
-	started.RunLog = "/Users/agoodkind/.local/state/clyde/logs/upgrade/all-20260603T084043.jsonl"
-	model.apply(started)
-	applyStartedTarget(&model, "claude")
-	applyStartedTarget(&model, "codex")
-	applyStartedTarget(&model, "codex-cli")
-	applyStartedTarget(&model, "cursor")
-	applyDoneStep(&model, "claude", "upgrade_complete", "target=claude upgrade to 1.10628.0 complete")
-	applyTargetDone(&model, "claude", statusOK, "", "")
-	applySkippedStep(&model, "codex", "already_on_version", "target=codex already on version 3436; nothing to do")
-	applyTargetDone(&model, "codex", statusOK, "", "")
-	applyStartedStep(&model, "codex-cli", "building_codex_entrypoint", "codex-cli: building Codex entrypoint still running after 30s")
-	applyDoneStep(&model, "cursor", "upgrade_complete", "target=cursor upgrade to 3.7.6 complete")
-	applyTargetDone(&model, "cursor", statusOK, "", "")
-
-	output := model.View()
-	for _, want := range []string{
-		"run log    /Users/agoodkind/.local/state/clyde/logs/upgrade/all-20260603T084043.jsonl",
-		"Upgrade    running    4 targets    started 08:40:43",
-		"TARGET",
-		"STATE",
-		"STEP",
-		"DETAIL",
-		"claude",
-		"ok",
-		"upgrade complete",
-		"upgraded to 1.10628.0",
-		"codex",
-		"skipped",
-		"no update available",
-		"installed version: 3436",
-		"codex-cli",
-		"running",
-		"building codex entrypoint",
-		"still running after 30s",
-		"cursor",
-		"upgraded to 3.7.6",
-		"Logs",
-		"/Users/agoodkind/.local/state/clyde/logs/upgrade/claude-20260603T084043.log",
-		"/Users/agoodkind/.local/state/clyde/logs/upgrade/codex-20260603T084043.log",
-		"/Users/agoodkind/.local/state/clyde/logs/upgrade/codex-cli-20260603T084043.log",
-		"/Users/agoodkind/.local/state/clyde/logs/upgrade/cursor-20260603T084043.log",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("view missing %q\nview:\n%s", want, output)
-		}
-	}
-	runLogIndex := strings.Index(output, "run log    ")
-	summaryIndex := strings.Index(output, "Upgrade    running")
-	if runLogIndex == -1 || summaryIndex == -1 || runLogIndex > summaryIndex {
-		t.Fatalf("run log should render before summary\nview:\n%s", output)
-	}
-	logsIndex := strings.Index(output, "Logs")
-	if logsIndex == -1 {
-		t.Fatalf("view missing Logs section\nview:\n%s", output)
-	}
-	mainTable := output[:logsIndex]
-	for _, blocked := range []string{
-		"/Users/agoodkind/.local/state/clyde/logs/upgrade/claude-20260603T084043.log",
-		"/Users/agoodkind/.local/state/clyde/logs/upgrade/codex-20260603T084043.log",
-		"/Users/agoodkind/.local/state/clyde/logs/upgrade/codex-cli-20260603T084043.log",
-		"/Users/agoodkind/.local/state/clyde/logs/upgrade/cursor-20260603T084043.log",
-	} {
-		if strings.Contains(mainTable, blocked) {
-			t.Fatalf("main table contains target log path %q\nview:\n%s", blocked, output)
-		}
-	}
-	for _, blocked := range []string{"Active", "Failures"} {
-		if strings.Contains(output, blocked) {
-			t.Fatalf("view contains removed section %q\nview:\n%s", blocked, output)
-		}
-	}
+func runStarted() Event {
+	event := NewEvent(EventRunStarted, "upgrade")
+	event.Time = "2026-06-06T08:40:43-07:00"
+	event.RunLog = "/tmp/run.jsonl"
+	return event
 }
 
-func TestLiveModelAlreadyCurrentSuccessRendersInstalledVersion(t *testing.T) {
-	model := newLiveModel()
-	applyStartedTarget(&model, "codex")
-	applySkippedStep(&model, "codex", "already_on_version", "target=codex already on version 3436; nothing to do")
-	applyTargetDone(&model, "codex", statusOK, "", "")
-
-	output := model.View()
-	for _, want := range []string{"codex", "skipped", "no update available", "installed version: 3436"} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("view missing %q\nview:\n%s", want, output)
-		}
-	}
-	if strings.Contains(output, "already on version") {
-		t.Fatalf("view contains raw already-current detail\nview:\n%s", output)
-	}
-}
-
-func TestLiveModelUpdaterNoUpdateUsesLastObservedCurrentVersion(t *testing.T) {
-	model := newLiveModel()
-	applyStartedTarget(&model, "cursor")
-	applyDoneStep(&model, "cursor", "current_version_3_7_6", "target=cursor current version=3.7.6 channel=dev updater=cursor")
-	applySkippedStep(&model, "cursor", "no_update_available", "target=cursor no update available on dev channel; nothing to do")
-	applyTargetDone(&model, "cursor", statusOK, "", "")
-
-	output := model.View()
-	for _, want := range []string{"cursor", "skipped", "no update available", "installed version: 3.7.6"} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("view missing %q\nview:\n%s", want, output)
-		}
-	}
-	for _, blocked := range []string{"dev channel", "nothing to do"} {
-		if strings.Contains(output, blocked) {
-			t.Fatalf("view contains raw updater no-update detail %q\nview:\n%s", blocked, output)
-		}
-	}
-}
-
-func TestLiveModelTargetDoneFailureOverridesAlreadyCurrentProgress(t *testing.T) {
-	model := newLiveModel()
-	applyStartedTarget(&model, "codex")
-	applySkippedStep(&model, "codex", "already_on_version", "target=codex already on version 3436; nothing to do")
-	applyTargetDone(&model, "codex", statusFailed, "operation_failed", "patch clean bundle after version check: boom")
-
-	output := model.View()
-	for _, want := range []string{"codex", "failed", "operation failed", "patch clean bundle after version check: boom"} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("view missing %q\nview:\n%s", want, output)
-		}
-	}
-	for _, blocked := range []string{"skipped", "installed version: 3436"} {
-		if strings.Contains(output, blocked) {
-			t.Fatalf("view contains stale already-current state %q\nview:\n%s", blocked, output)
-		}
-	}
-}
-
-func TestLiveModelTrimsDuplicateRunningStepDetail(t *testing.T) {
-	model := newLiveModel()
-	applyStartedTarget(&model, "codex-cli")
-	applyStartedStep(
-		&model,
-		"codex-cli",
-		"building_codex_entrypoint_still_running_after_21m30s",
-		"codex-cli: building Codex entrypoint still running after 21m30s",
-	)
-
-	output := model.View()
-	for _, want := range []string{"codex-cli", "running", "building codex entrypoint", "still running after 21m30s"} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("view missing %q\nview:\n%s", want, output)
-		}
-	}
-	if strings.Count(strings.ToLower(output), "building codex entrypoint") != 1 {
-		t.Fatalf("view repeats running step text\nview:\n%s", output)
-	}
-	if strings.Contains(output, "building codex entrypoint still running after 21m30s") {
-		t.Fatalf("view leaves elapsed detail in step column\nview:\n%s", output)
-	}
-}
-
-func TestLiveModelOmitsExactDuplicateStepDetail(t *testing.T) {
-	model := newLiveModel()
-	applyStartedTarget(&model, "claude")
-	applyStartedStep(&model, "claude", "starting", "target=claude starting")
-
-	output := model.View()
-	if strings.Count(output, "starting") != 1 {
-		t.Fatalf("view repeats exact step detail\nview:\n%s", output)
-	}
-}
-
-func TestLiveModelCompactsSccacheAndFreshBundleDetails(t *testing.T) {
-	model := newLiveModel()
-	applyStartedTarget(&model, "codex-cli")
-	applyStartedStep(
-		&model,
-		"codex-cli",
-		"using_sccache_wrapper_opt_homebrew_bin_sccache",
-		"codex-cli: using sccache wrapper /opt/homebrew/bin/sccache",
-	)
-	applyStartedTarget(&model, "claude")
-	applyStartedStep(
-		&model,
-		"claude",
-		"installing_fresh_bundle",
-		"target=claude installing fresh bundle /Users/agoodkind/.local/state/clyde/upgrade-staging/claude-1.10628.2-1780529790/extracted/Claude.app -> /Applications/Claude.app",
-	)
-
-	output := model.View()
-	for _, want := range []string{
-		"using sccache",
-		"/opt/homebrew/bin/sccache",
-		"installing fresh bundle",
-		"replacing Claude.app",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("view missing %q\nview:\n%s", want, output)
-		}
-	}
-	for _, blocked := range []string{
-		"using sccache wrapper",
-		"upgrade-staging",
-		"extracted/Claude.app",
-	} {
-		if strings.Contains(output, blocked) {
-			t.Fatalf("view contains noisy detail %q\nview:\n%s", blocked, output)
-		}
-	}
-}
-
-func TestLiveModelCompactsVersionInstallAndToolchainDetails(t *testing.T) {
-	model := newLiveModel()
-	applyStartedTarget(&model, "codex")
-	applyStartedStep(
-		&model,
-		"codex",
-		"current_version_3436_channel_beta",
-		"target=codex current version=3436 channel=beta updater=sparkle_appcast",
-	)
-	applyStartedTarget(&model, "codex-cli")
-	applyStartedStep(
-		&model,
-		"codex-cli",
-		"install_complete_release_users_agoodkind_codex_packages_standalone_releases_dryrun_main_dryrun_aarch64_apple_darwin_local_fast",
-		"codex-cli: install complete release=/Users/agoodkind/.codex/packages/standalone/releases/dryrun/main/dryrun-aarch64-apple-darwin/local-fast local_fast=true",
-	)
-	applyStartedTarget(&model, "rust")
-	applyStartedStep(
-		&model,
-		"rust",
-		"installing_or_updating_upstream_rust_toolchain_from_users_agoodkind_cache_clyde_desktop_via_clyde_codex_source_codex_rs_rust_toolchain_toml",
-		"installing or updating upstream Rust toolchain from /Users/agoodkind/.cache/clyde/desktop-via-clyde/codex/source/codex-rs/rust-toolchain.toml",
-	)
-
-	output := model.View()
-	for _, want := range []string{
-		"checking installed version",
-		"installed version: 3436",
-		"install complete",
-		"release: local-fast",
-		"installing rust toolchain",
-		"from rust-toolchain.toml",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("view missing %q\nview:\n%s", want, output)
-		}
-	}
-	for _, blocked := range []string{
-		"current version 3436 channel beta",
-		"channel=beta",
-		"install complete release",
-		"standalone/releases",
-		"installing or updating upstream Rust toolchain",
-		"codex/source/codex-rs",
-	} {
-		if strings.Contains(output, blocked) {
-			t.Fatalf("view contains duplicate or noisy detail %q\nview:\n%s", blocked, output)
-		}
-	}
-}
-
-func modelFromSessionLog(t *testing.T, path string) liveModel {
-	t.Helper()
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile %s: %v", path, err)
-	}
-	model := newLiveModel()
-	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
-		var document eventDocument
-		if err := json.Unmarshal([]byte(line), &document); err != nil {
-			t.Fatalf("Unmarshal event document: %v\nline:\n%s", err, line)
-		}
-		model.apply(document.Event)
-	}
-	return model
-}
-
-func assertTargetRow(t *testing.T, model liveModel, want tableRow) {
-	t.Helper()
-	for _, row := range model.tableRows() {
-		if row.Target != want.Target {
-			continue
-		}
-		if row.State != want.State || row.Step != want.Step || row.Detail != want.Detail {
-			t.Fatalf("row for %s = %#v, want %#v", want.Target, row, want)
-		}
-		return
-	}
-	t.Fatalf("missing row for target %s\nview:\n%s", want.Target, model.View())
-}
-
-func applyStartedTarget(model *liveModel, target string) {
+func targetStarted(target string) Event {
 	event := NewEvent(EventTargetStarted, "upgrade")
 	event.Target = target
 	event.Status = statusRunning
-	event.LogFile = "/Users/agoodkind/.local/state/clyde/logs/upgrade/" + target + "-20260603T084043.log"
-	model.apply(event)
+	event.LogFile = "/tmp/" + target + ".log"
+	return event
 }
 
-func applyStartedStep(model *liveModel, target string, step string, detail string) {
-	event := NewEvent(EventStepStarted, "upgrade")
-	event.Target = target
-	event.Step = step
-	event.Status = statusRunning
-	event.Detail = detail
-	event.LogFile = "/Users/agoodkind/.local/state/clyde/logs/upgrade/" + target + "-20260603T084043.log"
-	model.apply(event)
-}
-
-func applyDoneStep(model *liveModel, target string, step string, detail string) {
-	event := NewEvent(EventStepDone, "upgrade")
-	event.Target = target
-	event.Step = step
-	event.Status = statusOK
-	event.Detail = detail
-	event.LogFile = "/Users/agoodkind/.local/state/clyde/logs/upgrade/" + target + "-20260603T084043.log"
-	model.apply(event)
-}
-
-func applySkippedStep(model *liveModel, target string, step string, detail string) {
-	event := NewEvent(EventStepSkipped, "upgrade")
-	event.Target = target
-	event.Step = step
-	event.Status = statusSkipped
-	event.Detail = detail
-	event.LogFile = "/Users/agoodkind/.local/state/clyde/logs/upgrade/" + target + "-20260603T084043.log"
-	model.apply(event)
-}
-
-func applyTargetDone(model *liveModel, target string, status string, step string, detail string) {
+func applyDone(model *liveModel, target string, status string) {
 	event := NewEvent(EventTargetDone, "upgrade")
 	event.Target = target
 	event.Status = status
-	event.Step = step
-	event.Detail = detail
-	event.LogFile = "/Users/agoodkind/.local/state/clyde/logs/upgrade/" + target + "-20260603T084043.log"
 	model.apply(event)
+}
+
+func assertRowState(t *testing.T, model *liveModel, target string, wantStatus string) {
+	t.Helper()
+	for _, row := range model.tableRows() {
+		if row.Target != target {
+			continue
+		}
+		if row.State != wantStatus {
+			t.Fatalf("row %s state = %q, want %q", target, row.State, wantStatus)
+		}
+		return
+	}
+	t.Fatalf("missing row for target %s\nview:\n%s", target, model.View())
+}
+
+func rowDetail(t *testing.T, model *liveModel, target string) string {
+	t.Helper()
+	for _, row := range model.tableRows() {
+		if row.Target == target {
+			return row.Detail
+		}
+	}
+	t.Fatalf("missing row for target %s", target)
+	return ""
 }
 
 func assertJSONEventType(t *testing.T, line string, want EventType) {

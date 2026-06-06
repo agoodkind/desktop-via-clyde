@@ -213,15 +213,16 @@ func runSelection(
 		result.Err = valuesErr
 		result.Duration = clock.Since(started)
 		emitTargetFailure(session, req.Operation, selection.ID, valuesErr)
-		emitTargetDone(session, req.Operation, selection.ID, valuesErr, result.Duration)
+		emitTargetDone(session, selection.ID, valuesErr, result.Duration)
 		return result
 	}
 
 	appTarget := cloneAppTarget(selection.App, flagValues)
-	progressOut := session.ProgressWriter(selection.ID)
+	progress := session.TargetProgress(selection.ID)
 	result.Err = runner(ctx, operations.Request{
-		Out:        progressOut,
+		Out:        rawLog,
 		LogOut:     rawLog,
+		Progress:   progress,
 		App:        appTarget,
 		CLI:        selection.CLI,
 		Capability: selection.Operation.Capability,
@@ -230,7 +231,7 @@ func runSelection(
 	})
 	result.Duration = clock.Since(started)
 	emitTargetFailure(session, req.Operation, selection.ID, result.Err)
-	emitTargetDone(session, req.Operation, selection.ID, result.Err, result.Duration)
+	emitTargetDone(session, selection.ID, result.Err, result.Duration)
 	return result
 }
 
@@ -250,22 +251,9 @@ func emitTargetFailure(session *clioutput.Session, operation OperationName, targ
 	}
 }
 
-func emitTargetDone(session *clioutput.Session, operation OperationName, targetID string, err error, duration time.Duration) {
-	status := "ok"
-	if err != nil {
-		status = "failed"
-	}
-	durationMS := duration.Milliseconds()
-	event := clioutput.NewEvent(clioutput.EventTargetDone, string(operation))
-	event.Target = targetID
-	event.Status = status
-	event.DurationMS = &durationMS
-	if err != nil {
-		event.Step = "operation_failed"
-		event.Detail = err.Error()
-	}
-	if emitErr := session.Emit(event); emitErr != nil {
-		slog.Warn("batchops.emit_target_done_failed", "err", emitErr, "target", targetID, "operation", operation)
+func emitTargetDone(session *clioutput.Session, targetID string, err error, duration time.Duration) {
+	if emitErr := session.EmitTargetDone(targetID, err, duration); emitErr != nil {
+		slog.Warn("batchops.emit_target_done_failed", "err", emitErr, "target", targetID)
 	}
 }
 

@@ -14,18 +14,16 @@ import (
 
 // AppSpec stores optional app behavior owned by extension packages.
 type AppSpec struct {
-	ComputerUse                   *ComputerUseSpec
-	BundledCLITee                 *BundledCLITeeSpec
-	CodexCLIShim                  *CodexCLIShimSpec
-	OriginalDRBootstrapCapability string
+	ComputerUse   *ComputerUseSpec
+	BundledCLITee *BundledCLITeeSpec
+	CodexCLIShim  *CodexCLIShimSpec
 }
 
 // DecodedAppSpec captures extension-owned TOML declarations during config load.
 type DecodedAppSpec struct {
-	ComputerUse                   *ComputerUseSpec   `toml:"computer_use"`
-	BundledCLITee                 *BundledCLITeeSpec `toml:"bundled_cli_tee"`
-	CodexCLIShim                  *CodexCLIShimSpec  `toml:"codex_cli_shim"`
-	OriginalDRBootstrapCapability string             `toml:"original_dr_bootstrap_capability"`
+	ComputerUse   *ComputerUseSpec   `toml:"computer_use"`
+	BundledCLITee *BundledCLITeeSpec `toml:"bundled_cli_tee"`
+	CodexCLIShim  *CodexCLIShimSpec  `toml:"codex_cli_shim"`
 }
 
 // EntitlementsSpec describes extension-owned entitlement mutations.
@@ -74,10 +72,9 @@ type CodexCLIShimSpec struct {
 
 // Target stores runtime optional behavior owned by extension packages.
 type Target struct {
-	ComputerUse                   *ComputerUsePolicy
-	BundledCLITee                 *BundledCLITeeSpec
-	CodexCLIShim                  *CodexCLIShimSpec
-	OriginalDRBootstrapCapability string
+	ComputerUse   *ComputerUsePolicy
+	BundledCLITee *BundledCLITeeSpec
+	CodexCLIShim  *CodexCLIShimSpec
 }
 
 // PostPatchHookCapabilities returns optional post-patch hook capabilities.
@@ -94,11 +91,6 @@ func (t Target) PreLaunchPolicyHookCapabilities() []string {
 		return nil
 	}
 	return []string{t.CodexCLIShim.Capability}
-}
-
-// BootstrapCapability returns the optional bootstrap strategy capability.
-func (t Target) BootstrapCapability() string {
-	return t.OriginalDRBootstrapCapability
 }
 
 // ToAppSpec converts one decoded extension block into the app extension model.
@@ -196,7 +188,6 @@ func NormalizeAppSpec(
 	if app == nil {
 		return
 	}
-	app.OriginalDRBootstrapCapability = trimSpace(app.OriginalDRBootstrapCapability)
 	if app.ComputerUse != nil {
 		normalizeComputerUse(app.ComputerUse, cleanPath, normalizeStrings)
 	}
@@ -211,10 +202,9 @@ func NormalizeAppSpec(
 // BuildTarget converts app extension declarations into runtime extension data.
 func BuildTarget(app AppSpec) Target {
 	target := Target{
-		ComputerUse:                   nil,
-		BundledCLITee:                 cloneBundledCLITee(app.BundledCLITee),
-		CodexCLIShim:                  cloneCodexCLIShim(app.CodexCLIShim),
-		OriginalDRBootstrapCapability: app.OriginalDRBootstrapCapability,
+		ComputerUse:   nil,
+		BundledCLITee: cloneBundledCLITee(app.BundledCLITee),
+		CodexCLIShim:  cloneCodexCLIShim(app.CodexCLIShim),
 	}
 	if app.ComputerUse != nil {
 		target.ComputerUse = buildComputerUse(*app.ComputerUse)
@@ -306,15 +296,6 @@ func buildComputerUse(policy ComputerUseSpec) *ComputerUsePolicy {
 		TeamRequirementPlists: cloneStrings(policy.TeamRequirementPlists),
 		SignTargets:           signTargets,
 	}
-}
-
-// ValidateOriginalDRBootstrapCapability validates bootstrap strategy declarations.
-func ValidateOriginalDRBootstrapCapability(path string, app *AppSpec) error {
-	app.OriginalDRBootstrapCapability = trimSpace(app.OriginalDRBootstrapCapability)
-	if app.OriginalDRBootstrapCapability != "" && !catalog.HasBootstrapCapability(app.OriginalDRBootstrapCapability) {
-		return fmt.Errorf("%s.original_dr_bootstrap_capability %q is unknown", path, app.OriginalDRBootstrapCapability)
-	}
-	return nil
 }
 
 // ValidateBundledCLITee validates bundled CLI tee declarations.

@@ -374,6 +374,22 @@ func runOperation(
 		appTarget = &copied
 	}
 
+	// Report capabilities (per-target status) write their payload directly to
+	// out. They are not progress operations, so they bypass the live session
+	// entirely rather than routing a report through a progress renderer.
+	if isReportCapability(operation.Capability) {
+		return runner(ctx, operations.Request{
+			Out:        out,
+			LogOut:     nil,
+			Progress:   nil,
+			App:        appTarget,
+			CLI:        program,
+			Capability: operation.Capability,
+			Flags:      flagValues,
+			Format:     format,
+		})
+	}
+
 	targetName := targetID(appTarget, program)
 	session, err := clioutput.NewSession(ctx, clioutput.SessionOptions{
 		Out:       out,
@@ -391,10 +407,11 @@ func runOperation(
 		return fmt.Errorf("open target output log: %w", err)
 	}
 	started := clock.Now()
-	commandOut := session.ProgressWriter(targetName)
+	progress := session.TargetProgress(targetName)
 	runErr := runner(ctx, operations.Request{
-		Out:        commandOut,
+		Out:        rawLog,
 		LogOut:     rawLog,
+		Progress:   progress,
 		App:        appTarget,
 		CLI:        program,
 		Capability: operation.Capability,
@@ -402,21 +419,12 @@ func runOperation(
 		Format:     format,
 	})
 	_ = rawLog.Close()
-	status := "ok"
-	if runErr != nil {
-		status = "failed"
-	}
 	failureEmitErr := error(nil)
 	if runErr != nil {
 		failureEmitErr = session.EmitStepFailed(targetName, runErr.Error())
 	}
 	duration := clock.Since(started)
-	durationMS := duration.Milliseconds()
-	event := clioutput.NewEvent(clioutput.EventTargetDone, operation.Use)
-	event.Target = targetName
-	event.Status = status
-	event.DurationMS = &durationMS
-	emitErr := session.Emit(event)
+	emitErr := session.EmitTargetDone(targetName, runErr, duration)
 	closeErr := session.Close([]clioutput.TargetResult{
 		clioutput.NewTargetResult(targetName, targetKind(appTarget, program), runErr, duration),
 	})
@@ -433,6 +441,12 @@ func runOperation(
 		return fmt.Errorf("close output session: %w", closeErr)
 	}
 	return nil
+}
+
+// isReportCapability reports whether a capability writes a status report to its
+// output writer instead of running a multi-step progress operation.
+func isReportCapability(capability string) bool {
+	return strings.HasSuffix(capability, ".status")
 }
 
 func runStatus(ctx context.Context, cmd *cobra.Command, out io.Writer) error {

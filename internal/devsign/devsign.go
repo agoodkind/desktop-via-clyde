@@ -23,6 +23,7 @@ import (
 	"strings"
 	"text/template"
 
+	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
@@ -60,8 +61,9 @@ type Commander interface {
 
 // Options controls how the overlay is applied.
 type Options struct {
-	DryRun bool
-	Out    io.Writer
+	DryRun   bool
+	Out      io.Writer
+	Progress clioutput.Progress
 }
 
 // MissingAsset names one required development-signing input that is absent.
@@ -283,6 +285,10 @@ func stripQuarantine(ctx context.Context, cmd Commander, opts Options, t targets
 }
 
 func note(opts Options, message string) {
+	if opts.Progress != nil {
+		opts.Progress.Step(message)
+		return
+	}
 	if opts.Out == nil {
 		return
 	}

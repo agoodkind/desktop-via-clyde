@@ -34,12 +34,13 @@ const (
 
 // TargetStatus is one rendered target row.
 type TargetStatus struct {
-	ID             string                `json:"id"`
-	State          string                `json:"state"`
-	Version        string                `json:"version"`
-	Notes          string                `json:"notes"`
-	AppPath        string                `json:"app_path"`
-	RuntimeBundles []RuntimeBundleStatus `json:"runtime_bundles,omitempty"`
+	ID              string                `json:"id"`
+	State           string                `json:"state"`
+	Version         string                `json:"version"`
+	Notes           string                `json:"notes"`
+	UpstreamSigning string                `json:"upstream_signing"`
+	AppPath         string                `json:"app_path"`
+	RuntimeBundles  []RuntimeBundleStatus `json:"runtime_bundles,omitempty"`
 }
 
 // RuntimeBundleStatus records signing coverage for one executable bundle.
@@ -106,7 +107,11 @@ func WriteText(out io.Writer, report Report) error {
 		return fmt.Errorf("write status header: %w", err)
 	}
 	for _, target := range report.Targets {
-		if _, err := fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", target.ID, target.State, target.Version, target.Notes); err != nil {
+		notes := target.Notes
+		if target.UpstreamSigning != "" {
+			notes = notes + "; upstream=" + target.UpstreamSigning
+		}
+		if _, err := fmt.Fprintf(out, "%-8s  %-9s  %-20s  %s\n", target.ID, target.State, target.Version, notes); err != nil {
 			statusReportLog.Warn("statusreport.write_row_failed", "err", err, "target", target.ID)
 			return fmt.Errorf("write status row for %s: %w", target.ID, err)
 		}
@@ -123,12 +128,13 @@ func WriteText(out io.Writer, report Report) error {
 func buildTargetStatus(ctx context.Context, target targets.Target, multiState state.MultiState) (TargetStatus, error) {
 	_ = ctx
 	result := TargetStatus{
-		ID:             target.ID,
-		State:          "clean",
-		Version:        "-",
-		Notes:          "bundle present, no state entry",
-		AppPath:        target.AppPath,
-		RuntimeBundles: nil,
+		ID:              target.ID,
+		State:           "clean",
+		Version:         "-",
+		Notes:           "bundle present, no state entry",
+		UpstreamSigning: "",
+		AppPath:         target.AppPath,
+		RuntimeBundles:  nil,
 	}
 
 	if _, err := os.Stat(target.AppPath); err != nil {
@@ -150,6 +156,7 @@ func buildTargetStatus(ctx context.Context, target targets.Target, multiState st
 	result.State = "patched"
 	result.Version = entry.PatchedVersion
 	result.Notes = fmt.Sprintf("signed-as=%q", entry.SignIdentity)
+	result.UpstreamSigning = upstreamSigningLabel(entry.OriginalDesignatedRequirement)
 	result.RuntimeBundles = runtimeBundleStatuses(ctx, target, true)
 	if drift := firstRuntimeBundleDrift(result.RuntimeBundles); drift != "" {
 		result.State = "drifted"
@@ -235,6 +242,26 @@ func firstRuntimeBundleDrift(bundles []RuntimeBundleStatus) string {
 		}
 	}
 	return ""
+}
+
+// upstreamSigningLabel renders the recorded upstream signing identity for
+// display. It extracts the certificate team OU from the recorded designated
+// requirement when present, falls back to the raw requirement string, and
+// returns "unknown" when no upstream requirement was captured.
+func upstreamSigningLabel(designatedRequirement string) string {
+	trimmed := strings.TrimSpace(designatedRequirement)
+	if trimmed == "" {
+		return "unknown"
+	}
+	const teamMarker = `subject.OU] = "`
+	if _, afterMarker, found := strings.Cut(trimmed, teamMarker); found {
+		if team, _, ok := strings.Cut(afterMarker, `"`); ok {
+			if trimmedTeam := strings.TrimSpace(team); trimmedTeam != "" {
+				return trimmedTeam
+			}
+		}
+	}
+	return trimmed
 }
 
 func readBundleVersion(target targets.Target) string {

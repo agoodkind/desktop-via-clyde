@@ -1,7 +1,6 @@
 package clioutput
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -52,6 +51,32 @@ const (
 	statusFailed  = "failed"
 	statusSkipped = "skipped"
 )
+
+// Outcome is a target's terminal run outcome, set explicitly by the operation
+// (or derived from its returned error). It reuses the existing wire status
+// strings, so the JSON contract is unchanged.
+type Outcome string
+
+const (
+	// OutcomeOK marks a target whose run performed work successfully.
+	OutcomeOK Outcome = statusOK
+	// OutcomeSkipped marks a target whose run had nothing to do (already current,
+	// no update available).
+	OutcomeSkipped Outcome = statusSkipped
+	// OutcomeFailed marks a target whose run failed.
+	OutcomeFailed Outcome = statusFailed
+)
+
+// Progress is the typed milestone sink operations use instead of printing prose.
+// The renderer derives no status from these calls: Step is always a successful
+// milestone, Skip and Fail are display-only step markers, and only SetOutcome
+// (or a returned error) sets the target's terminal status.
+type Progress interface {
+	Step(detail string)
+	Skip(detail string)
+	Fail(detail string)
+	SetOutcome(outcome Outcome, detail string)
+}
 
 // Event is one structured progress event for patch and upgrade commands.
 type Event struct {
@@ -128,6 +153,12 @@ type Session struct {
 	runLogPath string
 	renderer   renderer
 	mu         sync.Mutex
+	outcomes   map[string]recordedOutcome
+}
+
+type recordedOutcome struct {
+	outcome Outcome
+	detail  string
 }
 
 type renderer interface {
@@ -164,6 +195,7 @@ func NewSession(ctx context.Context, opts SessionOptions) (*Session, error) {
 		runLogPath: runLogPath,
 		renderer:   newRenderer(metadata, opts.Out, opts.Format),
 		mu:         sync.Mutex{},
+		outcomes:   map[string]recordedOutcome{},
 	}
 	dryRun := opts.DryRun
 	parallel := opts.Parallel
@@ -180,14 +212,84 @@ func NewSession(ctx context.Context, opts SessionOptions) (*Session, error) {
 	return session, nil
 }
 
-// ProgressWriter returns a writer that converts milestone lines into events.
-func (s *Session) ProgressWriter(target string) io.Writer {
-	return &lineEventWriter{
-		session: s,
-		target:  target,
-		pending: nil,
-		mu:      sync.Mutex{},
+// TargetProgress returns the typed milestone sink for one target. Operations
+// call its methods directly; nothing is parsed back out of log prose.
+func (s *Session) TargetProgress(target string) Progress {
+	return &targetProgress{session: s, target: target}
+}
+
+type targetProgress struct {
+	session *Session
+	target  string
+}
+
+func (p *targetProgress) Step(detail string) {
+	p.emit(EventStepDone, statusOK, detail)
+}
+
+func (p *targetProgress) Skip(detail string) {
+	p.emit(EventStepSkipped, statusSkipped, detail)
+}
+
+func (p *targetProgress) Fail(detail string) {
+	p.emit(EventStepFailed, statusFailed, detail)
+}
+
+func (p *targetProgress) emit(eventType EventType, status string, detail string) {
+	started := NewEvent(EventStepStarted, p.session.operation)
+	started.Target = p.target
+	started.Status = statusRunning
+	started.Detail = detail
+	if err := p.session.Emit(started); err != nil {
+		slog.Warn("clioutput.progress.emit_started_failed", "err", err, "target", p.target)
 	}
+	event := NewEvent(eventType, p.session.operation)
+	event.Target = p.target
+	event.Status = status
+	event.Detail = detail
+	if err := p.session.Emit(event); err != nil {
+		slog.Warn("clioutput.progress.emit_step_failed", "err", err, "target", p.target)
+	}
+}
+
+func (p *targetProgress) SetOutcome(outcome Outcome, detail string) {
+	p.session.recordOutcome(p.target, outcome, detail)
+}
+
+func (s *Session) recordOutcome(target string, outcome Outcome, detail string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.outcomes[target] = recordedOutcome{outcome: outcome, detail: detail}
+}
+
+// EmitTargetDone writes the authoritative terminal event for one target. The
+// status comes from runErr (failed) or the outcome the operation recorded
+// (defaulting to ok); step-level outcomes never reach this decision.
+func (s *Session) EmitTargetDone(target string, runErr error, duration time.Duration) error {
+	status := statusOK
+	detail := ""
+	switch {
+	case runErr != nil:
+		status = statusFailed
+		detail = strings.TrimSpace(runErr.Error())
+	default:
+		s.mu.Lock()
+		recorded, ok := s.outcomes[target]
+		s.mu.Unlock()
+		if ok {
+			status = string(recorded.outcome)
+			detail = recorded.detail
+		}
+	}
+	durationMS := duration.Milliseconds()
+	event := NewEvent(EventTargetDone, s.operation)
+	event.Target = target
+	event.Status = status
+	event.DurationMS = &durationMS
+	if detail != "" {
+		event.Detail = detail
+	}
+	return s.Emit(event)
 }
 
 // OpenTargetLog creates the raw log file for one target and emits target start.
@@ -284,187 +386,6 @@ func (s *Session) Close(results []TargetResult) error {
 		return err
 	}
 	return nil
-}
-
-type lineEventWriter struct {
-	session *Session
-	target  string
-	pending []byte
-	mu      sync.Mutex
-}
-
-func (w *lineEventWriter) Write(data []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.pending = append(w.pending, data...)
-	for {
-		newlineIndex := bytes.IndexByte(w.pending, '\n')
-		if newlineIndex == -1 {
-			return len(data), nil
-		}
-		line := strings.TrimSpace(string(w.pending[:newlineIndex]))
-		w.pending = append([]byte(nil), w.pending[newlineIndex+1:]...)
-		if line == "" {
-			continue
-		}
-		for _, event := range eventsFromLine(w.session.operation, w.target, line) {
-			if err := w.session.Emit(event); err != nil {
-				return 0, err
-			}
-		}
-	}
-}
-
-func eventsFromLine(operation string, target string, line string) []Event {
-	cleaned := stripKnownPrefixes(line)
-	status := statusOK
-	eventType := EventStepDone
-	lower := strings.ToLower(cleaned)
-	if strings.Contains(lower, "failed") || strings.Contains(lower, "error") {
-		status = statusFailed
-		eventType = EventStepFailed
-	}
-	if strings.Contains(lower, "skipped") || strings.Contains(lower, "skipping") || strings.Contains(lower, "nothing to do") {
-		status = "skipped"
-		eventType = EventStepSkipped
-	}
-	if parsedTarget, ok := parseTarget(cleaned); ok && target == "" {
-		target = parsedTarget
-	}
-	step := stepName(cleaned)
-	started := NewEvent(EventStepStarted, operation)
-	started.Target = target
-	started.Step = step
-	started.Status = statusRunning
-	started.Detail = cleaned
-	event := NewEvent(eventType, operation)
-	event.Target = target
-	event.Step = step
-	event.Status = status
-	event.Detail = cleaned
-	return []Event{started, event}
-}
-
-func stripKnownPrefixes(line string) string {
-	cleaned := strings.TrimSpace(line)
-	for _, prefix := range []string{"[run]", "[dry-run]"} {
-		cleaned = strings.TrimSpace(strings.TrimPrefix(cleaned, prefix))
-	}
-	if strings.HasPrefix(cleaned, "[") {
-		if closeIndex := strings.Index(cleaned, "]"); closeIndex > 0 {
-			cleaned = strings.TrimSpace(cleaned[closeIndex+1:])
-		}
-	}
-	return cleaned
-}
-
-func parseTarget(line string) (string, bool) {
-	if !strings.HasPrefix(line, "target=") {
-		return "", false
-	}
-	rest := strings.TrimPrefix(line, "target=")
-	fields := strings.Fields(rest)
-	if len(fields) == 0 {
-		return "", false
-	}
-	return fields[0], true
-}
-
-func stepName(detail string) string {
-	detail = strings.TrimSpace(detail)
-	if detail == "" {
-		return "progress"
-	}
-	if codexDetail, ok := strings.CutPrefix(detail, "codex-cli:"); ok {
-		return normalizeStep(strings.TrimSpace(codexDetail))
-	}
-	if strings.HasPrefix(detail, "target=") {
-		fields := strings.Fields(detail)
-		if len(fields) > 1 {
-			targetDetail := strings.Join(fields[1:], " ")
-			if knownStep := knownTargetStep(targetDetail); knownStep != "" {
-				return knownStep
-			}
-			return normalizeStep(strings.Join(fields[1:minInt(len(fields), 4)], " "))
-		}
-	}
-	if colonIndex := strings.Index(detail, ":"); colonIndex > 0 && colonIndex < 32 {
-		return normalizeStep(detail[:colonIndex])
-	}
-	fields := strings.Fields(detail)
-	if len(fields) == 0 {
-		return "progress"
-	}
-	return normalizeStep(strings.Join(fields[:minInt(len(fields), 3)], " "))
-}
-
-func normalizeStep(raw string) string {
-	replacer := strings.NewReplacer(
-		"=", " ",
-		":", " ",
-		"/", " ",
-		".", " ",
-		"-", " ",
-		"(", " ",
-		")", " ",
-		"[", " ",
-		"]", " ",
-		"\"", " ",
-	)
-	cleaned := strings.Join(strings.Fields(replacer.Replace(strings.ToLower(raw))), "_")
-	if cleaned == "" {
-		return "progress"
-	}
-	return cleaned
-}
-
-func knownTargetStep(detail string) string {
-	if strings.Contains(detail, "read Info.plist") {
-		return "read_info_plist"
-	}
-	if strings.Contains(detail, "capture upstream DR from clean executable") {
-		return "capture_original_dr"
-	}
-	if strings.Contains(detail, "would find keychain") || strings.Contains(detail, "found") {
-		return "keychain_capture"
-	}
-	if strings.Contains(detail, "entitlements: extract entitlements") {
-		return "extract_entitlements"
-	}
-	if strings.Contains(detail, "augment entitlements") {
-		return "augment_entitlements"
-	}
-	if strings.Contains(detail, "move original executable") {
-		return "move_original_executable"
-	}
-	if strings.Contains(detail, "install shim") {
-		return "install_shim"
-	}
-	if strings.Contains(detail, "install launch policy") {
-		return "install_launch_policy"
-	}
-	if strings.Contains(detail, "re-sign with") {
-		return "sign_bundle"
-	}
-	if strings.Contains(detail, "remove quarantine") {
-		return "remove_quarantine"
-	}
-	if strings.Contains(detail, "would restore keychain") || strings.Contains(detail, "restored keychain") {
-		return "keychain_restore"
-	}
-	if strings.Contains(detail, "write patch state") {
-		return "write_state"
-	}
-	if strings.Contains(detail, "verify bundle signature") {
-		return "verify_bundle"
-	}
-	if strings.Contains(detail, "patch complete") {
-		return "patch_complete"
-	}
-	if strings.Contains(detail, "upgrade to") {
-		return "upgrade_complete"
-	}
-	return ""
 }
 
 type jsonRenderer struct {
@@ -643,20 +564,6 @@ func intValue(value *int) string {
 		return ""
 	}
 	return strconv.Itoa(*value)
-}
-
-func intValueFromPointer(value *int) int {
-	if value == nil {
-		return 0
-	}
-	return *value
-}
-
-func minInt(left int, right int) int {
-	if left < right {
-		return left
-	}
-	return right
 }
 
 func wrapWriteError(err error) error {

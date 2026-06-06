@@ -10,7 +10,6 @@ import (
 var (
 	capabilitiesMu                  sync.RWMutex
 	operationCapabilities           = map[string]struct{}{}
-	bootstrapCapabilities           = map[string]struct{}{}
 	patchHookCapabilities           = map[string]struct{}{}
 	preLaunchPolicyHookCapabilities = map[string]struct{}{}
 )
@@ -18,11 +17,6 @@ var (
 // RegisterOperationCapability records one linked operation capability.
 func RegisterOperationCapability(name string) error {
 	return registerCapability("operation", name, operationCapabilities)
-}
-
-// RegisterBootstrapCapability records one linked bootstrap capability.
-func RegisterBootstrapCapability(name string) error {
-	return registerCapability("bootstrap", name, bootstrapCapabilities)
 }
 
 // RegisterPatchHookCapability records one linked patch hook capability.
@@ -41,15 +35,6 @@ func HasOperationCapability(name string) bool {
 	capabilitiesMu.RLock()
 	defer capabilitiesMu.RUnlock()
 	_, ok := operationCapabilities[name]
-	return ok
-}
-
-// HasBootstrapCapability reports whether the bootstrap capability is linked
-// into this binary.
-func HasBootstrapCapability(name string) bool {
-	capabilitiesMu.RLock()
-	defer capabilitiesMu.RUnlock()
-	_, ok := bootstrapCapabilities[name]
 	return ok
 }
 
@@ -74,11 +59,6 @@ func HasPreLaunchPolicyHookCapability(name string) bool {
 // OperationCapabilities returns linked operation capabilities in stable order.
 func OperationCapabilities() []string {
 	return capabilityNames(operationCapabilities)
-}
-
-// BootstrapCapabilities returns linked bootstrap capabilities in stable order.
-func BootstrapCapabilities() []string {
-	return capabilityNames(bootstrapCapabilities)
 }
 
 // PatchHookCapabilities returns linked patch hook capabilities in stable order.

@@ -463,7 +463,6 @@ helper_bundle_ids = [
 exec_name = "Claude"
 keychain_services = ["Claude Safe Storage"]
 preserved_nested_code_paths = ["Contents/Frameworks/Squirrel.framework"]
-original_dr_bootstrap_capability = "clean-main-binary"
 
 [apps.claude.command]
 use = "claude"

@@ -1,15 +1,12 @@
-// Package upgrade fetches the latest registered target build from the
-// upstream update manifest, verifies the downloaded bundle against the
-// recorded original DesignatedRequirement, swaps it into /Applications,
-// and re-runs the patch flow so the new bundle launches through the
-// clyde MITM proxy.
+// Package upgrade fetches the latest registered target build from the upstream
+// update manifest, swaps it into /Applications, and re-runs the patch flow so
+// the new bundle launches through the clyde MITM proxy. It performs no vendor
+// signature or designated-requirement verification on the download.
 package upgrade
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -20,36 +17,21 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/catalog"
+	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/clock"
-	"goodkind.io/desktop-via-clyde/internal/extensions"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
 
-// BootstrapStrategy recovers an upstream designated requirement when state is missing.
-type BootstrapStrategy func(context.Context, targets.Target) (string, error)
-
-var (
-	bootstrapStrategiesMu sync.RWMutex
-	bootstrapStrategies   = map[string]BootstrapStrategy{}
-)
-
-const (
-	// AppUpgradeCapability is the operation capability for app upgrades.
-	AppUpgradeCapability = "app.upgrade"
-	// CleanMainBinaryBootstrapCapability recovers original requirements from a clean main binary.
-	CleanMainBinaryBootstrapCapability = "clean-main-binary"
-)
+// AppUpgradeCapability is the operation capability for app upgrades.
+const AppUpgradeCapability = "app.upgrade"
 
 // RegisterOperations links upgrade-owned operation capabilities.
 func RegisterOperations() error {
@@ -62,63 +44,6 @@ func RegisterOperations() error {
 		return logUpgradeRegistrationError("register upgrade operation", err)
 	}
 	return nil
-}
-
-// RegisterBootstrapStrategies links upgrade bootstrap strategies.
-func RegisterBootstrapStrategies() error {
-	if !catalog.HasBootstrapCapability(CleanMainBinaryBootstrapCapability) {
-		if err := catalog.RegisterBootstrapCapability(CleanMainBinaryBootstrapCapability); err != nil {
-			return logUpgradeRegistrationError("register clean-main-binary bootstrap capability", err)
-		}
-	}
-	if err := RegisterBootstrapStrategy(CleanMainBinaryBootstrapCapability, bootstrapOriginalDRFromCleanMainBinary); err != nil {
-		return logUpgradeRegistrationError("register clean-main-binary bootstrap strategy", err)
-	}
-	return nil
-}
-
-// RegisterValidators links upgrade config validation.
-func RegisterValidators() error {
-	if err := extensions.RegisterAppValidator("original_dr_bootstrap_capability", extensions.ValidateOriginalDRBootstrapCapability); err != nil {
-		return logUpgradeRegistrationError("register original DR bootstrap validator", err)
-	}
-	return nil
-}
-
-// RegisterBootstrapStrategy links one bootstrap capability to its strategy.
-func RegisterBootstrapStrategy(capability string, strategy BootstrapStrategy) error {
-	if !catalog.HasBootstrapCapability(capability) {
-		return fmt.Errorf("bootstrap capability %q is not linked", capability)
-	}
-	if strategy == nil {
-		return fmt.Errorf("bootstrap capability %q strategy is required", capability)
-	}
-	bootstrapStrategiesMu.Lock()
-	defer bootstrapStrategiesMu.Unlock()
-	if _, ok := bootstrapStrategies[capability]; ok {
-		return fmt.Errorf("bootstrap capability %q strategy is already registered", capability)
-	}
-	bootstrapStrategies[capability] = strategy
-	return nil
-}
-
-// RegisteredBootstrapStrategies returns bootstrap capabilities with strategies.
-func RegisteredBootstrapStrategies() []string {
-	bootstrapStrategiesMu.RLock()
-	defer bootstrapStrategiesMu.RUnlock()
-	names := make([]string, 0, len(bootstrapStrategies))
-	for name := range bootstrapStrategies {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
-
-func lookupBootstrapStrategy(capability string) (BootstrapStrategy, bool) {
-	bootstrapStrategiesMu.RLock()
-	defer bootstrapStrategiesMu.RUnlock()
-	strategy, ok := bootstrapStrategies[capability]
-	return strategy, ok
 }
 
 // Options controls one upgrade invocation.
@@ -134,6 +59,8 @@ type Options struct {
 	Out io.Writer
 	// LogOut receives raw subprocess output. Defaults to Out.
 	LogOut io.Writer
+	// Progress receives typed milestone events.
+	Progress clioutput.Progress
 }
 
 // Operation runs the app upgrade operation for one configured target.
@@ -147,6 +74,7 @@ func Operation(ctx context.Context, req operations.Request) error {
 		MigrateKeychain: req.Flags.Bool("migrate-keychain"),
 		Out:             req.Out,
 		LogOut:          req.LogOut,
+		Progress:        req.Progress,
 	}); err != nil {
 		upgradeLog.ErrorContext(ctx, "upgrade.operation_failed", "err", err)
 		return fmt.Errorf("upgrade operation: %w",
@@ -156,9 +84,8 @@ func Operation(ctx context.Context, req operations.Request) error {
 }
 
 type updateManifest struct {
-	URL       string
-	Name      string
-	Signature string
+	URL  string
+	Name string
 }
 
 type pathJSONManifest struct {
@@ -183,10 +110,9 @@ type sparkleItem struct {
 }
 
 type sparkleEnclosure struct {
-	URL       string `xml:"url,attr"`
-	Length    string `xml:"length,attr"`
-	Type      string `xml:"type,attr"`
-	Signature string `xml:"http://www.andymatuschak.org/xml-namespaces/sparkle edSignature,attr"`
+	URL    string `xml:"url,attr"`
+	Length string `xml:"length,attr"`
+	Type   string `xml:"type,attr"`
 }
 
 type squirrelJSONManifest struct {
@@ -205,8 +131,6 @@ type squirrelJSONUpdate struct {
 	URL     string `json:"url"`
 }
 
-var readDesignatedRequirement = patch.DesignatedRequirement
-
 const missingBundleCurrentVersion = "0.0.0"
 
 type bundleVersionState struct {
@@ -224,6 +148,7 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	if opts.LogOut != nil {
 		r.RawOut = opts.LogOut
 	}
+	r.Progress = opts.Progress
 	channel, err := t.Updater.ResolveChannel(opts.Channel)
 	if err != nil {
 		return logUpgradeError(ctx, "upgrade.resolve_channel_failed", fmt.Errorf("resolve update channel: %w", err))
@@ -238,7 +163,9 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	m, err := fetchManifest(ctx, t, bundleState.CurrentVersion, channel)
 	if err != nil {
 		if errors.Is(err, errNoUpdate) {
-			notef(r, noUpdateMessage(t.ID, channel))
+			message := noUpdateMessage(t.ID, channel)
+			notef(r, message)
+			patch.MarkSkipped(r, message)
 			return nil
 		}
 		return err
@@ -248,18 +175,7 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 		return logUpgradeError(ctx, "upgrade.manifest_missing_fields", fmt.Errorf("manifest is missing url or name field: %+v", m))
 	}
 	if !bundleState.Missing && m.Name == bundleState.CurrentVersion {
-		if err := handleCurrentVersion(ctx, r, t, bundleState.CurrentVersion, opts); err != nil {
-			return err
-		}
-		return nil
-	}
-
-	originalDR := ""
-	if !bundleState.Missing {
-		originalDR, err = loadOriginalDR(ctx, t)
-		if err != nil {
-			return err
-		}
+		return handleCurrentVersion(ctx, r, t, bundleState.CurrentVersion, opts)
 	}
 
 	staging, err := makeStagingDir(ctx, t, m.Name)
@@ -276,27 +192,10 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	if err := downloadZip(ctx, r, m.URL, zipPath, opts.DryRun); err != nil {
 		return err
 	}
-	downloadSignatureVerified, err := verifyDownloadSignature(r, t, m, zipPath, opts.DryRun)
-	if err != nil {
-		return err
-	}
 	extractedApp, err := extractZip(ctx, r, zipPath, staging, t, opts.DryRun)
 	if err != nil {
 		return err
 	}
-	if bundleState.Missing {
-		originalDR, err = captureOriginalDRFromExtractedApp(ctx, r, t, extractedApp, opts.DryRun)
-		if err != nil {
-			return err
-		}
-	}
-	if err := verifyOriginalDR(ctx, r, extractedApp, originalDR, opts.DryRun); err != nil {
-		return err
-	}
-	if err := verifyExtractedSparkleSignature(r, m, zipPath, extractedApp, downloadSignatureVerified, opts.DryRun); err != nil {
-		return err
-	}
-
 	if err := swapBundle(ctx, r, t, extractedApp, opts.DryRun); err != nil {
 		return err
 	}
@@ -314,6 +213,7 @@ func patchBundleAfterUpgrade(ctx context.Context, r *patch.Runner, t targets.Tar
 		MigrateKeychain: opts.MigrateKeychain,
 		Out:             opts.Out,
 		LogOut:          r.RawOut,
+		Progress:        opts.Progress,
 		Trace:           nil,
 	}
 	if err := patch.Patch(ctx, t, patchOpts); err != nil {
@@ -348,6 +248,10 @@ func noteBundleVersion(r *patch.Runner, t targets.Target, channel string, state 
 }
 
 func notef(r *patch.Runner, message string) {
+	if r.Progress != nil {
+		r.Progress.Step(message)
+		return
+	}
 	prefix := "[run]"
 	if r.DryRun {
 		prefix = "[dry-run]"
@@ -473,7 +377,7 @@ func parseHTTPPathJSONManifest(body []byte) (updateManifest, error) {
 	if err := json.Unmarshal(body, &m); err != nil {
 		return updateManifest{}, logUpgradeErrorNoContext("upgrade.http_path_json_manifest_parse_failed", fmt.Errorf("parse path JSON manifest: %w (body=%s)", err, string(body)))
 	}
-	return updateManifest{URL: m.URL, Name: m.Name, Signature: ""}, nil
+	return updateManifest(m), nil
 }
 
 func parseSparkleAppcast(body []byte) (updateManifest, error) {
@@ -490,9 +394,8 @@ func parseSparkleAppcast(body []byte) (updateManifest, error) {
 		}
 		name := firstNonEmpty(item.Version, item.ShortVersionString, item.Title)
 		return updateManifest{
-			URL:       item.Enclosure.URL,
-			Name:      name,
-			Signature: item.Enclosure.Signature,
+			URL:  item.Enclosure.URL,
+			Name: name,
 		}, nil
 	}
 	return updateManifest{}, errors.New("sparkle appcast contains no arm64 full zip enclosure")
@@ -508,7 +411,7 @@ func parseSquirrelJSONManifest(body []byte) (updateManifest, error) {
 			continue
 		}
 		name := firstNonEmpty(release.UpdateTo.Version, release.Version, release.UpdateTo.Name)
-		return updateManifest{URL: release.UpdateTo.URL, Name: name, Signature: ""}, nil
+		return updateManifest{URL: release.UpdateTo.URL, Name: name}, nil
 	}
 	return updateManifest{}, errors.New("squirrel manifest contains no updateTo.url")
 }
@@ -559,48 +462,6 @@ func directHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
-// loadOriginalDR reads the recorded upstream DR string from state.json and
-// falls back to the configured bootstrap strategy when state is missing.
-func loadOriginalDR(ctx context.Context, t targets.Target) (string, error) {
-	dr, err := patch.OriginalDesignatedRequirement(ctx, t)
-	if err == nil {
-		return verifyOriginalRequirementIsUpstream(t, dr)
-	}
-	if !errors.Is(err, patch.ErrMissingStateEntry) {
-		return "", logUpgradeError(ctx, "upgrade.original_dr_load_failed", fmt.Errorf("load original designated requirement: %w", err))
-	}
-	capability := t.BootstrapCapability()
-	if capability == "" {
-		return "", logUpgradeError(ctx, "upgrade.original_dr_load_failed", fmt.Errorf("load original designated requirement: %w", err))
-	}
-	strategy, ok := lookupBootstrapStrategy(capability)
-	if !ok {
-		return "", logUpgradeError(ctx, "upgrade.original_dr_bootstrap_capability_unknown", fmt.Errorf("unknown original DR bootstrap capability %q", capability))
-	}
-	return strategy(ctx, t)
-}
-
-func bootstrapOriginalDRFromCleanMainBinary(ctx context.Context, t targets.Target) (string, error) {
-	realPath := paths.RealBinaryPath(t)
-	if _, err := os.Stat(realPath); err == nil {
-		return "", logUpgradeError(ctx, "upgrade.original_dr_state_missing_real_exists", fmt.Errorf("target=%s has no state entry but %s exists; reinstall a clean vendor app and patch again before upgrade", t.ID, realPath))
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", logUpgradeError(ctx, "upgrade.original_dr_real_stat_failed", fmt.Errorf("stat %s: %w", realPath, err))
-	}
-	dr, err := readDesignatedRequirement(ctx, paths.MainBinaryPath(t))
-	if err != nil {
-		return "", logUpgradeError(ctx, "upgrade.original_dr_capture_failed", fmt.Errorf("capture designated requirement from clean app: %w", err))
-	}
-	return verifyOriginalRequirementIsUpstream(t, dr)
-}
-
-func verifyOriginalRequirementIsUpstream(t targets.Target, dr string) (string, error) {
-	if strings.Contains(dr, paths.SignTeamID()) {
-		return "", logUpgradeErrorNoContext("upgrade.original_dr_identifies_local_team", fmt.Errorf("target=%s DesignatedRequirement identifies local signing team %s, not upstream", t.ID, paths.SignTeamID()))
-	}
-	return dr, nil
-}
-
 func isPatchedBundle(t targets.Target) (bool, error) {
 	realPath := paths.RealBinaryPath(t)
 	_, err := os.Stat(realPath)
@@ -631,16 +492,16 @@ func handleCurrentVersion(
 			MigrateKeychain: opts.MigrateKeychain,
 			Out:             opts.Out,
 			LogOut:          r.RawOut,
+			Progress:        opts.Progress,
 			Trace:           nil,
 		}); err != nil {
 			return logUpgradeError(ctx, "upgrade.current_version_patch_failed", fmt.Errorf("patch clean bundle after version check: %w", err))
 		}
 		return nil
 	}
-	if _, err := loadOriginalDR(ctx, t); err != nil {
-		return err
-	}
-	notef(r, fmt.Sprintf("target=%s already on version %s; nothing to do", t.ID, currentVersion))
+	message := fmt.Sprintf("target=%s already on version %s; nothing to do", t.ID, currentVersion)
+	notef(r, message)
+	patch.MarkSkipped(r, message)
 	return nil
 }
 
@@ -688,96 +549,6 @@ func downloadZip(ctx context.Context, r *patch.Runner, srcURL, zipPath string, d
 	}
 	notef(r, fmt.Sprintf("downloaded %d bytes", n))
 	return nil
-}
-
-func verifyDownloadSignature(r *patch.Runner, t targets.Target, m updateManifest, zipPath string, dryRun bool) (bool, error) {
-	if m.Signature == "" {
-		return true, nil
-	}
-	notef(r, fmt.Sprintf("target=%s verifying Sparkle Ed25519 signature for %s", t.ID, zipPath))
-	if dryRun {
-		return true, nil
-	}
-	publicKeys, err := currentSparklePublicKeys(t)
-	if err != nil {
-		return false, err
-	}
-	for _, publicKey := range publicKeys {
-		ok, err := verifySparkleSignature(zipPath, publicKey, m.Signature)
-		if err != nil {
-			return false, err
-		}
-		if ok {
-			return true, nil
-		}
-	}
-	notef(r, fmt.Sprintf("target=%s Sparkle signature did not match the current public key; will allow key rotation only after original DR verification", t.ID))
-	return false, nil
-}
-
-func currentSparklePublicKeys(t targets.Target) ([]string, error) {
-	keys := make([]string, 0, 2)
-	if info, err := patch.ReadInfoPlist(paths.InfoPlistPath(t)); err == nil && info.SUPublicEDKey != "" {
-		keys = append(keys, info.SUPublicEDKey)
-	}
-	if t.Updater.SparklePublicKey != "" && !containsString(keys, t.Updater.SparklePublicKey) {
-		keys = append(keys, t.Updater.SparklePublicKey)
-	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("target %s has no Sparkle public key in Info.plist or target metadata", t.ID)
-	}
-	return keys, nil
-}
-
-func verifyExtractedSparkleSignature(r *patch.Runner, m updateManifest, zipPath, extractedApp string, alreadyVerified bool, dryRun bool) error {
-	if m.Signature == "" || alreadyVerified {
-		return nil
-	}
-	notef(r, "verifying Sparkle Ed25519 signature with extracted bundle public key after DR match")
-	if dryRun {
-		return nil
-	}
-	info, err := patch.ReadInfoPlist(filepath.Join(extractedApp, "Contents", "Info.plist"))
-	if err != nil {
-		return logUpgradeErrorNoContext("upgrade.extracted_sparkle_info_read_failed", fmt.Errorf("read extracted bundle Info.plist for Sparkle key rotation: %w", err))
-	}
-	if info.SUPublicEDKey == "" {
-		return fmt.Errorf("sparkle signature did not match current key and extracted bundle has no SUPublicEDKey")
-	}
-	ok, err := verifySparkleSignature(zipPath, info.SUPublicEDKey, m.Signature)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("sparkle Ed25519 signature verification failed for %s with current and extracted bundle public keys", zipPath)
-	}
-	return nil
-}
-
-func verifySparkleSignature(zipPath, publicKeyBase64, signatureBase64 string) (bool, error) {
-	publicKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(publicKeyBase64))
-	if err != nil {
-		return false, logUpgradeErrorNoContext("upgrade.sparkle_public_key_decode_failed", fmt.Errorf("decode Sparkle public key: %w", err))
-	}
-	if len(publicKey) != ed25519.PublicKeySize {
-		return false, fmt.Errorf("sparkle public key has %d bytes, want %d", len(publicKey), ed25519.PublicKeySize)
-	}
-	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(signatureBase64))
-	if err != nil {
-		return false, logUpgradeErrorNoContext("upgrade.sparkle_signature_decode_failed", fmt.Errorf("decode Sparkle signature: %w", err))
-	}
-	if len(signature) != ed25519.SignatureSize {
-		return false, fmt.Errorf("sparkle signature has %d bytes, want %d", len(signature), ed25519.SignatureSize)
-	}
-	data, err := os.ReadFile(zipPath)
-	if err != nil {
-		return false, logUpgradeErrorNoContext("upgrade.sparkle_zip_read_failed", fmt.Errorf("read zip for Sparkle signature verification: %w", err))
-	}
-	return ed25519.Verify(ed25519.PublicKey(publicKey), data, signature), nil
-}
-
-func containsString(values []string, target string) bool {
-	return slices.Contains(values, target)
 }
 
 func archiveName(t targets.Target, srcURL string) string {
@@ -833,38 +604,6 @@ func singleExtractedAppRoot(extractDir string) (string, error) {
 		return "", fmt.Errorf("no .app bundle found under %s", extractDir)
 	}
 	return "", fmt.Errorf("multiple .app bundles found under %s: %s", extractDir, strings.Join(matches, ","))
-}
-
-// verifyOriginalDR runs codesign --verify --deep --strict against the
-// extracted bundle, requiring the recorded upstream DR to match.
-func verifyOriginalDR(ctx context.Context, r *patch.Runner, appPath, dr string, dryRun bool) error {
-	notef(r, fmt.Sprintf("verifying %s satisfies original DR", appPath))
-	if dryRun {
-		return nil
-	}
-	if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", "-R="+dr, appPath); err != nil {
-		return logUpgradeError(ctx, "upgrade.original_dr_verify_failed", fmt.Errorf("verify original DR for %s: %w", appPath, err))
-	}
-	return nil
-}
-
-func captureOriginalDRFromExtractedApp(
-	ctx context.Context,
-	r *patch.Runner,
-	t targets.Target,
-	extractedApp string,
-	dryRun bool,
-) (string, error) {
-	executablePath := filepath.Join(extractedApp, "Contents", "MacOS", t.ExecName)
-	notef(r, fmt.Sprintf("target=%s capture upstream DR from downloaded executable %s", t.ID, executablePath))
-	if dryRun {
-		return "", nil
-	}
-	dr, err := readDesignatedRequirement(ctx, executablePath)
-	if err != nil {
-		return "", logUpgradeError(ctx, "upgrade.missing_bundle_original_dr_capture_failed", fmt.Errorf("capture designated requirement from downloaded app: %w", err))
-	}
-	return verifyOriginalRequirementIsUpstream(t, dr)
 }
 
 // swapBundle removes the existing /Applications/<App>.app and installs the
