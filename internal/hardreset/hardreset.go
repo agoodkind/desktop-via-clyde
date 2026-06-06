@@ -35,6 +35,32 @@ const (
 	artifactActionRestoreReal artifactAction = "restore_real"
 )
 
+// systemTCCDatabasePath points at the machine-wide privacy database. It is a
+// package var so unit tests can redirect it at a temp file and never touch the
+// real, SIP-protected database.
+var systemTCCDatabasePath = "/Library/Application Support/com.apple.TCC/TCC.db"
+
+// commandRunner executes an external command and returns its combined output.
+// It is a package-level seam so tests can assert and stub privileged calls
+// (sqlite3, sudo, tccutil, killall) without executing them against the host.
+type commandRunner func(ctx context.Context, name string, args []string, stdin string) ([]byte, error)
+
+var runCommand commandRunner = execCommand
+
+func execCommand(ctx context.Context, name string, args []string, stdin string) ([]byte, error) {
+	hardResetLog.DebugContext(ctx, "hardreset.run_command.boundary", "name", name, "args", strings.Join(args, " "))
+	cmd := exec.CommandContext(ctx, name, args...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		hardResetLog.WarnContext(ctx, "hardreset.run_command_failed", "name", name, "err", err, "output", strings.TrimSpace(string(output)))
+		return output, fmt.Errorf("run command %s: %w", name, err)
+	}
+	return output, nil
+}
+
 // RegisterOperations links hard-reset operation capabilities.
 func RegisterOperations() error {
 	if !catalog.HasOperationCapability(AppHardResetCapability) {
@@ -158,6 +184,10 @@ func Run(ctx context.Context, target targets.Target, opts Options) error {
 	}
 	if err := deleteUserTCCRows(ctx, opts, plan.BundleIDs); err != nil {
 		hardResetLog.ErrorContext(ctx, "hardreset.delete_user_tcc_rows_failed", "target", target.ID, "err", err)
+		return err
+	}
+	if err := deleteSystemTCCRows(ctx, opts, plan.BundleIDs); err != nil {
+		hardResetLog.ErrorContext(ctx, "hardreset.delete_system_tcc_rows_failed", "target", target.ID, "err", err)
 		return err
 	}
 	if err := restartTCCD(ctx, opts, "after_tcc_db_cleanup"); err != nil {
@@ -441,8 +471,7 @@ func removeArtifactWithSudo(ctx context.Context, opts Options, artifact Artifact
 		hardResetLog.ErrorContext(ctx, "hardreset.sudo_artifact_stat_failed", "kind", artifact.Kind, "path", path, "err", err)
 		return fmt.Errorf("stat sudo artifact %s: %w", path, err)
 	}
-	cmd := exec.CommandContext(ctx, "/usr/bin/sudo", "/bin/rm", "-rf", path)
-	output, err := cmd.CombinedOutput()
+	output, err := runCommand(ctx, "/usr/bin/sudo", []string{"/bin/rm", "-rf", path}, "")
 	writeCommandLog(opts, "$ /usr/bin/sudo /bin/rm -rf "+path)
 	writeCommandLog(opts, strings.TrimSpace(string(output)))
 	if err != nil {
@@ -506,8 +535,7 @@ func resetTCCUtilAll(ctx context.Context, opts Options, bundleIDs []string) erro
 	unregistered := make([]string, 0)
 	for _, bundleID := range bundleIDs {
 		args := []string{"reset", "All", bundleID}
-		cmd := exec.CommandContext(ctx, "/usr/bin/tccutil", args...)
-		output, err := cmd.CombinedOutput()
+		output, err := runCommand(ctx, "/usr/bin/tccutil", args, "")
 		writeCommandLog(opts, "$ /usr/bin/tccutil "+strings.Join(args, " "))
 		writeCommandLog(opts, strings.TrimSpace(string(output)))
 		if err != nil {
@@ -548,8 +576,7 @@ func restartTCCD(ctx context.Context, opts Options, reason string) error {
 		}
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, "/usr/bin/killall", args...)
-	output, err := cmd.CombinedOutput()
+	output, err := runCommand(ctx, "/usr/bin/killall", args, "")
 	writeCommandLog(opts, "$ /usr/bin/killall tccd")
 	writeCommandLog(opts, strings.TrimSpace(string(output)))
 	if err != nil {
@@ -598,9 +625,7 @@ func deleteUserTCCRows(ctx context.Context, opts Options, bundleIDs []string) er
 	}
 
 	sql := "DELETE FROM access WHERE client IN (" + sqlStringList(bundleIDs) + ");\nSELECT changes();\n"
-	cmd := exec.CommandContext(ctx, "/usr/bin/sqlite3", "-cmd", ".timeout 10000", databasePath)
-	cmd.Stdin = strings.NewReader(sql)
-	output, err := cmd.CombinedOutput()
+	output, err := runCommand(ctx, "/usr/bin/sqlite3", []string{"-cmd", ".timeout 10000", databasePath}, sql)
 	writeCommandLog(opts, "$ /usr/bin/sqlite3 -cmd .timeout 10000 "+databasePath)
 	writeCommandLog(opts, strings.TrimSpace(string(output)))
 	if err != nil {
@@ -619,6 +644,68 @@ func deleteUserTCCRows(ctx context.Context, opts Options, bundleIDs []string) er
 	return nil
 }
 
+// deleteSystemTCCRows removes the target bundle rows from the machine-wide TCC
+// database. The system database is root-owned and SIP-protected, so the delete
+// runs through the same sudo-capable runner used for privileged artifact
+// removal. It mirrors deleteUserTCCRows but is best-effort: a stat or delete
+// failure (for example a host without Full Disk Access) is logged and reported,
+// not propagated, so the rest of the reset still runs. Only failures to write
+// the status line to opts.Out are returned.
+func deleteSystemTCCRows(ctx context.Context, opts Options, bundleIDs []string) error {
+	databasePath := systemTCCDatabasePath
+	hardResetLog.InfoContext(ctx, "hardreset.delete_system_tcc_rows.boundary", "db", databasePath, "bundle_ids", strings.Join(bundleIDs, ","), "dry_run", opts.DryRun)
+	if opts.DryRun {
+		_, writeErr := fmt.Fprintf(opts.Out, "dry-run: sudo sqlite delete system_tcc_rows db=%s bundle_ids=%s\n", databasePath, strings.Join(bundleIDs, ","))
+		if writeErr != nil {
+			hardResetLog.ErrorContext(ctx, "hardreset.write_dry_run_system_tcc_delete_failed", "err", writeErr)
+			return fmt.Errorf("write dry-run system TCC delete command: %w", writeErr)
+		}
+		return nil
+	}
+
+	if _, err := os.Stat(databasePath); err != nil {
+		if os.IsNotExist(err) {
+			_, writeErr := fmt.Fprintf(opts.Out, "system_tcc_rows_deleted db=%s deleted=0 reason=missing\n", databasePath)
+			if writeErr != nil {
+				hardResetLog.ErrorContext(ctx, "hardreset.write_system_tcc_missing_failed", "err", writeErr)
+				return fmt.Errorf("write missing system TCC db status: %w", writeErr)
+			}
+			return nil
+		}
+		hardResetLog.WarnContext(ctx, "hardreset.system_tcc_stat_nonfatal", "db", databasePath, "err", err)
+		_, writeErr := fmt.Fprintf(opts.Out, "system_tcc_rows_deleted db=%s deleted=unknown reason=stat_error\n", databasePath)
+		if writeErr != nil {
+			hardResetLog.ErrorContext(ctx, "hardreset.write_system_tcc_stat_error_failed", "err", writeErr)
+			return fmt.Errorf("write system TCC stat error status: %w", writeErr)
+		}
+		return nil
+	}
+
+	sql := "DELETE FROM access WHERE client IN (" + sqlStringList(bundleIDs) + ");\nSELECT changes();\n"
+	output, err := runCommand(ctx, "/usr/bin/sudo", []string{"/usr/bin/sqlite3", "-cmd", ".timeout 10000", databasePath}, sql)
+	writeCommandLog(opts, "$ /usr/bin/sudo /usr/bin/sqlite3 -cmd .timeout 10000 "+databasePath)
+	writeCommandLog(opts, strings.TrimSpace(string(output)))
+	if err != nil {
+		hardResetLog.WarnContext(ctx, "hardreset.system_tcc_delete_nonfatal", "db", databasePath, "err", err, "output", strings.TrimSpace(string(output)))
+		_, writeErr := fmt.Fprintf(opts.Out, "system_tcc_rows_deleted db=%s deleted=error\n", databasePath)
+		if writeErr != nil {
+			hardResetLog.ErrorContext(ctx, "hardreset.write_system_tcc_delete_error_failed", "err", writeErr)
+			return fmt.Errorf("write system TCC delete error status: %w", writeErr)
+		}
+		return nil
+	}
+	deleted := strings.TrimSpace(string(output))
+	if deleted == "" {
+		deleted = "0"
+	}
+	_, writeErr := fmt.Fprintf(opts.Out, "system_tcc_rows_deleted db=%s deleted=%s\n", databasePath, deleted)
+	if writeErr != nil {
+		hardResetLog.ErrorContext(ctx, "hardreset.write_system_tcc_delete_summary_failed", "err", writeErr)
+		return fmt.Errorf("write system TCC delete summary: %w", writeErr)
+	}
+	return nil
+}
+
 func verifyNoTCCRows(ctx context.Context, opts Options, bundleIDs []string) error {
 	userDatabasePath, err := userTCCDatabasePath()
 	if err != nil {
@@ -629,7 +716,7 @@ func verifyNoTCCRows(ctx context.Context, opts Options, bundleIDs []string) erro
 		path  string
 	}{
 		{label: "user", path: userDatabasePath},
-		{label: "system", path: "/Library/Application Support/com.apple.TCC/TCC.db"},
+		{label: "system", path: systemTCCDatabasePath},
 	}
 	for _, check := range checks {
 		if opts.DryRun {
@@ -667,8 +754,7 @@ func countTCCRows(ctx context.Context, opts Options, databasePath string, bundle
 		return 0, fmt.Errorf("stat TCC db %s: %w", databasePath, err)
 	}
 	sql := "SELECT count(*) FROM access WHERE client IN (" + sqlStringList(bundleIDs) + ");\n"
-	cmd := exec.CommandContext(ctx, "/usr/bin/sqlite3", databasePath, sql)
-	output, err := cmd.CombinedOutput()
+	output, err := runCommand(ctx, "/usr/bin/sqlite3", []string{databasePath, sql}, "")
 	writeCommandLog(opts, fmt.Sprintf("$ /usr/bin/sqlite3 %s <count query>", databasePath))
 	writeCommandLog(opts, strings.TrimSpace(string(output)))
 	if err != nil {
