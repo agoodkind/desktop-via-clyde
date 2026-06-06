@@ -253,13 +253,28 @@ func upstreamSigningLabel(designatedRequirement string) string {
 	if trimmed == "" {
 		return "unknown"
 	}
-	const teamMarker = `subject.OU] = "`
-	if _, afterMarker, found := strings.Cut(trimmed, teamMarker); found {
-		if team, _, ok := strings.Cut(afterMarker, `"`); ok {
+	const teamMarker = `subject.OU] = `
+	_, afterMarker, found := strings.Cut(trimmed, teamMarker)
+	if !found {
+		return trimmed
+	}
+	afterMarker = strings.TrimSpace(afterMarker)
+	// codesign emits the team OU either quoted ("TEAMID") or bare (TEAMID
+	// terminated by whitespace or a closing token in a compound requirement).
+	if quoted, ok := strings.CutPrefix(afterMarker, `"`); ok {
+		if team, _, ok := strings.Cut(quoted, `"`); ok {
 			if trimmedTeam := strings.TrimSpace(team); trimmedTeam != "" {
 				return trimmedTeam
 			}
 		}
+		return trimmed
+	}
+	bareTeam := afterMarker
+	if end := strings.IndexAny(afterMarker, " \t)"); end >= 0 {
+		bareTeam = afterMarker[:end]
+	}
+	if trimmedTeam := strings.TrimSpace(bareTeam); trimmedTeam != "" {
+		return trimmedTeam
 	}
 	return trimmed
 }
