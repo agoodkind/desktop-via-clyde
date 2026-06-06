@@ -1,12 +1,14 @@
 package patch
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
+	"text/template"
 
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
@@ -257,20 +259,31 @@ func writePlistForRuntimeTest(t *testing.T, path string, bundleID string, packag
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir plist parent: %v", err)
 	}
-	body := `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-<key>CFBundleIdentifier</key>
-<string>` + bundleID + `</string>
-<key>CFBundlePackageType</key>
-<string>` + packageType + `</string>
-<key>CFBundleExecutable</key>
-<string>` + executable + `</string>
-</dict>
-</plist>
-`
+	body := renderBundleInfoPlist(t, map[string]string{
+		"BundleID":    bundleID,
+		"PackageType": packageType,
+		"Executable":  executable,
+	})
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write plist: %v", err)
 	}
+}
+
+// renderBundleInfoPlist loads the bundle Info.plist template from testdata and
+// substitutes the supplied values, keeping the plist XML out of the Go source.
+func renderBundleInfoPlist(t *testing.T, data map[string]string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", "bundle-info.plist.tmpl"))
+	if err != nil {
+		t.Fatalf("read bundle-info plist template: %v", err)
+	}
+	tmpl, err := template.New("bundle-info").Parse(string(raw))
+	if err != nil {
+		t.Fatalf("parse bundle-info plist template: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		t.Fatalf("execute bundle-info plist template: %v", err)
+	}
+	return buf.String()
 }
