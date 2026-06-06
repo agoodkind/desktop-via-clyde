@@ -216,11 +216,27 @@ use = "codex"
 short = "Operate on /Applications/Codex.app"
 
 [apps.codex.entitlements]
-strip = []
+strip = ["com.apple.security.application-groups"]
 required_boolean = [
     "com.apple.security.automation.apple-events",
     "com.apple.security.cs.disable-library-validation",
 ]
+
+# Opt-in development-profile signing that clears the codex "-34018" device-key
+# enrollment failure. When enabled and every asset below is present, the patcher
+# applies the Apple Development overlay (embedded MAC_APP_DEVELOPMENT profile +
+# team-restricted entitlements, rcodesign-resealed) instead of the shim plus
+# Developer ID path; a missing asset is a non-blocking warning that falls back to
+# the shim path. The /tmp paths are ephemeral spike outputs and should move under
+# ~/.local/state/clyde/dev-signing/ for productionization. The password is read
+# from a file, never inlined.
+[apps.codex.development_signing]
+enabled = true
+profile_path = "/tmp/dev.provisionprofile"
+p12_path = "/tmp/dvc-spike/dev.p12"
+p12_password_file = "/Users/agoodkind/.local/state/clyde/dev-signing/dev-p12-password"
+injector_dylib_path = "/tmp/dvc-spike/libclyde-inject.dylib"
+proxy_injection = true
 
 [apps.codex.updater]
 kind = "sparkle_appcast"
@@ -454,7 +470,7 @@ use = "claude"
 short = "Operate on /Applications/Claude.app"
 
 [apps.claude.entitlements]
-strip = []
+strip = ["com.apple.security.application-groups"]
 required_boolean = ["com.apple.security.cs.disable-library-validation"]
 
 [apps.claude.updater]

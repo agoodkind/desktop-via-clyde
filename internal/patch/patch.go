@@ -18,6 +18,8 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/bundleidentity"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/clock"
+	"goodkind.io/desktop-via-clyde/internal/devpreflight"
+	"goodkind.io/desktop-via-clyde/internal/devsign"
 	shimembed "goodkind.io/desktop-via-clyde/internal/embed"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/paths"
@@ -79,7 +81,7 @@ type MissingStateEntryError struct {
 
 // Error reports the missing target state entry with a repair hint.
 func (e MissingStateEntryError) Error() string {
-	return fmt.Sprintf("no state entry for target %s; run `desktop-via-clyde %s patch` first", e.TargetID, e.TargetID)
+	return fmt.Sprintf("no state entry for target %s; run `desktop-via-clyde patch %s` first", e.TargetID, e.TargetID)
 }
 
 // Is lets callers match MissingStateEntryError against ErrMissingStateEntry.
@@ -196,6 +198,13 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	r.Trace = opts.Trace
 	log.InfoContext(ctx, "patch.start", "app_path", t.AppPath, "dry_run", opts.DryRun, "migrate_keychain", opts.MigrateKeychain)
 
+	// Shared, non-blocking development-signing credential preflight. Both the
+	// direct patch path and the upgrade path (which re-patches through Patch after
+	// the bundle swap) reach this point, so wiring the check here covers both
+	// without a second call site. It never returns an error: a target without
+	// credentials continues on the standard shim plus Developer ID path.
+	devpreflight.Warn(ctx, r.Out, opts.DryRun, t)
+
 	if !opts.DryRun {
 		if _, err := os.Stat(t.AppPath); err != nil {
 			return logPatchError(ctx, "patch.bundle_stat_failed", fmt.Errorf("bundle not found at %s: %w", t.AppPath, err))
@@ -228,35 +237,30 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 		notef(r, fmt.Sprintf("target=%s found %d keychain items", t.ID, len(captured)))
 	}
 
-	if err := patchBundleSteps(ctx, r, &t, opts); err != nil {
+	devPlan, err := patchBundleSteps(ctx, r, &t, opts)
+	if err != nil {
 		return err
 	}
+	devSigned := devPlan != nil
 
 	if err := runPostBundleHooks(ctx, r, t, opts); err != nil {
 		return logPatchError(ctx, "patch.post_bundle_hook_failed", fmt.Errorf("run post-bundle hooks: %w", err))
 	}
 
-	switch {
-	case !opts.MigrateKeychain:
-		notef(r, fmt.Sprintf("target=%s skipped keychain access restore (pass --migrate-keychain to run)", t.ID))
-	case opts.DryRun:
-		notef(r, fmt.Sprintf("target=%s would restore keychain access for captured items", t.ID))
-	case len(captured) > 0:
-		if err := RegrantItems(ctx, t, captured); err != nil {
-			notef(r, fmt.Sprintf("target=%s keychain access restore returned errors (continuing): %v", t.ID, err))
-		} else {
-			notef(r, fmt.Sprintf("target=%s restored keychain access for %d items", t.ID, len(captured)))
-		}
-	default:
-		notef(r, fmt.Sprintf("target=%s no keychain items needed access restore", t.ID))
-	}
+	restoreKeychainAccess(ctx, r, t, opts, captured)
 
 	if err := stepWriteState(ctx, r, t, info.CFBundleVersion, originalDR); err != nil {
 		return logPatchError(ctx, "patch.write_state_failed", fmt.Errorf("write state: %w", err))
 	}
 
-	if err := stepVerify(ctx, r, t); err != nil {
-		return logPatchError(ctx, "patch.verify_failed", fmt.Errorf("verify: %w", err))
+	// The standard shim path verifies before post-patch hooks. The
+	// development-signing path instead defers its top-bundle reseal until after
+	// every nested re-signing step (post-bundle hooks, post-patch hooks), so its
+	// verify must wait for that reseal below.
+	if !devSigned {
+		if err := stepVerify(ctx, r, t); err != nil {
+			return logPatchError(ctx, "patch.verify_failed", fmt.Errorf("verify: %w", err))
+		}
 	}
 
 	for _, capability := range t.PostPatchHookCapabilities() {
@@ -265,35 +269,57 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 		}
 	}
 
+	if devSigned {
+		// The --shallow top-bundle reseal records the cdhashes of every nested
+		// object, so it must be the last signing action: any earlier placement
+		// lets a later nested re-sign (post-bundle or post-patch hooks) invalidate
+		// the seal.
+		if err := devsign.Reseal(ctx, r, devsign.Options{DryRun: r.DryRun, Out: r.Out}, t, devPlan); err != nil {
+			return logPatchError(ctx, "patch.development_signing_reseal_failed", fmt.Errorf("reseal development-signed bundle: %w", err))
+		}
+		if err := stepVerifyDevelopmentSigned(ctx, r, t); err != nil {
+			return logPatchError(ctx, "patch.verify_failed", fmt.Errorf("verify: %w", err))
+		}
+	}
+
 	notef(r, fmt.Sprintf("target=%s patch complete", t.ID))
 	return nil
 }
 
-// patchBundleSteps runs the bundle-mutation steps (2 through 7) on
-// the bundle at t.AppPath using the supplied Runner.
-func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Options) error {
+// patchBundleSteps runs the bundle-mutation steps (2 through 7) on the bundle at
+// t.AppPath using the supplied Runner. A non-nil returned plan signals the
+// development-signing path: its nested mutations have run, but the final
+// top-bundle reseal is deferred to Patch so it lands after all nested re-signing.
+func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Options) (*devsign.Plan, error) {
 	if t.Entitlements == nil {
-		return logPatchError(ctx, "patch.entitlement_policy_missing", fmt.Errorf("target %s has no entitlement policy", t.ID))
+		return nil, logPatchError(ctx, "patch.entitlement_policy_missing", fmt.Errorf("target %s has no entitlement policy", t.ID))
+	}
+	plan, err := maybeApplyDevelopmentSigning(ctx, r, t)
+	if err != nil {
+		return nil, err
+	}
+	if plan != nil {
+		return plan, nil
 	}
 	preservedRoot, cleanupPreserved, err := stagePreservedNestedCode(ctx, r, *t)
 	if err != nil {
-		return logPatchError(ctx, "patch.stage_preserved_nested_code_failed", fmt.Errorf("stage preserved nested code: %w", err))
+		return nil, logPatchError(ctx, "patch.stage_preserved_nested_code_failed", fmt.Errorf("stage preserved nested code: %w", err))
 	}
 	defer cleanupPreserved()
 	entFile, err := stepExtractEntitlements(ctx, r, *t)
 	if err != nil {
-		return logPatchError(ctx, "patch.extract_entitlements_failed", fmt.Errorf("extract entitlements: %w", err))
+		return nil, logPatchError(ctx, "patch.extract_entitlements_failed", fmt.Errorf("extract entitlements: %w", err))
 	}
 	notef(r, fmt.Sprintf("target=%s augment entitlements (strip=%v required=%v)",
 		t.ID, t.Entitlements.Strip, t.Entitlements.RequiredBooleanEntitlements))
 	if err := stepMoveToReal(ctx, r, *t); err != nil {
-		return logPatchError(ctx, "patch.move_binary_failed", fmt.Errorf("move binary to .real: %w", err))
+		return nil, logPatchError(ctx, "patch.move_binary_failed", fmt.Errorf("move binary to .real: %w", err))
 	}
 	if err := stepPreLaunchPolicy(ctx, r, t, opts); err != nil {
-		return logPatchError(ctx, "patch.pre_launch_policy_hook_failed", fmt.Errorf("run pre-launch-policy hooks: %w", err))
+		return nil, logPatchError(ctx, "patch.pre_launch_policy_hook_failed", fmt.Errorf("run pre-launch-policy hooks: %w", err))
 	}
 	if err := stepInstallShim(ctx, r, *t); err != nil {
-		return logPatchError(ctx, "patch.install_shim_failed", fmt.Errorf("install shim: %w", err))
+		return nil, logPatchError(ctx, "patch.install_shim_failed", fmt.Errorf("install shim: %w", err))
 	}
 	if err := runPreResignHooks(ctx, r, *t, Options{
 		DryRun:          r.DryRun,
@@ -302,19 +328,46 @@ func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Op
 		LogOut:          r.RawOut,
 		Trace:           r.Trace,
 	}); err != nil {
-		return logPatchError(ctx, "patch.pre_resign_hook_failed", fmt.Errorf("run pre-resign hooks: %w", err))
+		return nil, logPatchError(ctx, "patch.pre_resign_hook_failed", fmt.Errorf("run pre-resign hooks: %w", err))
 	}
 	if err := stepRestorePreservedNestedCode(ctx, r, *t, preservedRoot); err != nil {
-		return logPatchError(ctx, "patch.restore_preserved_nested_code_failed", fmt.Errorf("restore preserved nested code: %w", err))
+		return nil, logPatchError(ctx, "patch.restore_preserved_nested_code_failed", fmt.Errorf("restore preserved nested code: %w", err))
 	}
 	if err := stepEmbedProvisioningProfile(ctx, r, *t); err != nil {
-		return logPatchError(ctx, "patch.embed_provisioning_profile_failed", fmt.Errorf("embed provisioning profile: %w", err))
+		return nil, logPatchError(ctx, "patch.embed_provisioning_profile_failed", fmt.Errorf("embed provisioning profile: %w", err))
 	}
 	if err := stepResign(ctx, r, *t, entFile); err != nil {
-		return logPatchError(ctx, "patch.resign_failed", fmt.Errorf("re-sign: %w", err))
+		return nil, logPatchError(ctx, "patch.resign_failed", fmt.Errorf("re-sign: %w", err))
 	}
 	stepStripQuarantine(ctx, r, *t)
-	return nil
+	return nil, nil
+}
+
+// maybeApplyDevelopmentSigning runs the opt-in development-profile overlay in
+// place of the shim plus Developer ID path when the target enables it and every
+// required asset is present. On success it returns a non-nil plan whose final
+// top-bundle reseal the caller must run last; a nil plan means the target did not
+// take this path. A missing asset is non-blocking (criterion #8): it emits a
+// warning naming the exact file to provide and returns a nil plan so the caller
+// continues with the standard shim path.
+func maybeApplyDevelopmentSigning(ctx context.Context, r *Runner, t *targets.Target) (*devsign.Plan, error) {
+	if t.DevelopmentSigning == nil || !t.DevelopmentSigning.Enabled {
+		return nil, nil
+	}
+	missing := devsign.MissingAssets(*t.DevelopmentSigning)
+	if len(missing) > 0 {
+		for _, asset := range missing {
+			notef(r, fmt.Sprintf("target=%s development signing requested but %s is missing at %s; provide it to enable the enrollment fix, continuing with the shim + Developer ID path",
+				t.ID, asset.Label, asset.Path))
+		}
+		return nil, nil
+	}
+	notef(r, fmt.Sprintf("target=%s development signing enabled; applying enrollment-fix overlay (skipping shim, move-to-real, and Developer ID re-sign)", t.ID))
+	plan, err := devsign.ApplyNestedMutations(ctx, r, devsign.Options{DryRun: r.DryRun, Out: r.Out}, *t)
+	if err != nil {
+		return nil, logPatchError(ctx, "patch.development_signing_failed", fmt.Errorf("apply development signing: %w", err))
+	}
+	return plan, nil
 }
 
 // KeychainMigrate restores keychain access for an app that is already patched.
@@ -852,6 +905,24 @@ func stepVerify(ctx context.Context, r *Runner, t targets.Target) error {
 		return logPatchError(ctx, "patch.shim_dry_run_failed", fmt.Errorf("shim dry-run: %w", err))
 	}
 	notef(r, fmt.Sprintf("target=%s shim dry-run output:\n%s", t.ID, string(out)))
+	return nil
+}
+
+// stepVerifyDevelopmentSigned verifies a bundle that took the development-signing
+// overlay. That path intentionally leaves nested code on its vendor/Developer ID
+// signatures and installs no shim, so the runtime-team check and the shim
+// `--clyde-dry-run` (which would launch the real Electron binary) do not apply.
+// Verification is the deep codesign check the spike used (verify_rc=0); amfi still
+// accepts the launch through the embedded development profile for the registered
+// device even though spctl rejects the unnotarized signature.
+func stepVerifyDevelopmentSigned(ctx context.Context, r *Runner, t targets.Target) error {
+	notef(r, fmt.Sprintf("target=%s verify development-signed bundle signature", t.ID))
+	if r.DryRun {
+		return nil
+	}
+	if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", t.AppPath); err != nil {
+		return logPatchError(ctx, "patch.verify_development_signed_failed", fmt.Errorf("verify development-signed bundle %s: %w", t.AppPath, err))
+	}
 	return nil
 }
 

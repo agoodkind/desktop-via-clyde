@@ -67,6 +67,11 @@ type Credentials struct {
 type Client struct {
 	httpClient *http.Client
 	token      string
+	// baseURL is the API root (including the /v1 suffix). Production code sets it
+	// to the public endpoint; tests point it at an httptest server so request
+	// construction and the idempotent find-existing logic run without contacting
+	// Apple.
+	baseURL string
 }
 
 // BundleID is a registered App ID resource.
@@ -305,7 +310,7 @@ func NewClient(credentials Credentials) (*Client, error) {
 		appleportalLog.Error("appleportal.sign_token_failed", "err", err)
 		return nil, fmt.Errorf("sign App Store Connect token: %w", err)
 	}
-	return &Client{httpClient: &http.Client{Timeout: httpTimeout}, token: signedToken}, nil
+	return &Client{httpClient: &http.Client{Timeout: httpTimeout}, token: signedToken, baseURL: baseURL}, nil
 }
 
 // EnsureBundleID returns the App ID resource for identifier, creating it under
@@ -330,7 +335,7 @@ func (c *Client) EnsureBundleID(ctx context.Context, identifier, name string) (B
 		appleportalLog.ErrorContext(ctx, "appleportal.encode_bundle_id_failed", "err", err)
 		return BundleID{}, fmt.Errorf("encode bundle ID request: %w", err)
 	}
-	responseBody, err := c.doJSON(ctx, http.MethodPost, baseURL+"/bundleIds", nil, requestBody)
+	responseBody, err := c.doJSON(ctx, http.MethodPost, c.baseURL+"/bundleIds", nil, requestBody)
 	if err != nil {
 		return BundleID{}, err
 	}
@@ -352,7 +357,7 @@ func (c *Client) ResolveLocalDeveloperIDCertificate(ctx context.Context, signing
 	query := url.Values{}
 	query.Set("fields[certificates]", "name,serialNumber,certificateType")
 	query.Set("limit", "200")
-	responseBody, err := c.doJSON(ctx, http.MethodGet, baseURL+"/certificates", query, nil)
+	responseBody, err := c.doJSON(ctx, http.MethodGet, c.baseURL+"/certificates", query, nil)
 	if err != nil {
 		return Certificate{}, err
 	}
@@ -396,7 +401,7 @@ func (c *Client) CreateDirectProfile(ctx context.Context, bundleIDResourceID, ce
 		appleportalLog.ErrorContext(ctx, "appleportal.encode_profile_failed", "err", err)
 		return Profile{}, fmt.Errorf("encode profile request: %w", err)
 	}
-	responseBody, err := c.doJSON(ctx, http.MethodPost, baseURL+"/profiles", nil, requestBody)
+	responseBody, err := c.doJSON(ctx, http.MethodPost, c.baseURL+"/profiles", nil, requestBody)
 	if err != nil {
 		return Profile{}, err
 	}
@@ -413,7 +418,7 @@ func (c *Client) CreateDirectProfile(ctx context.Context, bundleIDResourceID, ce
 func (c *Client) DownloadProfile(ctx context.Context, profileResourceID, destination string) error {
 	query := url.Values{}
 	query.Set("fields[profiles]", "profileContent")
-	responseBody, err := c.doJSON(ctx, http.MethodGet, baseURL+"/profiles/"+profileResourceID, query, nil)
+	responseBody, err := c.doJSON(ctx, http.MethodGet, c.baseURL+"/profiles/"+profileResourceID, query, nil)
 	if err != nil {
 		return err
 	}
@@ -459,7 +464,7 @@ func (c *Client) findBundleID(ctx context.Context, identifier string) (*bundleID
 	query := url.Values{}
 	query.Set("filter[identifier]", identifier)
 	query.Set("fields[bundleIds]", "identifier,name")
-	responseBody, err := c.doJSON(ctx, http.MethodGet, baseURL+"/bundleIds", query, nil)
+	responseBody, err := c.doJSON(ctx, http.MethodGet, c.baseURL+"/bundleIds", query, nil)
 	if err != nil {
 		return nil, err
 	}

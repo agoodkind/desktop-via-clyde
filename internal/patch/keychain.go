@@ -149,3 +149,23 @@ func parseAccountFromAttrs(b []byte) string {
 	}
 	return ""
 }
+
+// restoreKeychainAccess re-grants keychain access for the items captured before the
+// bundle mutations, reporting each outcome through the runner. It never returns an
+// error: a regrant failure is logged as a continuing note so the patch finishes.
+func restoreKeychainAccess(ctx context.Context, r *Runner, t targets.Target, opts Options, captured []KeychainItem) {
+	switch {
+	case !opts.MigrateKeychain:
+		notef(r, fmt.Sprintf("target=%s skipped keychain access restore (pass --migrate-keychain to run)", t.ID))
+	case opts.DryRun:
+		notef(r, fmt.Sprintf("target=%s would restore keychain access for captured items", t.ID))
+	case len(captured) > 0:
+		if err := RegrantItems(ctx, t, captured); err != nil {
+			notef(r, fmt.Sprintf("target=%s keychain access restore returned errors (continuing): %v", t.ID, err))
+		} else {
+			notef(r, fmt.Sprintf("target=%s restored keychain access for %d items", t.ID, len(captured)))
+		}
+	default:
+		notef(r, fmt.Sprintf("target=%s no keychain items needed access restore", t.ID))
+	}
+}

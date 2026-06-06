@@ -37,6 +37,7 @@ type decodedAppSpec struct {
 	PreservedNestedCodePaths []string                      `toml:"preserved_nested_code_paths"`
 	ProvisioningProfile      string                        `toml:"provisioning_profile"`
 	Entitlements             spec.EntitlementsSpec         `toml:"entitlements"`
+	DevelopmentSigning       spec.DevelopmentSigningSpec   `toml:"development_signing"`
 	Updater                  spec.UpdaterSpec              `toml:"updater"`
 	LaunchPolicy             spec.LaunchPolicySpec         `toml:"launch_policy"`
 	extensions.DecodedAppSpec
@@ -84,6 +85,7 @@ func convertDecodedConfig(decoded decodedConfig) spec.Config {
 			PreservedNestedCodePaths: app.PreservedNestedCodePaths,
 			ProvisioningProfile:      app.ProvisioningProfile,
 			Entitlements:             app.Entitlements,
+			DevelopmentSigning:       app.DevelopmentSigning,
 			Updater:                  app.Updater,
 			LaunchPolicy:             app.LaunchPolicy,
 			Extensions:               app.ToAppSpec(),
@@ -160,6 +162,7 @@ func normalizeAndValidateApp(id string, app *spec.AppSpec) error {
 	app.PreservedNestedCodePaths = normalizeStringSlice(app.PreservedNestedCodePaths)
 	app.Entitlements.Strip = normalizeStringSlice(app.Entitlements.Strip)
 	app.Entitlements.RequiredBoolean = normalizeStringSlice(app.Entitlements.RequiredBoolean)
+	normalizeDevelopmentSigning(&app.DevelopmentSigning)
 
 	if app.AppPath == "" {
 		return fmt.Errorf("apps.%s.app_path is required", app.ID)
@@ -375,6 +378,17 @@ func normalizeAndValidateLaunchPolicy(path string, policy *spec.LaunchPolicySpec
 		return err
 	}
 	return nil
+}
+
+// normalizeDevelopmentSigning trims and home-expands the development signing
+// asset paths. The fields are optional, so no validation is enforced here; the
+// patcher checks asset presence at patch time and emits a non-blocking warning
+// when any asset is missing rather than failing config load.
+func normalizeDevelopmentSigning(ds *spec.DevelopmentSigningSpec) {
+	ds.ProfilePath = cleanExpandedPath(strings.TrimSpace(ds.ProfilePath))
+	ds.P12Path = cleanExpandedPath(strings.TrimSpace(ds.P12Path))
+	ds.P12PasswordFile = cleanExpandedPath(strings.TrimSpace(ds.P12PasswordFile))
+	ds.InjectorDylibPath = cleanExpandedPath(strings.TrimSpace(ds.InjectorDylibPath))
 }
 
 func normalizeCommand(command *spec.CommandSpec) {

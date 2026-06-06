@@ -45,8 +45,8 @@ func TestEntitlementsPolicyPerTarget(t *testing.T) {
 	installFixture(t)
 	wantStrip := map[string][]string{
 		"cursor": {},
-		"codex":  {},
-		"claude": {},
+		"codex":  {"com.apple.security.application-groups"},
+		"claude": {"com.apple.security.application-groups"},
 	}
 	wantRequired := map[string][]string{
 		"cursor": {
@@ -314,12 +314,12 @@ func TestRegistryUsesConfiguredGenericIDs(t *testing.T) {
 	if all[0].ID != "alpha" || all[1].ID != "zeta" {
 		t.Fatalf("target ids = %q, %q", all[0].ID, all[1].ID)
 	}
-	found, err := Lookup("zeta")
+	found, err := lookupTarget("zeta")
 	if err != nil {
-		t.Fatalf("Lookup(zeta): %v", err)
+		t.Fatalf("lookupTarget(zeta): %v", err)
 	}
 	if found.Command.Use != "zeta" {
-		t.Fatalf("Lookup(zeta).Command.Use = %q", found.Command.Use)
+		t.Fatalf("lookupTarget(zeta).Command.Use = %q", found.Command.Use)
 	}
 }
 

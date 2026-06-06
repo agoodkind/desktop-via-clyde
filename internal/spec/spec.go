@@ -109,9 +109,35 @@ type AppSpec struct {
 	PreservedNestedCodePaths []string                 `toml:"preserved_nested_code_paths"`
 	ProvisioningProfile      string                   `toml:"provisioning_profile"`
 	Entitlements             EntitlementsSpec         `toml:"entitlements"`
+	DevelopmentSigning       DevelopmentSigningSpec   `toml:"development_signing"`
 	Updater                  UpdaterSpec              `toml:"updater"`
 	LaunchPolicy             LaunchPolicySpec         `toml:"launch_policy"`
 	Extensions               extensions.AppSpec
+}
+
+// DevelopmentSigningSpec opts one target into development-profile signing. When
+// enabled, the patcher replaces the shim plus Developer ID re-sign with an Apple
+// Development signature and an embedded wildcard MAC_APP_DEVELOPMENT provisioning
+// profile, which is the only configuration that injects team-restricted
+// entitlements (keychain-access-groups, application-identifier) into the running
+// process so device-key enrollment (the "-34018" errSecMissingEntitlement
+// failure) succeeds. All
+// fields default to the zero value, so a target without a [development_signing]
+// table stays on the standard shim path. Secrets are referenced by file path
+// only; P12PasswordFile points at a file holding the p12 password, never the
+// password itself.
+type DevelopmentSigningSpec struct {
+	Enabled           bool   `toml:"enabled"`
+	ProfilePath       string `toml:"profile_path"`
+	P12Path           string `toml:"p12_path"`
+	P12PasswordFile   string `toml:"p12_password_file"`
+	InjectorDylibPath string `toml:"injector_dylib_path"`
+	ProxyInjection    bool   `toml:"proxy_injection"`
+	// AutoGenerate lets the patch preflight mint the missing development-signing
+	// assets through App Store Connect when credentials are present, instead of
+	// only warning that they can be generated. It defaults to false so a target
+	// never contacts Apple implicitly; the preflight stays non-blocking either way.
+	AutoGenerate bool `toml:"auto_generate"`
 }
 
 // CLISpec configures one non-app CLI surface and its operations.

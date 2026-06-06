@@ -106,6 +106,113 @@ func TestPatchDryRunRepairsComputerUseAuthPlugin(t *testing.T) {
 	requireTraceCommand(t, trace, "/usr/bin/sudo", []string{"/usr/bin/rsync", "-rltp", "--delete", stagingPath + "/", pluginPath + "/"})
 }
 
+func TestCodexDevelopmentSigningResealIsLastSigningAction(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	tg, err := lookupTarget(t, "codex")
+	if err != nil {
+		t.Fatalf("Lookup(codex): %v", err)
+	}
+	appPath := filepath.Join(t.TempDir(), "Codex.app")
+	tg.AppPath = appPath
+	tg.Extensions.ComputerUse.HostAppPath = appPath
+
+	assetDir := t.TempDir()
+	tg.DevelopmentSigning = &targets.DevelopmentSigningPolicy{
+		Enabled:           true,
+		ProfilePath:       writeDevSigningAsset(t, assetDir, "dev.provisionprofile"),
+		P12Path:           writeDevSigningAsset(t, assetDir, "dev.p12"),
+		P12PasswordFile:   writeDevSigningAsset(t, assetDir, "p12-password"),
+		InjectorDylibPath: writeDevSigningAsset(t, assetDir, "inject.dylib"),
+		ProxyInjection:    true,
+	}
+
+	trace := &patch.Trace{}
+	if err := patch.Patch(context.Background(), tg, patch.Options{
+		DryRun:          true,
+		MigrateKeychain: false,
+		Out:             io.Discard,
+		Trace:           trace,
+	}); err != nil {
+		t.Fatalf("Patch dry-run (codex development signing): %v", err)
+	}
+
+	resealIndex := -1
+	lastSigningIndex := -1
+	for i, event := range trace.Events {
+		if !isSigningCommand(event) {
+			continue
+		}
+		lastSigningIndex = i
+		if isDevResealCommand(event, appPath) {
+			resealIndex = i
+		}
+	}
+	if resealIndex < 0 {
+		t.Fatalf("trace has no development-signing --shallow reseal command: %#v", trace.Events)
+	}
+	if resealIndex != lastSigningIndex {
+		t.Fatalf("development-signing reseal at index %d is not the last signing command (last signing index=%d): %#v",
+			resealIndex, lastSigningIndex, trace.Events)
+	}
+	if !hasNestedCodesignBefore(trace, resealIndex) {
+		t.Fatalf("no nested codesign signing command precedes the development-signing reseal; the computer-use hooks must run before the seal: %#v", trace.Events)
+	}
+}
+
+func writeDevSigningAsset(t *testing.T, dir string, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("test-asset"), 0o600); err != nil {
+		t.Fatalf("write development signing asset %s: %v", path, err)
+	}
+	return path
+}
+
+func isSigningCommand(event patch.TraceEvent) bool {
+	if event.Action != "run_command" {
+		return false
+	}
+	base := filepath.Base(event.Command)
+	if base != "codesign" && base != "rcodesign" {
+		return false
+	}
+	for _, arg := range event.Args {
+		if arg == "--verify" || arg == "--display" {
+			return false
+		}
+	}
+	return true
+}
+
+func isDevResealCommand(event patch.TraceEvent, appPath string) bool {
+	if !isSigningCommand(event) || filepath.Base(event.Command) != "rcodesign" {
+		return false
+	}
+	hasShallow := false
+	sealsApp := false
+	for _, arg := range event.Args {
+		if arg == "--shallow" {
+			hasShallow = true
+		}
+		if arg == appPath {
+			sealsApp = true
+		}
+	}
+	return hasShallow && sealsApp
+}
+
+func hasNestedCodesignBefore(trace *patch.Trace, resealIndex int) bool {
+	for i, event := range trace.Events {
+		if i >= resealIndex {
+			return false
+		}
+		if isSigningCommand(event) && filepath.Base(event.Command) == "codesign" {
+			return true
+		}
+	}
+	return false
+}
+
 func TestClaudePatchRestoresSquirrelInsteadOfResigningIt(t *testing.T) {
 	tg, err := lookupTarget(t, "claude")
 	if err != nil {

@@ -88,6 +88,20 @@ type EntitlementsPolicy struct {
 	RequiredBooleanEntitlements []string
 }
 
+// DevelopmentSigningPolicy is the runtime view of opt-in development-profile
+// signing for one target. A nil pointer or Enabled=false keeps the target on the
+// standard shim plus Developer ID path; when Enabled and its assets are present,
+// the patcher applies the Apple Development overlay instead.
+type DevelopmentSigningPolicy struct {
+	Enabled           bool
+	ProfilePath       string
+	P12Path           string
+	P12PasswordFile   string
+	InjectorDylibPath string
+	ProxyInjection    bool
+	AutoGenerate      bool
+}
+
 // ComputerUseSignTarget aliases extension-owned runtime helper metadata.
 type ComputerUseSignTarget = extensions.ComputerUseRuntimeSignTarget
 
@@ -109,6 +123,7 @@ type Target struct {
 	PreservedNestedCodePaths []string
 	ProvisioningProfile      string
 	Entitlements             *EntitlementsPolicy
+	DevelopmentSigning       *DevelopmentSigningPolicy
 	Updater                  Updater
 	Extensions               extensions.Target
 	LaunchPolicy             spec.LaunchPolicySpec
@@ -134,15 +149,6 @@ func All() []Target {
 		results = append(results, buildTarget(cfg.Apps[id]))
 	}
 	return results
-}
-
-// Lookup returns one configured app target by declaration id.
-func Lookup(id string) (Target, error) {
-	app, ok := config.Current().Apps[id]
-	if !ok {
-		return Target{}, fmt.Errorf("unknown target %q", id)
-	}
-	return buildTarget(app), nil
 }
 
 // AllCLIs returns all configured non-app CLI programs in stable command order.
@@ -179,6 +185,7 @@ func buildTarget(app spec.AppSpec) Target {
 		PreservedNestedCodePaths: cloneStrings(app.PreservedNestedCodePaths),
 		ProvisioningProfile:      app.ProvisioningProfile,
 		Entitlements:             buildEntitlements(app.Entitlements),
+		DevelopmentSigning:       buildDevelopmentSigning(app.DevelopmentSigning),
 		Updater:                  buildUpdater(app.Updater),
 		Extensions:               extensions.BuildTarget(app.Extensions),
 		LaunchPolicy:             app.LaunchPolicy,
@@ -220,6 +227,22 @@ func buildEntitlements(entitlements spec.EntitlementsSpec) *EntitlementsPolicy {
 	return &EntitlementsPolicy{
 		Strip:                       cloneStrings(entitlements.Strip),
 		RequiredBooleanEntitlements: cloneStrings(entitlements.RequiredBoolean),
+	}
+}
+
+// buildDevelopmentSigning mirrors the decoded spec into the runtime policy. It
+// always returns a non-nil pointer (matching buildEntitlements); a target without
+// a [development_signing] table yields a policy with Enabled=false, so the patch
+// pipeline keeps it on the standard shim plus Developer ID path.
+func buildDevelopmentSigning(ds spec.DevelopmentSigningSpec) *DevelopmentSigningPolicy {
+	return &DevelopmentSigningPolicy{
+		Enabled:           ds.Enabled,
+		ProfilePath:       ds.ProfilePath,
+		P12Path:           ds.P12Path,
+		P12PasswordFile:   ds.P12PasswordFile,
+		InjectorDylibPath: ds.InjectorDylibPath,
+		ProxyInjection:    ds.ProxyInjection,
+		AutoGenerate:      ds.AutoGenerate,
 	}
 }
 
