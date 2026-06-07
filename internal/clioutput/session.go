@@ -171,6 +171,24 @@ func NewSession(ctx context.Context, opts SessionOptions) (*Session, error) {
 	if opts.Out == nil {
 		opts.Out = os.Stdout
 	}
+	return newSession(ctx, opts, newRenderer(response.FromContext(ctx), opts.Out, opts.Format))
+}
+
+// NewBroadcastSession creates a session whose events are delivered to emit
+// instead of being rendered to a terminal. The daemon uses it to fan a run's
+// progress events to every subscribed client stream, so a streamed run renders
+// through the same live model a local run uses.
+func NewBroadcastSession(ctx context.Context, opts SessionOptions, emit func(Event) error) (*Session, error) {
+	return newSession(ctx, opts, &emitterRenderer{emit: emit})
+}
+
+// newSession opens the run log and writes the opening run event against the
+// supplied renderer, which is either the stdout renderer or the broadcast
+// emitter.
+func newSession(ctx context.Context, opts SessionOptions, eventRenderer renderer) (*Session, error) {
+	if opts.Out == nil {
+		opts.Out = os.Stdout
+	}
 	started := clock.Now()
 	scope := strings.TrimSpace(opts.Scope)
 	if scope == "" {
@@ -193,7 +211,7 @@ func NewSession(ctx context.Context, opts SessionOptions) (*Session, error) {
 		started:    started,
 		runLog:     runLog,
 		runLogPath: runLogPath,
-		renderer:   newRenderer(metadata, opts.Out, opts.Format),
+		renderer:   eventRenderer,
 		mu:         sync.Mutex{},
 		outcomes:   map[string]recordedOutcome{},
 	}
@@ -454,6 +472,21 @@ func (r *liveRenderer) Emit(event Event) error {
 func (r *liveRenderer) Close() error {
 	r.program.Send(closeMsg{})
 	r.program.Wait()
+	return nil
+}
+
+// emitterRenderer adapts an emit callback to the renderer interface so a caller
+// can fan session events to a custom sink, such as the daemon's gRPC
+// subscribers, instead of a terminal.
+type emitterRenderer struct {
+	emit func(Event) error
+}
+
+func (r *emitterRenderer) Emit(event Event) error {
+	return r.emit(event)
+}
+
+func (r *emitterRenderer) Close() error {
 	return nil
 }
 
