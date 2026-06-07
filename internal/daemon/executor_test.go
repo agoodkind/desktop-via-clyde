@@ -67,9 +67,9 @@ func TestExecutorSecondRequestAttachesToInflightRun(t *testing.T) {
 		return nil
 	}
 
-	run1 := exec.startOrAttach("upgrade", "demo", first)
+	run1 := exec.startOrAttach(context.Background(), "upgrade", "demo", first)
 	<-started
-	run2 := exec.startOrAttach("upgrade", "demo", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
+	run2 := exec.startOrAttach(context.Background(), "upgrade", "demo", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
 		t.Error("second job must not run while one is in flight")
 		return nil
 	})
@@ -86,7 +86,7 @@ func TestExecutorSecondRequestAttachesToInflightRun(t *testing.T) {
 
 func TestExecutorIdleAfterRunCompletes(t *testing.T) {
 	exec := newExecutor()
-	run := exec.startOrAttach("patch", "demo", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
+	run := exec.startOrAttach(context.Background(), "patch", "demo", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
 		return nil
 	})
 	collectStream(t, run)

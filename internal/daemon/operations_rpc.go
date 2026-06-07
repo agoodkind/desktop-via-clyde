@@ -49,6 +49,6 @@ func (s *server) streamOperation(
 		return status.Errorf(codes.NotFound, "unknown target %q", target)
 	}
 	job := newOperationJob(capability, operation, target, format, flags)
-	run := s.exec.startOrAttach(operation, target, job)
+	run := s.exec.startOrAttach(ctx, operation, target, job)
 	return run.broadcaster.stream(ctx, stream.Send)
 }

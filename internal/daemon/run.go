@@ -27,11 +27,22 @@ func Run(ctx context.Context) error {
 		return err
 	}
 
+	operationExecutor := newExecutor()
+	state := newUpdaterState()
 	grpcServer := grpc.NewServer()
-	desktopviaclydev1.RegisterDesktopServiceServer(grpcServer, newServer())
+	desktopviaclydev1.RegisterDesktopServiceServer(grpcServer, newServer(operationExecutor, state))
 
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				daemonLog.ErrorContext(signalCtx, "daemon.tick.loop_panic", "err", fmt.Sprintf("panic: %v", recovered))
+			}
+		}()
+		newTicker(operationExecutor, state).loop(signalCtx)
+	}()
 
 	serveErr := make(chan error, 1)
 	go func() {

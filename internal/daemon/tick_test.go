@@ -1,0 +1,90 @@
+package daemon
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"goodkind.io/desktop-via-clyde/internal/config"
+	"goodkind.io/desktop-via-clyde/internal/spec"
+	"goodkind.io/desktop-via-clyde/internal/targets"
+	"goodkind.io/desktop-via-clyde/internal/upgrade"
+)
+
+func TestTickIntervalAdaptsToDeferral(t *testing.T) {
+	if got := tickInterval(false); got != 6*time.Hour {
+		t.Fatalf("tickInterval(false) = %s, want 6h", got)
+	}
+	if got := tickInterval(true); got != 30*time.Minute {
+		t.Fatalf("tickInterval(true) = %s, want 30m", got)
+	}
+}
+
+func setupTwoApps(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	config.SetCurrent(&spec.Config{
+		Signing: spec.SigningSpec{Identity: "id", TeamID: "TEAM123456"},
+		Apps: map[string]spec.AppSpec{
+			"running": {
+				ID: "running", AppPath: "/Applications/Running.app", BundleID: "x.running",
+				ExecName: "Running", Command: spec.CommandSpec{Use: "running"},
+			},
+			"closed": {
+				ID: "closed", AppPath: "/Applications/Closed.app", BundleID: "x.closed",
+				ExecName: "Closed", Command: spec.CommandSpec{Use: "closed"},
+			},
+		},
+	})
+	t.Cleanup(func() { config.SetCurrent(nil) })
+}
+
+func TestSweepDefersRunningTargetAndUpgradesClosed(t *testing.T) {
+	setupTwoApps(t)
+	upgraded := map[string]bool{}
+	tick := &ticker{
+		exec:  newExecutor(),
+		state: newUpdaterState(),
+		checkUpdate: func(_ context.Context, _ targets.Target) (upgrade.UpdateCheck, error) {
+			return upgrade.UpdateCheck{CurrentVersion: "1.0", AvailableVersion: "2.0", UpdateAvailable: true}, nil
+		},
+		appRunning: func(_ context.Context, target targets.Target) bool {
+			return target.ID == "running"
+		},
+		runUpgrade: func(_ context.Context, targetID string) {
+			upgraded[targetID] = true
+		},
+	}
+
+	deferred := tick.sweep(context.Background())
+	if !deferred {
+		t.Fatal("sweep did not defer the running target")
+	}
+	if upgraded["running"] {
+		t.Fatal("upgraded a target whose app was running")
+	}
+	if !upgraded["closed"] {
+		t.Fatal("did not upgrade the closed target")
+	}
+}
+
+func TestSweepNoUpdatesDoesNotDeferOrUpgrade(t *testing.T) {
+	setupTwoApps(t)
+	upgraded := map[string]bool{}
+	tick := &ticker{
+		exec:  newExecutor(),
+		state: newUpdaterState(),
+		checkUpdate: func(_ context.Context, _ targets.Target) (upgrade.UpdateCheck, error) {
+			return upgrade.UpdateCheck{CurrentVersion: "1.0", AvailableVersion: "", UpdateAvailable: false}, nil
+		},
+		appRunning: func(_ context.Context, _ targets.Target) bool { return true },
+		runUpgrade: func(_ context.Context, targetID string) { upgraded[targetID] = true },
+	}
+
+	if tick.sweep(context.Background()) {
+		t.Fatal("sweep deferred even though no update was available")
+	}
+	if len(upgraded) != 0 {
+		t.Fatalf("upgraded targets with no update available: %v", upgraded)
+	}
+}

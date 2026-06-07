@@ -9,8 +9,8 @@ import (
 )
 
 // operationJob runs one operation to completion, emitting its progress events to
-// emit. It runs on a background context so the operation finishes even if the
-// initiating client disconnects mid-run.
+// emit. It runs on a cancellation-detached context so the operation finishes
+// even if the initiating client disconnects mid-run.
 type operationJob func(ctx context.Context, emit func(event *desktopviaclydev1.ProgressEvent)) error
 
 // activeRun is one in-flight operation and its event broadcaster.
@@ -40,7 +40,7 @@ func newExecutor() *executor {
 // startOrAttach returns the in-flight run when one exists, otherwise it starts
 // job as the new current run. Either way the returned run's broadcaster streams
 // the run's events to any number of subscribers.
-func (e *executor) startOrAttach(operation string, target string, job operationJob) *activeRun {
+func (e *executor) startOrAttach(ctx context.Context, operation string, target string, job operationJob) *activeRun {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.current != nil {
@@ -55,19 +55,26 @@ func (e *executor) startOrAttach(operation string, target string, job operationJ
 	go func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				daemonLog.Error("daemon.executor.job_panic",
+				daemonLog.ErrorContext(ctx, "daemon.executor.job_panic",
 					"err", fmt.Sprintf("panic: %v", recovered),
 					"operation", run.operation,
 					"target", run.target,
 				)
 			}
 		}()
-		e.runJob(run, job)
+		e.runJob(ctx, run, job)
 	}()
 	return run
 }
 
-func (e *executor) runJob(run *activeRun, job operationJob) {
+// active returns the in-flight run, or nil when the executor is idle.
+func (e *executor) active() *activeRun {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.current
+}
+
+func (e *executor) runJob(ctx context.Context, run *activeRun, job operationJob) {
 	defer func() {
 		// Clear the current run before finishing the broadcaster so a subscriber
 		// that returns the moment the run finishes never observes a stale
@@ -81,7 +88,11 @@ func (e *executor) runJob(run *activeRun, job operationJob) {
 		e.mu.Unlock()
 		run.broadcaster.finish()
 	}()
-	if err := job(context.Background(), run.broadcaster.emit); err != nil {
-		daemonLog.Error("daemon.executor.job_failed", "err", err, "operation", run.operation, "target", run.target)
+	// Detach cancellation so a bundle swap finishes even if the caller's context
+	// (a client stream or the shutting-down tick) is cancelled, while keeping the
+	// context chain and its values intact.
+	jobCtx := context.WithoutCancel(ctx)
+	if err := job(jobCtx, run.broadcaster.emit); err != nil {
+		daemonLog.ErrorContext(jobCtx, "daemon.executor.job_failed", "err", err, "operation", run.operation, "target", run.target)
 	}
 }

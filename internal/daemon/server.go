@@ -22,13 +22,15 @@ var daemonLog = slog.With("component", "desktop-via-clyde", "subcomponent", "dae
 // overrides that default.
 type server struct {
 	desktopviaclydev1.UnimplementedDesktopServiceServer
-	exec *executor
+	exec  *executor
+	state *updaterState
 }
 
-func newServer() *server {
+func newServer(operationExecutor *executor, state *updaterState) *server {
 	return &server{
 		UnimplementedDesktopServiceServer: desktopviaclydev1.UnimplementedDesktopServiceServer{},
-		exec:                              newExecutor(),
+		exec:                              operationExecutor,
+		state:                             state,
 	}
 }
 

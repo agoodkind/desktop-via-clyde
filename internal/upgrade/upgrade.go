@@ -207,6 +207,42 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	return nil
 }
 
+// UpdateCheck is the read-only result of comparing the installed bundle to the
+// upstream manifest, without downloading or mutating anything.
+type UpdateCheck struct {
+	CurrentVersion   string
+	AvailableVersion string
+	UpdateAvailable  bool
+}
+
+// CheckAvailable performs the read-only manifest check the updater tick loop
+// uses to decide whether an upgrade is warranted. It resolves the channel, reads
+// the installed bundle version, and fetches the manifest, but never downloads a
+// payload or touches the bundle.
+func CheckAvailable(ctx context.Context, t targets.Target, channelOverride string) (UpdateCheck, error) {
+	channel, err := t.Updater.ResolveChannel(channelOverride)
+	if err != nil {
+		return UpdateCheck{}, logUpgradeError(ctx, "upgrade.resolve_channel_failed", fmt.Errorf("resolve update channel: %w", err))
+	}
+	bundleState, err := resolveBundleVersion(ctx, t)
+	if err != nil {
+		return UpdateCheck{}, err
+	}
+	manifest, err := fetchManifest(ctx, t, bundleState.CurrentVersion, channel)
+	if err != nil {
+		if errors.Is(err, errNoUpdate) {
+			return UpdateCheck{CurrentVersion: bundleState.CurrentVersion, AvailableVersion: "", UpdateAvailable: false}, nil
+		}
+		return UpdateCheck{}, err
+	}
+	available := bundleState.Missing || (manifest.Name != "" && manifest.Name != bundleState.CurrentVersion)
+	return UpdateCheck{
+		CurrentVersion:   bundleState.CurrentVersion,
+		AvailableVersion: manifest.Name,
+		UpdateAvailable:  available,
+	}, nil
+}
+
 func patchBundleAfterUpgrade(ctx context.Context, r *patch.Runner, t targets.Target, opts Options) error {
 	patchOpts := patch.Options{
 		DryRun:          opts.DryRun,

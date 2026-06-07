@@ -47,7 +47,7 @@ func decodeReport(t *testing.T, body string) statusreport.Report {
 
 func TestServerGetStatusAllTargets(t *testing.T) {
 	setupConfig(t)
-	resp, err := newServer().GetStatus(context.Background(), &desktopviaclydev1.GetStatusRequest{})
+	resp, err := newServer(newExecutor(), newUpdaterState()).GetStatus(context.Background(), &desktopviaclydev1.GetStatusRequest{})
 	if err != nil {
 		t.Fatalf("GetStatus: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestServerGetStatusAllTargets(t *testing.T) {
 
 func TestServerGetStatusNamedTarget(t *testing.T) {
 	setupConfig(t)
-	resp, err := newServer().GetStatus(context.Background(), &desktopviaclydev1.GetStatusRequest{Target: "demo"})
+	resp, err := newServer(newExecutor(), newUpdaterState()).GetStatus(context.Background(), &desktopviaclydev1.GetStatusRequest{Target: "demo"})
 	if err != nil {
 		t.Fatalf("GetStatus(demo): %v", err)
 	}
@@ -71,7 +71,7 @@ func TestServerGetStatusNamedTarget(t *testing.T) {
 
 func TestServerGetStatusUnknownTarget(t *testing.T) {
 	setupConfig(t)
-	_, err := newServer().GetStatus(context.Background(), &desktopviaclydev1.GetStatusRequest{Target: "nope"})
+	_, err := newServer(newExecutor(), newUpdaterState()).GetStatus(context.Background(), &desktopviaclydev1.GetStatusRequest{Target: "nope"})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("GetStatus(nope) code = %v, want NotFound", status.Code(err))
 	}
