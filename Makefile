@@ -61,7 +61,7 @@ build build-check: proto
 build build-check check lint lint-golangci lint-files lint-diff staticcheck-extra vet test govulncheck: generated-shims
 
 shim:
-	$(MAKE) -C $(REPO_ROOT)/shim SWIFT_MK_DEV_DIR=$(HOME)/Sites/swift-makefile SWIFT_MK_NOTICES_FILE=/dev/null LINT_GATES='lint-swiftlint lint-format lint-complexity lint-deadcode swiftcheck-extra' build
+	$(MAKE) -C $(REPO_ROOT)/shim build
 
 clean-generated:
 	rm -f $(SHIM_OUT)
