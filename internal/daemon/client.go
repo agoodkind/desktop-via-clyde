@@ -12,6 +12,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	"goodkind.io/gklog/correlation"
+
 	desktopviaclydev1 "goodkind.io/desktop-via-clyde/api/desktopviaclyde/v1"
 	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/hardreset"
@@ -65,7 +67,7 @@ func isDaemonStreamingCapability(capability string) bool {
 // daemonReachable probes the daemon with a short-timeout GetStatus. Any reply
 // other than Unavailable means the daemon is up.
 func daemonReachable(ctx context.Context) bool {
-	probeCtx, cancel := context.WithTimeout(ctx, daemonProbeTimeout)
+	probeCtx, cancel := context.WithTimeout(correlation.NewOutgoingContext(ctx), daemonProbeTimeout)
 	defer cancel()
 	conn, client, err := dial()
 	if err != nil {
@@ -92,7 +94,9 @@ func streamDaemonOperation(ctx context.Context, req operations.Request) error {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	stream, err := openOperationStream(ctx, client, req)
+	// Attach the CLI command's correlation to the outgoing call so the daemon
+	// runs the operation under the same trace and span IDs shown in the header.
+	stream, err := openOperationStream(correlation.NewOutgoingContext(ctx), client, req)
 	if err != nil {
 		return err
 	}

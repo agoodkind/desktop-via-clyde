@@ -38,6 +38,7 @@ func newServer(operationExecutor *executor, state *updaterState) *server {
 // the client renders text or passes the JSON through unchanged. An empty target
 // reports every configured app; a named target reports just that one.
 func (s *server) GetStatus(ctx context.Context, req *desktopviaclydev1.GetStatusRequest) (*desktopviaclydev1.GetStatusResponse, error) {
+	ctx = correlatedContext(ctx)
 	target := strings.TrimSpace(req.GetTarget())
 	daemonLog.DebugContext(ctx, "daemon.get_status", "target", target)
 

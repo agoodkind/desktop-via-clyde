@@ -44,7 +44,7 @@ func (s *server) streamOperation(
 	format string,
 	flags *desktopviaclydev1.OperationFlags,
 ) error {
-	ctx := stream.Context()
+	ctx := correlatedContext(stream.Context())
 	if lookupAppTarget(target) == nil {
 		return status.Errorf(codes.NotFound, "unknown target %q", target)
 	}
