@@ -1,0 +1,120 @@
+syntax = "proto3";
+
+package desktopviaclyde.v1;
+
+option go_package = "goodkind.io/desktop-via-clyde/api/desktopviaclyde/v1;desktopviaclydev1";
+
+// DesktopService is the daemon control plane. The daemon owns all operation
+// logic; the CLI is a thin client that invokes these RPCs and renders the
+// streamed ProgressEvent values through the same live model used for local
+// runs. A Run* call either starts the operation or, when one is already in
+// flight, streams the active run's events, so a hand-run command and the
+// daemon's own upgrade tick are indistinguishable and can never overlap.
+service DesktopService {
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  rpc RunUpgrade(RunUpgradeRequest) returns (stream ProgressEvent);
+  rpc RunPatch(RunPatchRequest) returns (stream ProgressEvent);
+  rpc RunHardReset(RunHardResetRequest) returns (stream ProgressEvent);
+  rpc RunKeychainMigrate(RunKeychainMigrateRequest) returns (stream ProgressEvent);
+  rpc SubscribeActive(SubscribeActiveRequest) returns (stream ProgressEvent);
+  rpc GetUpdaterStatus(GetUpdaterStatusRequest) returns (GetUpdaterStatusResponse);
+}
+
+// ProgressEvent mirrors internal/clioutput.Event field-for-field so the client
+// renders a streamed run with the unchanged live model. The optional scalars
+// map to the pointer fields on Event.
+message ProgressEvent {
+  string type = 1;
+  string operation = 2;
+  string target = 3;
+  string step = 4;
+  string status = 5;
+  string detail = 6;
+  string time = 7;
+  string run_log = 8;
+  string log_file = 9;
+  optional bool dry_run = 10;
+  optional int32 parallel = 11;
+  optional int64 duration_ms = 12;
+  optional int32 succeeded = 13;
+  optional int32 failed = 14;
+}
+
+// OperationFlags carries the parsed CLI flag values for one operation, matching
+// internal/operations.FlagValues (a string map and a bool map).
+message OperationFlags {
+  map<string, string> strings = 1;
+  map<string, bool> bools = 2;
+}
+
+// RunUpgradeRequest asks the daemon to upgrade one configured target.
+message RunUpgradeRequest {
+  string target = 1;
+  string format = 2;
+  OperationFlags flags = 3;
+}
+
+// RunPatchRequest asks the daemon to patch one configured target.
+message RunPatchRequest {
+  string target = 1;
+  string format = 2;
+  OperationFlags flags = 3;
+}
+
+// RunHardResetRequest asks the daemon to hard-reset one configured target.
+message RunHardResetRequest {
+  string target = 1;
+  string format = 2;
+  OperationFlags flags = 3;
+}
+
+// RunKeychainMigrateRequest asks the daemon to restore keychain access for one
+// configured target.
+message RunKeychainMigrateRequest {
+  string target = 1;
+  string format = 2;
+  OperationFlags flags = 3;
+}
+
+// SubscribeActiveRequest attaches to whatever operation the daemon is currently
+// running, streaming its ProgressEvent values. It completes immediately when no
+// operation is in flight.
+message SubscribeActiveRequest {}
+
+// GetStatusRequest asks for the per-target patched state report.
+message GetStatusRequest {
+  // target is one configured target id, or empty for every target.
+  string target = 1;
+}
+
+// GetStatusResponse carries the serialized internal/statusreport.Report so the
+// client renders it as text or passes the JSON through unchanged.
+message GetStatusResponse {
+  string report_json = 1;
+}
+
+// GetUpdaterStatusRequest asks for the upgrade tick loop's current state.
+message GetUpdaterStatusRequest {}
+
+// GetUpdaterStatusResponse reports the tick loop state and the last per-target
+// upgrade check.
+message GetUpdaterStatusResponse {
+  bool running = 1;
+  string active_operation = 2;
+  string active_target = 3;
+  int64 last_tick_unix = 4;
+  int64 next_tick_unix = 5;
+  int64 interval_seconds = 6;
+  repeated UpdaterTargetStatus targets = 7;
+}
+
+// UpdaterTargetStatus is the last upgrade-check outcome for one target.
+message UpdaterTargetStatus {
+  string target = 1;
+  string current_version = 2;
+  string available_version = 3;
+  bool update_available = 4;
+  bool app_running = 5;
+  string last_outcome = 6;
+  int64 last_checked_unix = 7;
+}

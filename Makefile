@@ -42,9 +42,19 @@ include bootstrap.mk
 REPO_ROOT            := $(CURDIR)
 SHIM_OUT             := $(REPO_ROOT)/internal/embed/shim
 
-.PHONY: shim generated-shims clean-generated
+.PHONY: shim generated-shims clean-generated proto
 
 generated-shims: shim
+
+# Protobuf / gRPC codegen. Sources live under api/**/*.proto; config is
+# buf.yaml + buf.gen.yaml with local go-tool plugins, so only the buf binary is
+# needed and no network call is made. Wired as a build prerequisite so the
+# generated Go stays in sync with the proto.
+proto: ## Regenerate protobuf/gRPC Go code from api/**/*.proto via buf
+	@command -v buf >/dev/null 2>&1 || go install github.com/bufbuild/buf/cmd/buf@v1.70.0
+	@buf generate
+
+build build-check: proto
 
 # Package loading, vet, test, and the shared analyzers need the embedded Swift
 # shim present because go:embed validates the file during load.
