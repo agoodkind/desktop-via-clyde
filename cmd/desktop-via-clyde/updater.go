@@ -18,7 +18,46 @@ func newUpdaterCmd() *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newUpdaterRunCmd())
+	cmd.AddCommand(newUpdaterInstallCmd())
+	cmd.AddCommand(newUpdaterStatusCmd())
+	cmd.AddCommand(newUpdaterUninstallCmd())
 	return cmd
+}
+
+// newUpdaterInstallCmd installs and loads the updater LaunchAgent.
+func newUpdaterInstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install",
+		Short: "Install and load the updater LaunchAgent",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return daemon.Install(cmd.Context(), cmd.OutOrStdout())
+		},
+	}
+}
+
+// newUpdaterStatusCmd reports the LaunchAgent and daemon RPC state.
+func newUpdaterStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Report whether the updater daemon is loaded and responding",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return daemon.Status(cmd.Context(), cmd.OutOrStdout())
+		},
+	}
+}
+
+// newUpdaterUninstallCmd boots out and removes the updater LaunchAgent.
+func newUpdaterUninstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "uninstall",
+		Short: "Boot out and remove the updater LaunchAgent",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return daemon.Uninstall(cmd.Context(), cmd.OutOrStdout())
+		},
+	}
 }
 
 // newUpdaterRunCmd runs the daemon in the foreground. launchd owns the daemon's
