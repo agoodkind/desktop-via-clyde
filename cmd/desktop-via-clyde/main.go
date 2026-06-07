@@ -17,6 +17,7 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/clispec"
 	"goodkind.io/desktop-via-clyde/internal/composition"
 	"goodkind.io/desktop-via-clyde/internal/config"
+	"goodkind.io/desktop-via-clyde/internal/daemon"
 	"goodkind.io/desktop-via-clyde/internal/helperdispatch"
 	"goodkind.io/desktop-via-clyde/internal/logging"
 	"goodkind.io/desktop-via-clyde/internal/operations"
@@ -96,7 +97,7 @@ func run() int {
 }
 
 func newRootCmd(ctx context.Context, out io.Writer, errOut io.Writer) *cobra.Command {
-	return newRootCmdWithRunners(ctx, out, errOut, operations.Run, batchops.Run)
+	return newRootCmdWithRunners(ctx, out, errOut, daemon.RunOperation, batchops.Run)
 }
 
 func newRootCmdWithRunners(

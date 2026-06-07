@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"sync"
 
 	"goodkind.io/desktop-via-clyde/internal/catalog"
@@ -63,6 +64,22 @@ func (f FlagValues) String(name string) string {
 // Bool returns one stored bool flag value.
 func (f FlagValues) Bool(name string) bool {
 	return f.bools[name]
+}
+
+// StringValues returns a copy of the stored string flag values so a caller can
+// serialize them, for example onto the wire when the CLI forwards an operation
+// to the daemon.
+func (f FlagValues) StringValues() map[string]string {
+	out := make(map[string]string, len(f.strings))
+	maps.Copy(out, f.strings)
+	return out
+}
+
+// BoolValues returns a copy of the stored bool flag values.
+func (f FlagValues) BoolValues() map[string]bool {
+	out := make(map[string]bool, len(f.bools))
+	maps.Copy(out, f.bools)
+	return out
 }
 
 // Request describes one command dispatch into a typed capability.
