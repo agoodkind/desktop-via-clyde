@@ -10,14 +10,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "Shim",
-    platforms: [
-        .macOS(.v12)
-    ],
-    targets: [
-        .executableTarget(
-            name: "Shim",
-            path: "Sources/Shim"
-        )
-    ]
+  name: "Shim",
+  platforms: [
+    .macOS(.v12)
+  ],
+  targets: [
+    .executableTarget(
+      name: "Shim",
+      path: "Sources/Shim"
+    )
+  ]
 )
