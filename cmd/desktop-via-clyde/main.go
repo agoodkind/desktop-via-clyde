@@ -123,6 +123,7 @@ func newRootCmdWithRunners(
 		_ = response.WriteTextHeaderOnce(guardedCtx, cmd.OutOrStdout())
 	}
 	root.AddCommand(newProvisionCmd(out))
+	root.AddCommand(newUpdaterCmd())
 	return root
 }
 

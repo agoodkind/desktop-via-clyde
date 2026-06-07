@@ -53,6 +53,14 @@ func StateFile() string {
 	return filepath.Join(StateRoot(), "desktop-via-clyde-state.json")
 }
 
+// DaemonSocketPath returns the unix control socket the updater daemon serves and
+// the CLI dials. It lives under the state root so it shares the harness storage
+// location, and the short name keeps the path well under the macOS 104-byte
+// sockaddr_un limit.
+func DaemonSocketPath() string {
+	return filepath.Join(StateRoot(), "desktop-via-clyde-daemon.sock")
+}
+
 // MacOSDir returns the bundle MacOS directory for one target.
 func MacOSDir(t targets.Target) string {
 	return filepath.Join(t.AppPath, "Contents", "MacOS")
