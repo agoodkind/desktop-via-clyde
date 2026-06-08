@@ -11,7 +11,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.3.1
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sys v0.45.0
-	goodkind.io/gklog v0.4.2
+	goodkind.io/gklog v0.4.4
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
 	howett.net/plist v1.0.1
@@ -40,7 +40,7 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260401024825-9d38bb4040a9 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.6.1 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )
