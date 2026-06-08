@@ -11,6 +11,7 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/clock"
 	"goodkind.io/desktop-via-clyde/internal/operations"
+	"goodkind.io/desktop-via-clyde/internal/targets"
 )
 
 // newOperationJob builds the job that runs one app operation (patch, upgrade,
@@ -62,6 +63,54 @@ func newOperationJob(capability string, operation string, targetID string, forma
 		// The operation's outcome (success, skipped, or failed) is carried to
 		// every subscriber through the terminal events finishRun emits, so the
 		// job itself returns nil; only setup failures above propagate as errors.
+		finishRun(ctx, session, targetID, started, runErr)
+		return nil
+	}
+}
+
+// newCLIUpgradeJob builds the job that upgrades one standalone CLI target
+// (codex-cli) through its configured operation. A CLI target has no long-lived
+// process to protect, so this runs unconditionally with the operation's default
+// flags, which are the same source repo, build mode, and fast compile that
+// `upgrade <cli>` uses today. The install operation itself reuses the current
+// release when the source head has not moved, so a sweep with no new commits is
+// a cheap no-op.
+func newCLIUpgradeJob(program targets.CLIProgram, capability string, flags operations.FlagValues) operationJob {
+	return func(ctx context.Context, emit func(event *desktopviaclydev1.ProgressEvent)) error {
+		targetID := program.ID
+		session, err := clioutput.NewBroadcastSession(ctx, clioutput.SessionOptions{
+			Out:       io.Discard,
+			Format:    clioutput.FormatText,
+			Operation: "upgrade",
+			Scope:     targetID,
+			Parallel:  1,
+			DryRun:    flags.Bool("dry-run"),
+		}, func(event clioutput.Event) error {
+			emit(eventToProto(event))
+			return nil
+		})
+		if err != nil {
+			daemonLog.ErrorContext(ctx, "daemon.job.session_failed", "err", err, "target", targetID)
+			return fmt.Errorf("create broadcast session: %w", err)
+		}
+		rawLog, _, err := session.OpenTargetLog(targetID)
+		if err != nil {
+			daemonLog.ErrorContext(ctx, "daemon.job.open_log_failed", "err", err, "target", targetID)
+			return fmt.Errorf("open target log: %w", err)
+		}
+		started := clock.Now()
+		programCopy := program
+		runErr := operations.Run(ctx, operations.Request{
+			Out:        rawLog,
+			LogOut:     rawLog,
+			Progress:   session.TargetProgress(targetID),
+			App:        nil,
+			CLI:        &programCopy,
+			Capability: capability,
+			Flags:      flags,
+			Format:     clioutput.FormatText,
+		})
+		_ = rawLog.Close()
 		finishRun(ctx, session, targetID, started, runErr)
 		return nil
 	}

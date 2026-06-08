@@ -11,6 +11,8 @@ import (
 
 	desktopviaclydev1 "goodkind.io/desktop-via-clyde/api/desktopviaclyde/v1"
 	"goodkind.io/desktop-via-clyde/internal/clock"
+	"goodkind.io/desktop-via-clyde/internal/cmdflags"
+	"goodkind.io/desktop-via-clyde/internal/spec"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 	"goodkind.io/desktop-via-clyde/internal/upgrade"
 )
@@ -92,22 +94,25 @@ func (s *updaterState) snapshot() updaterSnapshot {
 // runUpgrade seams are fields so tests can drive the decision logic without
 // network, processes, or real upgrades.
 type ticker struct {
-	exec        *executor
-	state       *updaterState
-	checkUpdate func(ctx context.Context, target targets.Target) (upgrade.UpdateCheck, error)
-	appRunning  func(ctx context.Context, target targets.Target) bool
-	runUpgrade  func(ctx context.Context, targetID string)
+	exec          *executor
+	state         *updaterState
+	checkUpdate   func(ctx context.Context, target targets.Target) (upgrade.UpdateCheck, error)
+	appRunning    func(ctx context.Context, target targets.Target) bool
+	runUpgrade    func(ctx context.Context, targetID string)
+	runCLIUpgrade func(ctx context.Context, program targets.CLIProgram, op spec.OperationSpec)
 }
 
 func newTicker(operationExecutor *executor, state *updaterState) *ticker {
 	tick := &ticker{
-		exec:        operationExecutor,
-		state:       state,
-		checkUpdate: defaultCheckUpdate,
-		appRunning:  appRunning,
-		runUpgrade:  nil,
+		exec:          operationExecutor,
+		state:         state,
+		checkUpdate:   defaultCheckUpdate,
+		appRunning:    appRunning,
+		runUpgrade:    nil,
+		runCLIUpgrade: nil,
 	}
 	tick.runUpgrade = tick.runUpgradeThroughExecutor
+	tick.runCLIUpgrade = tick.runCLIUpgradeThroughExecutor
 	return tick
 }
 
@@ -168,7 +173,31 @@ func (t *ticker) sweep(ctx context.Context) bool {
 		}
 		t.state.recordCheck(target.ID, entry)
 	}
+	t.sweepCLIs(ctx)
 	return deferred
+}
+
+// sweepCLIs upgrades every configured CLI target that declares an upgrade
+// operation. CLI targets (codex-cli) have no long-lived process, so there is no
+// running-process gate: a new binary is picked up on the next invocation, and
+// the upgrade runs every sweep at the base cadence. It never contributes to the
+// fast-cadence deferral.
+func (t *ticker) sweepCLIs(ctx context.Context) {
+	for _, program := range targets.AllCLIs() {
+		op, ok := program.Operations["upgrade"]
+		if !ok {
+			continue
+		}
+		t.runCLIUpgrade(ctx, program, op)
+		t.state.recordCheck(program.ID, targetCheck{
+			currentVersion:   "",
+			availableVersion: "",
+			updateAvailable:  false,
+			appRunning:       false,
+			outcome:          "upgraded",
+			checkedAtUnix:    clock.Now().Unix(),
+		})
+	}
 }
 
 // runUpgradeThroughExecutor runs an upgrade for one target through the shared
@@ -181,6 +210,15 @@ func (t *ticker) runUpgradeThroughExecutor(ctx context.Context, targetID string)
 	}
 	job := newOperationJob(upgrade.AppUpgradeCapability, "upgrade", targetID, "", flags)
 	run := t.exec.startOrAttach(ctx, "upgrade", targetID, job)
+	_ = run.broadcaster.stream(ctx, func(*desktopviaclydev1.ProgressEvent) error { return nil })
+}
+
+// runCLIUpgradeThroughExecutor runs a CLI target's upgrade through the shared
+// executor using the operation's default flags, which match what
+// `upgrade <cli>` runs today including the fast compile build mode.
+func (t *ticker) runCLIUpgradeThroughExecutor(ctx context.Context, program targets.CLIProgram, op spec.OperationSpec) {
+	job := newCLIUpgradeJob(program, op.Capability, cmdflags.Defaults(op.Flags))
+	run := t.exec.startOrAttach(ctx, "upgrade", program.ID, job)
 	_ = run.broadcaster.stream(ctx, func(*desktopviaclydev1.ProgressEvent) error { return nil })
 }
 

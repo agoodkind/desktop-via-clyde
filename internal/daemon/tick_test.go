@@ -68,6 +68,43 @@ func TestSweepDefersRunningTargetAndUpgradesClosed(t *testing.T) {
 	}
 }
 
+func TestSweepUpgradesCLITargetWithoutRunningGate(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	config.SetCurrent(&spec.Config{
+		Signing: spec.SigningSpec{Identity: "id", TeamID: "TEAM123456"},
+		Apps:    map[string]spec.AppSpec{},
+		CLIs: map[string]spec.CLISpec{
+			"codex-cli": {
+				ID:      "codex-cli",
+				Command: spec.CommandSpec{Use: "codex-cli"},
+				Operations: map[string]spec.OperationSpec{
+					"upgrade": {ID: "upgrade", Use: "upgrade", Capability: "standalone-cli.install"},
+				},
+			},
+		},
+	})
+	t.Cleanup(func() { config.SetCurrent(nil) })
+
+	var upgradedCLIs []string
+	tick := &ticker{
+		exec:  newExecutor(),
+		state: newUpdaterState(),
+		checkUpdate: func(_ context.Context, _ targets.Target) (upgrade.UpdateCheck, error) {
+			return upgrade.UpdateCheck{}, nil
+		},
+		appRunning: func(_ context.Context, _ targets.Target) bool { return true },
+		runUpgrade: func(_ context.Context, _ string) {},
+		runCLIUpgrade: func(_ context.Context, program targets.CLIProgram, _ spec.OperationSpec) {
+			upgradedCLIs = append(upgradedCLIs, program.ID)
+		},
+	}
+
+	tick.sweep(context.Background())
+	if len(upgradedCLIs) != 1 || upgradedCLIs[0] != "codex-cli" {
+		t.Fatalf("CLI upgrades = %v, want [codex-cli] regardless of any running gate", upgradedCLIs)
+	}
+}
+
 func TestSweepNoUpdatesDoesNotDeferOrUpgrade(t *testing.T) {
 	setupTwoApps(t)
 	upgraded := map[string]bool{}
