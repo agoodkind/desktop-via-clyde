@@ -1,0 +1,129 @@
+# desktop-via-clyde example config
+#
+# This file documents the shape of the runtime config. It is a reference, not a
+# loaded file. The live config the CLI and updater daemon actually read lives at
+# config.toml under the XDG config root for desktop-via-clyde (the resolver is
+# internal/config/xdg.go). The authoritative schema is the Go structs in
+# internal/spec/spec.go, and internal/testconfig/testdata holds the
+# schema-tested fixture. Replace every <PLACEHOLDER> with a real value.
+
+# Local identity used to re-sign patched bundles. This table only names which
+# identity to use; the keychain is the ground truth for whether it resolves.
+[signing]
+identity = "Developer ID Application: <YOUR NAME> (<TEAM_ID>)"
+team_id = "<TEAM_ID>"
+
+# One patch target. Repeat the [apps.<id>] block per app you patch.
+[apps.example]
+app_path = "/Applications/Example.app"
+bundle_id = "com.example.desktop"
+# Helper bundle identifiers whose keychain access is migrated during patch.
+helper_bundle_ids = [
+    "com.example.desktop.helper",
+    "com.github.Electron.framework",
+    "org.mantle.Mantle",
+]
+exec_name = "Example"
+keychain_services = ["Example Safe Storage"]
+# Optional, and a last resort. Nested code kept on its vendor signature instead
+# of re-signed to your team. Use this ONLY when re-signing an object actually
+# breaks it, and prove the app still launches. Preserving a framework while its
+# loaders are re-signed to your team breaks hardened-runtime library validation:
+# any loader without com.apple.security.cs.disable-library-validation aborts at
+# launch with a "different Team IDs" error. Default is to omit this key.
+# preserved_nested_code_paths = ["Contents/Frameworks/Some.framework"]
+
+[apps.example.command]
+use = "example"
+short = "Operate on /Applications/Example.app"
+
+# Entitlements normalized before signing. strip removes vendor-team-bound keys;
+# required_boolean forces keys the re-signed app needs.
+[apps.example.entitlements]
+strip = [
+    "com.apple.application-identifier",
+    "com.apple.developer.team-identifier",
+    "keychain-access-groups",
+    "com.apple.security.application-groups",
+]
+required_boolean = ["com.apple.security.cs.disable-library-validation"]
+
+# Updater. kind is one of: squirrel_json, sparkle_appcast, http_path_json_manifest.
+# Only the fields for the chosen kind are required; see the validators in
+# internal/config/load.go. This example uses squirrel_json.
+[apps.example.updater]
+kind = "squirrel_json"
+url = "https://updates.example.com/darwin/universal/squirrel/update"
+user_agent = "Example/desktop-via-clyde"
+device_id_param_name = "device_id"
+
+# Launch policy serialized into the patched bundle. It drives the shim: proxy
+# routing, injected env and argv, and preflight checks before launch. Paths are
+# absolute in the real config; <STATE_ROOT> and <HOME> are placeholders here.
+[apps.example.launch_policy]
+proxy_host = "localhost"
+proxy_port = 48700
+ca_certificate = "<STATE_ROOT>/mitm/ca/clyde-mitm-ca.crt"
+no_proxy = "localhost,127.0.0.1,::1,[::1]"
+launch_working_directory = "<HOME>"
+ignore_dry_run_signal = "SIGKILL"
+
+[[apps.example.launch_policy.preflights]]
+kind = "file_exists"
+path = "<STATE_ROOT>/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.example.launch_policy.preflights]]
+kind = "tcp_reachable"
+host = "localhost"
+port = 48700
+timeout_ms = 1000
+
+[[apps.example.launch_policy.environment]]
+action = "set"
+key = "NODE_EXTRA_CA_CERTS"
+value = "<STATE_ROOT>/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.example.launch_policy.arguments]]
+action = "append"
+value = "--proxy-server=http://localhost:48700"
+
+[[apps.example.launch_policy.arguments]]
+action = "append"
+value = "--ignore-certificate-errors"
+
+# Operations are the per-target subcommands the CLI renders. capability binds
+# each to its handler; see internal/composition.
+[apps.example.operations.patch]
+use = "patch"
+short = "Install the shim into one app bundle and re-sign it"
+capability = "app.patch"
+
+[apps.example.operations.upgrade]
+use = "upgrade"
+short = "Fetch the latest build, verify, swap into the app path, and re-patch"
+capability = "app.upgrade"
+
+[apps.example.operations.status]
+use = "status"
+short = "Print state for this target"
+capability = "app.status"
+
+[apps.example.operations.keychain-migrate]
+use = "keychain-migrate"
+short = "Restore keychain access for a patched app"
+capability = "app.keychain-migrate"
+
+[apps.example.operations.hard-reset]
+use = "hard-reset"
+short = "Reset configured macOS privacy grants for this target"
+capability = "app.hard-reset"
+
+# Optional standalone CLI surface, unrelated to app bundles.
+[clis.example-cli.command]
+use = "example-cli"
+short = "Build, sign, and install a local CLI"
+
+[clis.example-cli.operations.status]
+use = "status"
+short = "Print local CLI state"
+capability = "standalone-cli.status"
