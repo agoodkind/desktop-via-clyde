@@ -16,21 +16,16 @@ import (
 )
 
 const (
-	buildTimeVersionLayout = "20060102-150405"
-	buildHashLength        = 12
+	buildHashLength = 12
 )
 
 type codexBuildIdentity struct {
 	BaseVersion    string
 	PackageVersion string
-	BuildStamp     string
+	TreeStamp      string
 	Head           string
 	Tree           string
 	BuildHash      string
-}
-
-func dryRunBuildTime() time.Time {
-	return time.Date(2000, 1, 2, 3, 4, 5, 0, time.UTC)
 }
 
 func newBuildIdentity(
@@ -41,9 +36,8 @@ func newBuildIdentity(
 	buildMode BuildMode,
 	packageVariant string,
 	commandName string,
-	buildTime time.Time,
 ) codexBuildIdentity {
-	buildStamp := buildTime.Format(buildTimeVersionLayout)
+	treeStamp := shortTreeIdentifier(tree)
 	buildHash := computeBuildHash(
 		baseVersion,
 		head,
@@ -52,19 +46,18 @@ func newBuildIdentity(
 		string(buildMode),
 		packageVariant,
 		commandName,
-		buildStamp,
 	)
 	packageVersion := fmt.Sprintf(
-		"%s-main.%s+head.%s.build.%s",
+		"%s-main.%s+tree.%s.build.%s",
 		baseVersion,
-		buildStamp,
 		head,
+		treeStamp,
 		buildHash,
 	)
 	return codexBuildIdentity{
 		BaseVersion:    baseVersion,
 		PackageVersion: packageVersion,
-		BuildStamp:     buildStamp,
+		TreeStamp:      treeStamp,
 		Head:           head,
 		Tree:           tree,
 		BuildHash:      buildHash,
@@ -185,21 +178,13 @@ func prepareStampedBuildSource(
 	ctx context.Context,
 	r *patch.Runner,
 	sourceDir string,
-	target string,
-	buildMode BuildMode,
 	identity codexBuildIdentity,
 ) (string, error) {
 	log := codexcliLog.With("function", "prepareStampedBuildSource")
-	buildRoot := filepath.Join(filepath.Dir(sourceDir), "build")
-	buildDir := filepath.Join(
-		buildRoot,
-		"source-"+safePathPart(identity.Head)+"-"+safePathPart(identity.BuildStamp)+"-"+identity.BuildHash,
-	)
-	targetCacheDir := filepath.Join(
-		buildRoot,
-		"target-"+safePathPart(identity.Head)+"-"+safePathPart(target)+"-"+safePathPart(string(buildMode)),
-	)
-	notef(r, "codex-cli: prepare stamped build source "+buildDir)
+	buildRoot := codexBuildRoot(sourceDir)
+	buildDir := filepath.Join(buildRoot, "work")
+	targetCacheDir := filepath.Join(buildRoot, "target")
+	notef(r, "codex-cli: prepare build source "+buildDir)
 	if r.DryRun {
 		return buildDir, nil
 	}
@@ -363,19 +348,19 @@ func validateStampedPackageVersion(packageVersion string) error {
 	if !isStableSemverCore(baseVersion) {
 		return fmt.Errorf("invalid stamped package version %q: invalid base version", packageVersion)
 	}
-	buildStamp, metadata, ok := strings.Cut(rest, "+head.")
+	head, metadata, ok := strings.Cut(rest, "+tree.")
 	if !ok {
-		return fmt.Errorf("invalid stamped package version %q: missing head metadata", packageVersion)
+		return fmt.Errorf("invalid stamped package version %q: missing tree metadata", packageVersion)
 	}
-	if !isBuildStamp(buildStamp) {
-		return fmt.Errorf("invalid stamped package version %q: invalid build stamp", packageVersion)
+	if !isHexIdentifier(head, 12) {
+		return fmt.Errorf("invalid stamped package version %q: invalid head prerelease", packageVersion)
 	}
-	head, buildHash, ok := strings.Cut(metadata, ".build.")
+	tree, buildHash, ok := strings.Cut(metadata, ".build.")
 	if !ok {
 		return fmt.Errorf("invalid stamped package version %q: missing build hash metadata", packageVersion)
 	}
-	if !isHexIdentifier(head, 12) {
-		return fmt.Errorf("invalid stamped package version %q: invalid head metadata", packageVersion)
+	if !isHexIdentifier(tree, 12) {
+		return fmt.Errorf("invalid stamped package version %q: invalid tree metadata", packageVersion)
 	}
 	if !isHexIdentifier(buildHash, buildHashLength) {
 		return fmt.Errorf("invalid stamped package version %q: invalid build hash metadata", packageVersion)
@@ -396,22 +381,11 @@ func isStableSemverCore(value string) bool {
 	return true
 }
 
-func isBuildStamp(value string) bool {
-	if len(value) != len("20060102-150405") {
-		return false
+func shortTreeIdentifier(tree string) string {
+	if len(tree) >= 12 {
+		return tree[:12]
 	}
-	for index, runeValue := range value {
-		if index == len("20060102") {
-			if runeValue != '-' {
-				return false
-			}
-			continue
-		}
-		if !unicode.IsDigit(runeValue) {
-			return false
-		}
-	}
-	return true
+	return tree
 }
 
 func isHexIdentifier(value string, length int) bool {
@@ -428,19 +402,4 @@ func isHexIdentifier(value string, length int) bool {
 
 func isLowerHex(runeValue rune) bool {
 	return unicode.IsDigit(runeValue) || (runeValue >= 'a' && runeValue <= 'f')
-}
-
-func safePathPart(value string) string {
-	var builder strings.Builder
-	for _, runeValue := range value {
-		if unicode.IsLetter(runeValue) || unicode.IsDigit(runeValue) || runeValue == '.' || runeValue == '_' || runeValue == '-' {
-			builder.WriteRune(runeValue)
-			continue
-		}
-		builder.WriteByte('_')
-	}
-	if builder.Len() == 0 {
-		return "unknown"
-	}
-	return builder.String()
 }

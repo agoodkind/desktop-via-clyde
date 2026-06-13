@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/patch"
@@ -37,17 +36,7 @@ func TestInstallDryRunUsesShallowGhCloneAndOriginMain(t *testing.T) {
 		t.Fatalf("Install dry-run: %v", err)
 	}
 	sourceDir := filepath.Join(cacheHome, "clyde", "desktop-via-clyde", "codex", "source")
-	identity := newBuildIdentity(
-		"0.0.0",
-		"dryrun",
-		"dryrun",
-		"aarch64-apple-darwin",
-		BuildModeRelease,
-		"codex",
-		"codex",
-		dryRunBuildTime(),
-	)
-	buildDir := filepath.Join(filepath.Dir(sourceDir), "build", "source-dryrun-"+identity.BuildStamp+"-"+identity.BuildHash)
+	buildDir := filepath.Join(filepath.Dir(sourceDir), "build", "work")
 	codexRoot := filepath.Join(buildDir, "codex-rs")
 	requireTraceCommand(t, trace, "gh", []string{"repo", "clone", "openai/codex", sourceDir, "--", "--depth", "1"})
 	requireTraceCommand(t, trace, "git", []string{"-C", sourceDir, "fetch", "--depth", "1", "--prune", "origin", "main"})
@@ -285,31 +274,29 @@ func TestSelectLatestStableRustVersion(t *testing.T) {
 	}
 }
 
-func TestBuildIdentityUsesStampedSemverPackageVersion(t *testing.T) {
-	buildTime := time.Date(2026, 6, 3, 21, 53, 51, 0, time.UTC)
+func TestBuildIdentityUsesDeterministicSemverPackageVersion(t *testing.T) {
+	tree := "abcdef0123456789abcdef0123456789abcdef01"
 	identity := newBuildIdentity(
 		"0.137.0",
 		"80b65e994573",
-		"treehash",
+		tree,
 		"aarch64-apple-darwin",
 		BuildModeLocalFast,
 		"codex",
 		"codex",
-		buildTime,
 	)
 	wantHash := computeBuildHash(
 		"0.137.0",
 		"80b65e994573",
-		"treehash",
+		tree,
 		"aarch64-apple-darwin",
 		string(BuildModeLocalFast),
 		"codex",
 		"codex",
-		"20260603-215351",
 	)
-	wantVersion := "0.137.0-main.20260603-215351+head.80b65e994573.build." + wantHash
-	if identity.BuildStamp != "20260603-215351" {
-		t.Fatalf("BuildStamp = %q", identity.BuildStamp)
+	wantVersion := "0.137.0-main.80b65e994573+tree.abcdef012345.build." + wantHash
+	if identity.TreeStamp != "abcdef012345" {
+		t.Fatalf("TreeStamp = %q", identity.TreeStamp)
 	}
 	if identity.PackageVersion != wantVersion {
 		t.Fatalf("PackageVersion = %q, want %q", identity.PackageVersion, wantVersion)
@@ -322,16 +309,15 @@ func TestBuildIdentityUsesStampedSemverPackageVersion(t *testing.T) {
 	}
 }
 
-func TestBuildHashChangesWithStampAndBuildInputs(t *testing.T) {
+func TestBuildHashChangesWithBuildInputs(t *testing.T) {
 	baseValues := []string{
 		"0.137.0",
 		"80b65e994573",
-		"treehash",
+		"abcdef0123456789abcdef0123456789abcdef01",
 		"aarch64-apple-darwin",
 		string(BuildModeLocalFast),
 		"codex",
 		"codex",
-		"20260603-215351",
 	}
 	baseHash := computeBuildHash(baseValues...)
 	for index := range baseValues {
@@ -345,16 +331,14 @@ func TestBuildHashChangesWithStampAndBuildInputs(t *testing.T) {
 
 func TestStampCodexBuildSourceWritesOnlyCargoToml(t *testing.T) {
 	buildDir := t.TempDir()
-	buildTime := time.Date(2026, 6, 3, 21, 53, 51, 0, time.UTC)
 	identity := newBuildIdentity(
 		"0.137.0",
 		"80b65e994573",
-		"treehash",
+		"abcdef0123456789abcdef0123456789abcdef01",
 		"aarch64-apple-darwin",
 		BuildModeLocalFast,
 		"codex",
 		"codex",
-		buildTime,
 	)
 	cargoPath := filepath.Join(buildDir, "codex-rs", "Cargo.toml")
 	versionPath := filepath.Join(buildDir, "codex-rs", "tui", "src", "version.rs")
@@ -455,23 +439,19 @@ func testInstallOptions(home string, cacheHome string) InstallOptions {
 	}
 }
 
-func TestReleaseDirUsesLocalFastSuffix(t *testing.T) {
-	path := releaseDir("/tmp/codex-home", "0.0.0", "abcdef012345", "aarch64-apple-darwin", BuildModeLocalFast)
-	if !strings.HasSuffix(path, "0.0.0-main-abcdef012345-aarch64-apple-darwin-local-fast") {
-		t.Fatalf("local-fast release dir = %q", path)
+func TestLatestMainReleaseDirUsesSingleReleasePath(t *testing.T) {
+	path := latestMainReleaseDir("/tmp/codex-home")
+	if !strings.HasSuffix(path, "packages/standalone/releases/latest-main") {
+		t.Fatalf("latest-main release dir = %q", path)
 	}
 }
 
-func TestReleaseNameIncludesStampedVersion(t *testing.T) {
-	got := releaseName(
-		"0.137.0-main.20260603-215351+head.abcdef012345.build.123456789abc",
-		"abcdef012345",
-		"aarch64-apple-darwin",
-		BuildModeLocalFast,
-	)
-	want := "0.137.0-main.20260603-215351+head.abcdef012345.build.123456789abc-main-abcdef012345-aarch64-apple-darwin-local-fast"
-	if got != want {
-		t.Fatalf("releaseName = %q, want %q", got, want)
+func TestCodexInstallLockPathUsesSharedBuildRoot(t *testing.T) {
+	sourceDir := filepath.Join("/tmp", "cache", "clyde", "desktop-via-clyde", "codex", "source")
+	path := codexInstallLockPath(sourceDir)
+	want := filepath.Join("/tmp", "cache", "clyde", "desktop-via-clyde", "codex", "build", ".install.lock")
+	if path != want {
+		t.Fatalf("codexInstallLockPath = %q, want %q", path, want)
 	}
 }
 
@@ -487,37 +467,10 @@ func TestVerifyReleaseCandidateRejectsVersionMismatchBeforeReuse(t *testing.T) {
 		"aarch64-apple-darwin",
 		"bin/codex",
 		"codex",
-		"0.137.0-main.20260603-215351+head.abcdef012345.build.123456789abc",
+		"0.137.0-main.abcdef012345+tree.abcdef012345.build.123456789abc",
 	)
 	if err == nil || !strings.Contains(err.Error(), "release version mismatch") {
 		t.Fatalf("verifyReleaseCandidate err = %v", err)
-	}
-}
-
-func TestFindMatchingReleaseDirsHonorsBuildModeSuffix(t *testing.T) {
-	releasesRoot := t.TempDir()
-	paths := []string{
-		filepath.Join(releasesRoot, "0.0.0-main-abcdef-aarch64-apple-darwin"),
-		filepath.Join(releasesRoot, "0.0.0-main-abcdef-aarch64-apple-darwin-local-fast"),
-	}
-	for _, path := range paths {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatalf("MkdirAll %s: %v", path, err)
-		}
-	}
-	releaseMatches, err := findMatchingReleaseDirs(releasesRoot, releaseNameSuffix("abcdef", "aarch64-apple-darwin", BuildModeRelease))
-	if err != nil {
-		t.Fatalf("findMatchingReleaseDirs release: %v", err)
-	}
-	if len(releaseMatches) != 1 || releaseMatches[0] != paths[0] {
-		t.Fatalf("release matches = %#v", releaseMatches)
-	}
-	fastMatches, err := findMatchingReleaseDirs(releasesRoot, releaseNameSuffix("abcdef", "aarch64-apple-darwin", BuildModeLocalFast))
-	if err != nil {
-		t.Fatalf("findMatchingReleaseDirs local-fast: %v", err)
-	}
-	if len(fastMatches) != 1 || fastMatches[0] != paths[1] {
-		t.Fatalf("local-fast matches = %#v", fastMatches)
 	}
 }
 

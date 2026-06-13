@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"goodkind.io/desktop-via-clyde/internal/clock"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 )
 
@@ -20,10 +19,7 @@ func resolveCodexBuildIdentity(
 	head := "dryrun"
 	tree := "dryrun"
 	baseVersion := "0.0.0"
-	buildTime := clock.Now()
-	if opts.DryRun {
-		buildTime = dryRunBuildTime()
-	} else {
+	if !opts.DryRun {
 		resolvedHead, resolvedTree, resolvedBaseVersion, err := readSourceBuildInputs(ctx, r, opts.SourceDir)
 		if err != nil {
 			log.ErrorContext(ctx, "codexcli.resolve_build_identity.source_inputs_failed", "err", err)
@@ -41,12 +37,11 @@ func resolveCodexBuildIdentity(
 		buildMode,
 		opts.PackageVariant,
 		opts.CommandName,
-		buildTime,
 	), nil
 }
 
 func emptyCodexBuildIdentity() codexBuildIdentity {
-	return codexBuildIdentity{BaseVersion: "", PackageVersion: "", BuildStamp: "", Head: "", Tree: "", BuildHash: ""}
+	return codexBuildIdentity{BaseVersion: "", PackageVersion: "", TreeStamp: "", Head: "", Tree: "", BuildHash: ""}
 }
 
 func readSourceBuildInputs(ctx context.Context, r *patch.Runner, sourceDir string) (string, string, string, error) {
@@ -80,7 +75,7 @@ func buildStampedPackage(
 	buildMode BuildMode,
 	identity codexBuildIdentity,
 ) (packageMetadata, error) {
-	buildSourceDir, err := prepareStampedBuildSource(ctx, r, opts.SourceDir, target, buildMode, identity)
+	buildSourceDir, err := prepareStampedBuildSource(ctx, r, opts.SourceDir, identity)
 	if err != nil {
 		return packageMetadata{}, err
 	}

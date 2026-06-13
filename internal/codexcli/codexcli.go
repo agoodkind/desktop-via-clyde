@@ -230,6 +230,17 @@ func Install(ctx context.Context, opts InstallOptions) error {
 		return err
 	}
 	notef(r, "codex-cli: source="+opts.SourceDir+" ref="+opts.Ref+" target="+target+" build-mode="+string(buildMode))
+	if !opts.DryRun {
+		installLock, err := acquireCodexInstallLock(ctx, r, opts.SourceDir)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if releaseErr := installLock.release(ctx); releaseErr != nil {
+				log.ErrorContext(ctx, "codexcli.install.release_lock_failed", "err", releaseErr)
+			}
+		}()
+	}
 	notef(r, "codex-cli: update source checkout")
 	if err := cloneOrUpdateSource(ctx, r, opts.Repo, opts.SourceDir, opts.Ref); err != nil {
 		return err
@@ -238,7 +249,7 @@ func Install(ctx context.Context, opts InstallOptions) error {
 	if err != nil {
 		return err
 	}
-	notef(r, "codex-cli: build identity version="+identity.PackageVersion+" built="+identity.BuildStamp+" head="+identity.Head+" build="+identity.BuildHash)
+	notef(r, "codex-cli: build identity version="+identity.PackageVersion+" tree="+identity.TreeStamp+" head="+identity.Head+" build="+identity.BuildHash)
 	if !opts.DryRun {
 		reusedReleaseDir, reused, err := maybeReuseInstalledRelease(
 			ctx,
@@ -249,9 +260,7 @@ func Install(ctx context.Context, opts InstallOptions) error {
 			opts.PackageVariant,
 			opts.CommandName,
 			identity.PackageVersion,
-			identity.Head,
 			target,
-			buildMode,
 			opts.ForceRebuild,
 		)
 		if err != nil {
@@ -267,7 +276,7 @@ func Install(ctx context.Context, opts InstallOptions) error {
 	if err != nil {
 		return err
 	}
-	releaseDir := releaseDir(opts.PackageHome, metadata.Version, identity.Head, metadata.Target, buildMode)
+	releaseDir := latestMainReleaseDir(opts.PackageHome)
 	notef(r, "codex-cli: package version="+metadata.Version+" target="+metadata.Target+" release="+releaseDir)
 	notef(r, "codex-cli: install standalone package")
 	if err := installPackage(ctx, r, opts.PackageDir, releaseDir, opts.PackageHome, opts.InstallDir, opts.PackageBinaryPath, opts.CommandName); err != nil {
@@ -733,29 +742,14 @@ func readPackageMetadata(packageDir string, packageVariant string) (packageMetad
 	return metadata, nil
 }
 
-func releaseDir(packageHome string, version string, head string, target string, buildMode BuildMode) string {
+func latestMainReleaseDir(packageHome string) string {
 	return filepath.Join(
 		packageHome,
 		"packages",
 		"standalone",
 		"releases",
-		releaseName(version, head, target, buildMode),
+		"latest-main",
 	)
-}
-
-func releaseName(version string, head string, target string, buildMode BuildMode) string {
-	return fmt.Sprintf("%s-main-%s-%s%s", version, head, target, buildModeReleaseSuffix(buildMode))
-}
-
-func buildModeReleaseSuffix(buildMode BuildMode) string {
-	if buildMode == BuildModeLocalFast {
-		return "-local-fast"
-	}
-	return ""
-}
-
-func releaseNameSuffix(head string, target string, buildMode BuildMode) string {
-	return fmt.Sprintf("-main-%s-%s%s", head, target, buildModeReleaseSuffix(buildMode))
 }
 
 func installPackage(

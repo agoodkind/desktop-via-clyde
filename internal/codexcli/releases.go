@@ -2,12 +2,10 @@ package codexcli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"goodkind.io/desktop-via-clyde/internal/patch"
@@ -22,35 +20,29 @@ func maybeReuseInstalledRelease(
 	packageVariant string,
 	commandName string,
 	version string,
-	head string,
 	target string,
-	buildMode BuildMode,
 	forceRebuild bool,
 ) (string, bool, error) {
+	log := codexcliLog.With("function", "maybeReuseInstalledRelease")
 	if forceRebuild {
 		notef(r, "codex-cli: force rebuild requested, skipping installed release reuse")
 		return "", false, nil
 	}
-	releasesRoot := filepath.Join(packageHome, "packages", "standalone", "releases")
-	matches, err := findMatchingReleaseDirs(releasesRoot, releaseNameSuffix(head, target, buildMode))
-	if err != nil {
-		return "", false, err
+	releasePath := latestMainReleaseDir(packageHome)
+	if _, err := os.Stat(releasePath); err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		log.ErrorContext(ctx, "codexcli.maybe_reuse_installed_release.stat_failed", "err", err)
+		return "", false, fmt.Errorf("stat release dir %s: %w", releasePath, err)
 	}
-	if len(matches) == 0 {
-		return "", false, nil
-	}
-	if len(matches) > 1 {
-		notef(r, "codex-cli: found multiple matching installed releases, rebuilding instead")
-		return "", false, nil
-	}
-	releasePath := matches[0]
-	notef(r, "codex-cli: found matching installed release "+releasePath)
+	notef(r, "codex-cli: found installed latest-main release "+releasePath)
 	reuseRejected, reuseReason := releaseReuseRejected(ctx, releasePath, target, packageBinaryPath, packageVariant, version)
 	if reuseRejected {
 		notef(r, "codex-cli: installed release reuse rejected: "+reuseReason)
 		return "", false, nil
 	}
-	notef(r, "codex-cli: reusing verified installed release "+releasePath)
+	notef(r, "codex-cli: reusing verified latest-main release "+releasePath)
 	if err := relinkInstalledRelease(ctx, r, packageHome, installDir, releasePath, packageBinaryPath, commandName); err != nil {
 		return "", false, err
 	}
@@ -73,29 +65,6 @@ func releaseReuseRejected(
 		return false, ""
 	}
 	return true, verifyErr.Error()
-}
-
-func findMatchingReleaseDirs(releasesRoot string, suffix string) ([]string, error) {
-	log := codexcliLog.With("function", "findMatchingReleaseDirs")
-	entries, err := os.ReadDir(releasesRoot)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		log.Error("codexcli.find_matching_release_dirs.read_failed", "err", err)
-		return nil, fmt.Errorf("list release dir %s: %w", releasesRoot, err)
-	}
-	matches := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		if strings.HasSuffix(entry.Name(), suffix) {
-			matches = append(matches, filepath.Join(releasesRoot, entry.Name()))
-		}
-	}
-	sort.Strings(matches)
-	return matches, nil
 }
 
 func verifyReleaseCandidate(
