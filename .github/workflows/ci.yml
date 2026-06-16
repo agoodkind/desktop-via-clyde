@@ -7,6 +7,6 @@ permissions:
 
 jobs:
   go:
-    uses: agoodkind/go-makefile/.github/workflows/_ci.yml@main
+    uses: ./.github/workflows/_go.yml
     permissions:
       contents: read
