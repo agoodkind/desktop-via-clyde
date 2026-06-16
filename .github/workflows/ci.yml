@@ -1,0 +1,12 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    uses: agoodkind/go-makefile/.github/workflows/_ci.yml@main
+    permissions:
+      contents: read
