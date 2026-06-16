@@ -1,0 +1,12 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    uses: ./.github/workflows/_go.yml
+    permissions:
+      contents: read

@@ -183,7 +183,7 @@ func TestRunWithOperationRunnerHonorsParallelLimit(t *testing.T) {
 	}
 }
 
-func TestRunWithOperationRunnerPrefixesOutputAndPrintsSummary(t *testing.T) {
+func TestRunWithOperationRunnerRendersProgressAndPrintsSummary(t *testing.T) {
 	installFixture(t)
 
 	var out bytes.Buffer
@@ -194,7 +194,8 @@ func TestRunWithOperationRunnerPrefixesOutputAndPrintsSummary(t *testing.T) {
 		Parallel:  1,
 		Targets:   []string{"cursor"},
 	}, func(_ context.Context, req operations.Request) error {
-		_, _ = req.Out.Write([]byte("hello\nworld\n"))
+		req.Progress.Step("hello")
+		req.Progress.Step("world")
 		return nil
 	})
 	if err != nil {
@@ -203,8 +204,8 @@ func TestRunWithOperationRunnerPrefixesOutputAndPrintsSummary(t *testing.T) {
 	output := out.String()
 	for _, want := range []string{
 		"Patch cursor",
-		"cursor hello ok",
-		"cursor world ok",
+		"detail=\"hello\"",
+		"detail=\"world\"",
 		"Result completed=1 failed=0",
 	} {
 		if !strings.Contains(output, want) {
@@ -225,7 +226,7 @@ func TestRunWithOperationRunnerJSONSummary(t *testing.T) {
 		Targets:   []string{"cursor"},
 		Format:    "json",
 	}, func(_ context.Context, req operations.Request) error {
-		_, _ = req.Out.Write([]byte("[dry-run] hello\n"))
+		req.Progress.Step("[dry-run] hello")
 		return nil
 	})
 	if err != nil {
@@ -234,6 +235,13 @@ func TestRunWithOperationRunnerJSONSummary(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if len(lines) != 7 {
 		t.Fatalf("json output line count = %d, want 7\noutput:\n%s", len(lines), out.String())
+	}
+	var step map[string]any
+	if err := json.Unmarshal([]byte(lines[4]), &step); err != nil {
+		t.Fatalf("unmarshal step: %v\nline:\n%s", err, lines[4])
+	}
+	if step["type"] != "step_done" || step["detail"] != "[dry-run] hello" {
+		t.Fatalf("step event = %#v, want step_done detail", step)
 	}
 	var summary map[string]any
 	if err := json.Unmarshal([]byte(lines[6]), &summary); err != nil {
@@ -257,7 +265,7 @@ func TestRunWithOperationRunnerRoutesRawOutputToTargetLog(t *testing.T) {
 		Targets:   []string{"cursor"},
 		Format:    "json",
 	}, func(_ context.Context, req operations.Request) error {
-		_, _ = req.Out.Write([]byte("[dry-run] friendly status\n"))
+		req.Progress.Step("[dry-run] friendly status")
 		_, _ = req.LogOut.Write([]byte("raw child output\n"))
 		return nil
 	})
