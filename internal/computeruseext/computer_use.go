@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"syscall"
 
 	"golang.org/x/sys/unix"
 	"goodkind.io/desktop-via-clyde/internal/extensions"
@@ -823,7 +822,7 @@ func writeExistingFile(path string, permissions os.FileMode, data []byte) error 
 		"bytes", len(data),
 	)
 	pattern := filepath.Base(path) + ".rewrite-*"
-	file, err := os.CreateTemp("", pattern)
+	file, err := os.CreateTemp(dirPath, pattern)
 	if err != nil {
 		return logComputerUsePatchErrorNoContext(
 			"patch.write_existing_file_open_failed",
@@ -873,14 +872,9 @@ func rewritePathEvidence(path string) string {
 
 	mode := info.Mode().String()
 	owner := "unknown"
-	flags := "unknown"
-	switch stat := info.Sys().(type) {
-	case *syscall.Stat_t:
+	flags := statFlagsString(info)
+	if stat, ok := info.Sys().(*unix.Stat_t); ok {
 		owner = fmt.Sprintf("uid=%d gid=%d", stat.Uid, stat.Gid)
-		flags = fmt.Sprintf("0x%x", stat.Flags)
-	case *unix.Stat_t:
-		owner = fmt.Sprintf("uid=%d gid=%d", stat.Uid, stat.Gid)
-		flags = fmt.Sprintf("0x%x", stat.Flags)
 	}
 
 	xattrs, xattrErr := ReadPathXattrs(path)
