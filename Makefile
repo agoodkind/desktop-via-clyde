@@ -15,6 +15,7 @@ VPKG       := goodkind.io/desktop-via-clyde/internal/version
 GKLOG_VPKG := goodkind.io/gklog/version
 DIST_DIR   := bin
 BUNDLE_ID  := io.goodkind.desktop-via-clyde
+CODESIGN_IDENTITY ?= -
 
 GO_BUILD_TAGS        := gklog_stamped
 GO_BUILD_EXTRA_FLAGS := -trimpath
