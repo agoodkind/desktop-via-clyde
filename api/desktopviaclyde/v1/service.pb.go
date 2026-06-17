@@ -471,11 +471,13 @@ func (x *RunKeychainMigrateRequest) GetFlags() *OperationFlags {
 	return nil
 }
 
-// SubscribeActiveRequest attaches to whatever operation the daemon is currently
-// running, streaming its ProgressEvent values. It completes immediately when no
-// operation is in flight.
+// SubscribeActiveRequest attaches to active runs, optionally filtered by
+// operation and target. It completes immediately when no matching operation is
+// in flight.
 type SubscribeActiveRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Operation     string                 `protobuf:"bytes,1,opt,name=operation,proto3" json:"operation,omitempty"`
+	Target        string                 `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -508,6 +510,20 @@ func (x *SubscribeActiveRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use SubscribeActiveRequest.ProtoReflect.Descriptor instead.
 func (*SubscribeActiveRequest) Descriptor() ([]byte, []int) {
 	return file_desktopviaclyde_v1_daemon_service_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *SubscribeActiveRequest) GetOperation() string {
+	if x != nil {
+		return x.Operation
+	}
+	return ""
+}
+
+func (x *SubscribeActiveRequest) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
 }
 
 // GetStatusRequest asks for the per-target patched state report.
@@ -650,6 +666,7 @@ type GetUpdaterStatusResponse struct {
 	NextTickUnix    int64                  `protobuf:"varint,5,opt,name=next_tick_unix,json=nextTickUnix,proto3" json:"next_tick_unix,omitempty"`
 	IntervalSeconds int64                  `protobuf:"varint,6,opt,name=interval_seconds,json=intervalSeconds,proto3" json:"interval_seconds,omitempty"`
 	Targets         []*UpdaterTargetStatus `protobuf:"bytes,7,rep,name=targets,proto3" json:"targets,omitempty"`
+	ActiveRuns      []*ActiveRun           `protobuf:"bytes,8,rep,name=active_runs,json=activeRuns,proto3" json:"active_runs,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -733,6 +750,65 @@ func (x *GetUpdaterStatusResponse) GetTargets() []*UpdaterTargetStatus {
 	return nil
 }
 
+func (x *GetUpdaterStatusResponse) GetActiveRuns() []*ActiveRun {
+	if x != nil {
+		return x.ActiveRuns
+	}
+	return nil
+}
+
+type ActiveRun struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Operation     string                 `protobuf:"bytes,1,opt,name=operation,proto3" json:"operation,omitempty"`
+	Target        string                 `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ActiveRun) Reset() {
+	*x = ActiveRun{}
+	mi := &file_desktopviaclyde_v1_daemon_service_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActiveRun) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActiveRun) ProtoMessage() {}
+
+func (x *ActiveRun) ProtoReflect() protoreflect.Message {
+	mi := &file_desktopviaclyde_v1_daemon_service_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActiveRun.ProtoReflect.Descriptor instead.
+func (*ActiveRun) Descriptor() ([]byte, []int) {
+	return file_desktopviaclyde_v1_daemon_service_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ActiveRun) GetOperation() string {
+	if x != nil {
+		return x.Operation
+	}
+	return ""
+}
+
+func (x *ActiveRun) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
 // UpdaterTargetStatus is the last upgrade-check outcome for one target.
 type UpdaterTargetStatus struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
@@ -749,7 +825,7 @@ type UpdaterTargetStatus struct {
 
 func (x *UpdaterTargetStatus) Reset() {
 	*x = UpdaterTargetStatus{}
-	mi := &file_desktopviaclyde_v1_daemon_service_proto_msgTypes[11]
+	mi := &file_desktopviaclyde_v1_daemon_service_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -761,7 +837,7 @@ func (x *UpdaterTargetStatus) String() string {
 func (*UpdaterTargetStatus) ProtoMessage() {}
 
 func (x *UpdaterTargetStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_desktopviaclyde_v1_daemon_service_proto_msgTypes[11]
+	mi := &file_desktopviaclyde_v1_daemon_service_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -774,7 +850,7 @@ func (x *UpdaterTargetStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdaterTargetStatus.ProtoReflect.Descriptor instead.
 func (*UpdaterTargetStatus) Descriptor() ([]byte, []int) {
-	return file_desktopviaclyde_v1_daemon_service_proto_rawDescGZIP(), []int{11}
+	return file_desktopviaclyde_v1_daemon_service_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *UpdaterTargetStatus) GetTarget() string {
@@ -880,14 +956,16 @@ const file_desktopviaclyde_v1_daemon_service_proto_rawDesc = "" +
 	"\x19RunKeychainMigrateRequest\x12\x16\n" +
 	"\x06target\x18\x01 \x01(\tR\x06target\x12\x16\n" +
 	"\x06format\x18\x02 \x01(\tR\x06format\x128\n" +
-	"\x05flags\x18\x03 \x01(\v2\".desktopviaclyde.v1.OperationFlagsR\x05flags\"\x18\n" +
-	"\x16SubscribeActiveRequest\"*\n" +
+	"\x05flags\x18\x03 \x01(\v2\".desktopviaclyde.v1.OperationFlagsR\x05flags\"N\n" +
+	"\x16SubscribeActiveRequest\x12\x1c\n" +
+	"\toperation\x18\x01 \x01(\tR\toperation\x12\x16\n" +
+	"\x06target\x18\x02 \x01(\tR\x06target\"*\n" +
 	"\x10GetStatusRequest\x12\x16\n" +
 	"\x06target\x18\x01 \x01(\tR\x06target\"4\n" +
 	"\x11GetStatusResponse\x12\x1f\n" +
 	"\vreport_json\x18\x01 \x01(\tR\n" +
 	"reportJson\"\x19\n" +
-	"\x17GetUpdaterStatusRequest\"\xbe\x02\n" +
+	"\x17GetUpdaterStatusRequest\"\xfe\x02\n" +
 	"\x18GetUpdaterStatusResponse\x12\x18\n" +
 	"\arunning\x18\x01 \x01(\bR\arunning\x12)\n" +
 	"\x10active_operation\x18\x02 \x01(\tR\x0factiveOperation\x12#\n" +
@@ -895,7 +973,12 @@ const file_desktopviaclyde_v1_daemon_service_proto_rawDesc = "" +
 	"\x0elast_tick_unix\x18\x04 \x01(\x03R\flastTickUnix\x12$\n" +
 	"\x0enext_tick_unix\x18\x05 \x01(\x03R\fnextTickUnix\x12)\n" +
 	"\x10interval_seconds\x18\x06 \x01(\x03R\x0fintervalSeconds\x12A\n" +
-	"\atargets\x18\a \x03(\v2'.desktopviaclyde.v1.UpdaterTargetStatusR\atargets\"\x9e\x02\n" +
+	"\atargets\x18\a \x03(\v2'.desktopviaclyde.v1.UpdaterTargetStatusR\atargets\x12>\n" +
+	"\vactive_runs\x18\b \x03(\v2\x1d.desktopviaclyde.v1.ActiveRunR\n" +
+	"activeRuns\"A\n" +
+	"\tActiveRun\x12\x1c\n" +
+	"\toperation\x18\x01 \x01(\tR\toperation\x12\x16\n" +
+	"\x06target\x18\x02 \x01(\tR\x06target\"\x9e\x02\n" +
 	"\x13UpdaterTargetStatus\x12\x16\n" +
 	"\x06target\x18\x01 \x01(\tR\x06target\x12'\n" +
 	"\x0fcurrent_version\x18\x02 \x01(\tR\x0ecurrentVersion\x12+\n" +
@@ -927,7 +1010,7 @@ func file_desktopviaclyde_v1_daemon_service_proto_rawDescGZIP() []byte {
 	return file_desktopviaclyde_v1_daemon_service_proto_rawDescData
 }
 
-var file_desktopviaclyde_v1_daemon_service_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_desktopviaclyde_v1_daemon_service_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_desktopviaclyde_v1_daemon_service_proto_goTypes = []any{
 	(*ProgressEvent)(nil),             // 0: desktopviaclyde.v1.ProgressEvent
 	(*OperationFlags)(nil),            // 1: desktopviaclyde.v1.OperationFlags
@@ -940,37 +1023,39 @@ var file_desktopviaclyde_v1_daemon_service_proto_goTypes = []any{
 	(*GetStatusResponse)(nil),         // 8: desktopviaclyde.v1.GetStatusResponse
 	(*GetUpdaterStatusRequest)(nil),   // 9: desktopviaclyde.v1.GetUpdaterStatusRequest
 	(*GetUpdaterStatusResponse)(nil),  // 10: desktopviaclyde.v1.GetUpdaterStatusResponse
-	(*UpdaterTargetStatus)(nil),       // 11: desktopviaclyde.v1.UpdaterTargetStatus
-	nil,                               // 12: desktopviaclyde.v1.OperationFlags.StringsEntry
-	nil,                               // 13: desktopviaclyde.v1.OperationFlags.BoolsEntry
+	(*ActiveRun)(nil),                 // 11: desktopviaclyde.v1.ActiveRun
+	(*UpdaterTargetStatus)(nil),       // 12: desktopviaclyde.v1.UpdaterTargetStatus
+	nil,                               // 13: desktopviaclyde.v1.OperationFlags.StringsEntry
+	nil,                               // 14: desktopviaclyde.v1.OperationFlags.BoolsEntry
 }
 var file_desktopviaclyde_v1_daemon_service_proto_depIdxs = []int32{
-	12, // 0: desktopviaclyde.v1.OperationFlags.strings:type_name -> desktopviaclyde.v1.OperationFlags.StringsEntry
-	13, // 1: desktopviaclyde.v1.OperationFlags.bools:type_name -> desktopviaclyde.v1.OperationFlags.BoolsEntry
+	13, // 0: desktopviaclyde.v1.OperationFlags.strings:type_name -> desktopviaclyde.v1.OperationFlags.StringsEntry
+	14, // 1: desktopviaclyde.v1.OperationFlags.bools:type_name -> desktopviaclyde.v1.OperationFlags.BoolsEntry
 	1,  // 2: desktopviaclyde.v1.RunUpgradeRequest.flags:type_name -> desktopviaclyde.v1.OperationFlags
 	1,  // 3: desktopviaclyde.v1.RunPatchRequest.flags:type_name -> desktopviaclyde.v1.OperationFlags
 	1,  // 4: desktopviaclyde.v1.RunHardResetRequest.flags:type_name -> desktopviaclyde.v1.OperationFlags
 	1,  // 5: desktopviaclyde.v1.RunKeychainMigrateRequest.flags:type_name -> desktopviaclyde.v1.OperationFlags
-	11, // 6: desktopviaclyde.v1.GetUpdaterStatusResponse.targets:type_name -> desktopviaclyde.v1.UpdaterTargetStatus
-	7,  // 7: desktopviaclyde.v1.DesktopService.GetStatus:input_type -> desktopviaclyde.v1.GetStatusRequest
-	2,  // 8: desktopviaclyde.v1.DesktopService.RunUpgrade:input_type -> desktopviaclyde.v1.RunUpgradeRequest
-	3,  // 9: desktopviaclyde.v1.DesktopService.RunPatch:input_type -> desktopviaclyde.v1.RunPatchRequest
-	4,  // 10: desktopviaclyde.v1.DesktopService.RunHardReset:input_type -> desktopviaclyde.v1.RunHardResetRequest
-	5,  // 11: desktopviaclyde.v1.DesktopService.RunKeychainMigrate:input_type -> desktopviaclyde.v1.RunKeychainMigrateRequest
-	6,  // 12: desktopviaclyde.v1.DesktopService.SubscribeActive:input_type -> desktopviaclyde.v1.SubscribeActiveRequest
-	9,  // 13: desktopviaclyde.v1.DesktopService.GetUpdaterStatus:input_type -> desktopviaclyde.v1.GetUpdaterStatusRequest
-	8,  // 14: desktopviaclyde.v1.DesktopService.GetStatus:output_type -> desktopviaclyde.v1.GetStatusResponse
-	0,  // 15: desktopviaclyde.v1.DesktopService.RunUpgrade:output_type -> desktopviaclyde.v1.ProgressEvent
-	0,  // 16: desktopviaclyde.v1.DesktopService.RunPatch:output_type -> desktopviaclyde.v1.ProgressEvent
-	0,  // 17: desktopviaclyde.v1.DesktopService.RunHardReset:output_type -> desktopviaclyde.v1.ProgressEvent
-	0,  // 18: desktopviaclyde.v1.DesktopService.RunKeychainMigrate:output_type -> desktopviaclyde.v1.ProgressEvent
-	0,  // 19: desktopviaclyde.v1.DesktopService.SubscribeActive:output_type -> desktopviaclyde.v1.ProgressEvent
-	10, // 20: desktopviaclyde.v1.DesktopService.GetUpdaterStatus:output_type -> desktopviaclyde.v1.GetUpdaterStatusResponse
-	14, // [14:21] is the sub-list for method output_type
-	7,  // [7:14] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	12, // 6: desktopviaclyde.v1.GetUpdaterStatusResponse.targets:type_name -> desktopviaclyde.v1.UpdaterTargetStatus
+	11, // 7: desktopviaclyde.v1.GetUpdaterStatusResponse.active_runs:type_name -> desktopviaclyde.v1.ActiveRun
+	7,  // 8: desktopviaclyde.v1.DesktopService.GetStatus:input_type -> desktopviaclyde.v1.GetStatusRequest
+	2,  // 9: desktopviaclyde.v1.DesktopService.RunUpgrade:input_type -> desktopviaclyde.v1.RunUpgradeRequest
+	3,  // 10: desktopviaclyde.v1.DesktopService.RunPatch:input_type -> desktopviaclyde.v1.RunPatchRequest
+	4,  // 11: desktopviaclyde.v1.DesktopService.RunHardReset:input_type -> desktopviaclyde.v1.RunHardResetRequest
+	5,  // 12: desktopviaclyde.v1.DesktopService.RunKeychainMigrate:input_type -> desktopviaclyde.v1.RunKeychainMigrateRequest
+	6,  // 13: desktopviaclyde.v1.DesktopService.SubscribeActive:input_type -> desktopviaclyde.v1.SubscribeActiveRequest
+	9,  // 14: desktopviaclyde.v1.DesktopService.GetUpdaterStatus:input_type -> desktopviaclyde.v1.GetUpdaterStatusRequest
+	8,  // 15: desktopviaclyde.v1.DesktopService.GetStatus:output_type -> desktopviaclyde.v1.GetStatusResponse
+	0,  // 16: desktopviaclyde.v1.DesktopService.RunUpgrade:output_type -> desktopviaclyde.v1.ProgressEvent
+	0,  // 17: desktopviaclyde.v1.DesktopService.RunPatch:output_type -> desktopviaclyde.v1.ProgressEvent
+	0,  // 18: desktopviaclyde.v1.DesktopService.RunHardReset:output_type -> desktopviaclyde.v1.ProgressEvent
+	0,  // 19: desktopviaclyde.v1.DesktopService.RunKeychainMigrate:output_type -> desktopviaclyde.v1.ProgressEvent
+	0,  // 20: desktopviaclyde.v1.DesktopService.SubscribeActive:output_type -> desktopviaclyde.v1.ProgressEvent
+	10, // 21: desktopviaclyde.v1.DesktopService.GetUpdaterStatus:output_type -> desktopviaclyde.v1.GetUpdaterStatusResponse
+	15, // [15:22] is the sub-list for method output_type
+	8,  // [8:15] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_desktopviaclyde_v1_daemon_service_proto_init() }
@@ -985,7 +1070,7 @@ func file_desktopviaclyde_v1_daemon_service_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_desktopviaclyde_v1_daemon_service_proto_rawDesc), len(file_desktopviaclyde_v1_daemon_service_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   14,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

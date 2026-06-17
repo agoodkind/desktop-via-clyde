@@ -4,9 +4,9 @@
 
 SWIFT_MK_MODULES := swift-build.mk
 SWIFT_BUILD_CMD ?= ./build.sh
-SWIFT_TEST_CMD ?= swift test
+SWIFT_TEST_CMD ?= ./test.sh
 SWIFT_RUN_CMD ?= swift run
-SWIFT_CLEAN_CMD ?= swift package clean
+SWIFT_CLEAN_CMD ?= ./clean.sh
 SWIFT_FORMAT_TARGETS ?= Package.swift Sources
 SWIFTLINT_TARGETS ?= Package.swift Sources
 SWIFTCHECK_EXTRA_TARGETS ?= Package.swift Sources

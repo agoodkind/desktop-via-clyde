@@ -2,9 +2,12 @@ package computeruseext
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
 
@@ -135,5 +138,87 @@ func TestBundledAuthPluginSourcePathUsesDeclaredSignTarget(t *testing.T) {
 	)
 	if got != want {
 		t.Fatalf("bundledAuthPluginSourcePath = %q, want %q", got, want)
+	}
+}
+
+func TestWriteExistingFileOpenErrorIncludesRewriteEvidence(t *testing.T) {
+	dirPath := t.TempDir()
+	err := writeExistingFile(dirPath, 0o755, []byte("data"))
+	if err == nil {
+		t.Fatal("writeExistingFile(dir) unexpectedly succeeded")
+	}
+
+	for _, fragment := range []string{
+		"attempted operation=atomic replace existing file",
+		"replace " + dirPath,
+		"path=" + dirPath,
+		"owner=",
+		"mode=",
+		"flags=",
+		"xattrs=",
+	} {
+		if !strings.Contains(err.Error(), fragment) {
+			t.Fatalf("error %q missing %q", err, fragment)
+		}
+	}
+}
+
+func TestWriteExistingFileReplacesContentsAndMode(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "helper")
+	if err := os.WriteFile(filePath, []byte("old"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := writeExistingFile(filePath, 0o755, []byte("new-data")); err != nil {
+		t.Fatalf("writeExistingFile: %v", err)
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "new-data" {
+		t.Fatalf("contents = %q, want new-data", string(data))
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("mode = %#o, want 0755", info.Mode().Perm())
+	}
+}
+
+func TestListPathXattrsReturnsSortedNames(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "helper")
+	if err := os.WriteFile(filePath, []byte("data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := unix.Setxattr(filePath, "com.goodkind.test.second", []byte("2"), 0); err != nil {
+		t.Skipf("Setxattr second: %v", err)
+	}
+	if err := unix.Setxattr(filePath, "com.goodkind.test.first", []byte("1"), 0); err != nil {
+		t.Skipf("Setxattr first: %v", err)
+	}
+
+	xattrs, err := ReadPathXattrs(filePath)
+	if err != nil {
+		t.Fatalf("ReadPathXattrs: %v", err)
+	}
+	firstIndex := -1
+	secondIndex := -1
+	for index, xattr := range xattrs {
+		if xattr == "com.goodkind.test.first" {
+			firstIndex = index
+		}
+		if xattr == "com.goodkind.test.second" {
+			secondIndex = index
+		}
+	}
+	if firstIndex < 0 || secondIndex < 0 {
+		t.Fatalf("xattrs = %v, want both custom xattrs present", xattrs)
+	}
+	if firstIndex > secondIndex {
+		t.Fatalf("xattrs = %v, want custom xattrs sorted", xattrs)
 	}
 }

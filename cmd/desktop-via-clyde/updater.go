@@ -6,6 +6,8 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/daemon"
 )
 
+var updaterStatusRunner = daemon.Status
+
 // newUpdaterCmd builds the `updater` command group that manages the background
 // daemon which owns the operation control plane and the upgrade tick loop.
 func newUpdaterCmd() *cobra.Command {
@@ -40,10 +42,14 @@ func newUpdaterInstallCmd() *cobra.Command {
 func newUpdaterStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Report whether the updater daemon is loaded and responding",
+		Short: "Report whether the updater daemon is loaded, responding, and active",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return daemon.Status(cmd.Context(), cmd.OutOrStdout())
+			format, err := readOutputFormat(cmd.Context(), cmd)
+			if err != nil {
+				return err
+			}
+			return updaterStatusRunner(cmd.Context(), cmd.OutOrStdout(), format)
 		},
 	}
 }

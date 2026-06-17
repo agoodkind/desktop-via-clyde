@@ -14,9 +14,9 @@ CMD        := ./cmd/$(BINARY)
 VPKG       := goodkind.io/desktop-via-clyde/internal/version
 GKLOG_VPKG := goodkind.io/gklog/version
 DIST_DIR   := bin
+BUNDLE_ID  := io.goodkind.desktop-via-clyde
+CODESIGN_IDENTITY ?= -
 
-INSTALL_DIR          := $(HOME)/.local/bin
-CODESIGN_IDENTITY    := -
 GO_BUILD_TAGS        := gklog_stamped
 GO_BUILD_EXTRA_FLAGS := -trimpath
 
@@ -35,6 +35,9 @@ override GO_MK_APPLIED_NOTICES := .make/.go-mk-applied-notices
 GO_MK_MODULES := go-build.mk
 GO_MK_DEV_DIR ?= $(HOME)/Sites/go-makefile
 
+# Machine-local signing and release overrides live in untracked config.mk.
+-include config.mk
+
 include bootstrap.mk
 
 .DEFAULT_GOAL := check
@@ -42,9 +45,9 @@ include bootstrap.mk
 REPO_ROOT            := $(CURDIR)
 SHIM_OUT             := $(REPO_ROOT)/internal/embed/shim
 
-.PHONY: shim generated-shims clean-generated proto
+.PHONY: dvc-help-extras go-generated-prereqs shim shim-build shim-test shim-fmt shim-clean clean-generated proto
 
-generated-shims: shim
+go-generated-prereqs: proto shim-build
 
 # Protobuf / gRPC codegen. Sources live under api/**/*.proto; config is
 # buf.yaml + buf.gen.yaml with local go-tool plugins, so only the buf binary is
@@ -54,16 +57,42 @@ proto: ## Regenerate protobuf/gRPC Go code from api/**/*.proto via buf
 	@command -v buf >/dev/null 2>&1 || go install github.com/bufbuild/buf/cmd/buf@v1.70.0
 	@buf generate
 
-build build-check: proto
+shim:
+	@$(MAKE) shim-build
+
+shim-build:
+	$(MAKE) -C $(REPO_ROOT)/shim build
+
+shim-test:
+	$(MAKE) -C $(REPO_ROOT)/shim test
+
+shim-fmt:
+	$(MAKE) -C $(REPO_ROOT)/shim fmt
+
+shim-clean:
+	$(MAKE) -C $(REPO_ROOT)/shim clean
 
 # Package loading, vet, test, and the shared analyzers need the embedded Swift
 # shim present because go:embed validates the file during load.
-build build-check check lint lint-golangci lint-files lint-diff staticcheck-extra vet test govulncheck: generated-shims
+build build-check check lint lint-golangci lint-files lint-diff staticcheck-extra vet test govulncheck install deploy: go-generated-prereqs
 
-shim:
-	$(MAKE) -C $(REPO_ROOT)/shim build
+ifneq ($(filter go-release.mk,$(GO_MK_MODULES)),)
+release: go-generated-prereqs
+endif
+
+help: dvc-help-extras
+
+dvc-help-extras:
+	@printf '%s\n' 'Root-only entry points:'
+	@printf '  %-40s %s\n' 'install' 'build and install the signed desktop-via-clyde binary'
+	@printf '  %-40s %s\n' 'deploy' 'alias for install'
+	@printf '\n'
+
+test: shim-test
+
+fmt: shim-fmt
 
 clean-generated:
 	rm -f $(SHIM_OUT)
 
-clean: clean-dist clean-generated
+clean: clean-dist shim-clean clean-generated

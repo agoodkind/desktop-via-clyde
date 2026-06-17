@@ -1,7 +1,9 @@
 .DS_Store
 .make/
+config.mk
 bin/
 internal/embed/shim
 internal/embed/dvc-stdio-tee-shim
 shim/.build/
+shim/.config/
 ~/

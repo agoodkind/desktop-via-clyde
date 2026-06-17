@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
+	"golang.org/x/sys/unix"
 	"goodkind.io/desktop-via-clyde/internal/extensions"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
@@ -811,16 +813,109 @@ func teamRequirementPlistTeamID(data []byte) (string, error) {
 }
 
 func writeExistingFile(path string, permissions os.FileMode, data []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, permissions)
+	dirPath := filepath.Dir(path)
+	computerUseLog.Debug(
+		"patch.write_existing_file.boundary",
+		"path", path,
+		"dir", dirPath,
+		"permissions", permissions,
+		"bytes", len(data),
+	)
+	pattern := filepath.Base(path) + ".rewrite-*"
+	file, err := os.CreateTemp(dirPath, pattern)
 	if err != nil {
-		return logComputerUsePatchErrorNoContext("patch.write_existing_file_open_failed", fmt.Errorf("open %s for rewrite: %w", path, err))
+		return logComputerUsePatchErrorNoContext(
+			"patch.write_existing_file_open_failed",
+			fmt.Errorf(
+				"stage rewrite for %s: %w; attempted operation=stage temporary file for atomic replace; evidence: %s",
+				path,
+				err,
+				rewritePathEvidence(path),
+			),
+		)
 	}
-	defer func() { _ = file.Close() }()
+	tempPath := file.Name()
+	defer func() {
+		_ = file.Close()
+		_ = os.Remove(tempPath)
+	}()
 
 	if _, err := file.Write(data); err != nil {
 		return logComputerUsePatchErrorNoContext("patch.write_existing_file_write_failed", fmt.Errorf("write %s: %w", path, err))
 	}
+	if err := file.Close(); err != nil {
+		return logComputerUsePatchErrorNoContext("patch.write_existing_file_close_failed", fmt.Errorf("close staged rewrite %s: %w", tempPath, err))
+	}
+	if err := os.Chmod(tempPath, permissions); err != nil {
+		return logComputerUsePatchErrorNoContext("patch.write_existing_file_chmod_failed", fmt.Errorf("chmod staged rewrite %s: %w", tempPath, err))
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return logComputerUsePatchErrorNoContext(
+			"patch.write_existing_file_rename_failed",
+			fmt.Errorf(
+				"replace %s with staged rewrite %s: %w; attempted operation=atomic replace existing file; evidence: %s",
+				path,
+				tempPath,
+				err,
+				rewritePathEvidence(path),
+			),
+		)
+	}
 	return nil
+}
+
+func rewritePathEvidence(path string) string {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Sprintf("path=%s inspect_error=%v", path, err)
+	}
+
+	mode := info.Mode().String()
+	owner := "unknown"
+	flags := statFlagsString(info)
+	if stat, ok := info.Sys().(*unix.Stat_t); ok {
+		owner = fmt.Sprintf("uid=%d gid=%d", stat.Uid, stat.Gid)
+	}
+
+	xattrs, xattrErr := ReadPathXattrs(path)
+	xattrSummary := "none"
+	if xattrErr != nil {
+		xattrSummary = "error=" + xattrErr.Error()
+	} else if len(xattrs) > 0 {
+		xattrSummary = strings.Join(xattrs, ",")
+	}
+
+	return fmt.Sprintf("path=%s owner=%s mode=%s flags=%s xattrs=%s", path, owner, mode, flags, xattrSummary)
+}
+
+// ReadPathXattrs returns the sorted extended attribute names for one path.
+func ReadPathXattrs(path string) ([]string, error) {
+	size, err := unix.Listxattr(path, nil)
+	if err != nil {
+		computerUseLog.Warn("patch.computer_use_list_xattrs_failed", "path", path, "err", err)
+		return nil, fmt.Errorf("list xattrs for %s: %w", path, err)
+	}
+	if size == 0 {
+		return nil, nil
+	}
+
+	buffer := make([]byte, size)
+	size, err = unix.Listxattr(path, buffer)
+	if err != nil {
+		computerUseLog.Warn("patch.computer_use_read_xattrs_failed", "path", path, "err", err)
+		return nil, fmt.Errorf("read xattrs for %s: %w", path, err)
+	}
+
+	names := strings.Split(string(buffer[:size]), "\x00")
+	xattrs := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		xattrs = append(xattrs, name)
+	}
+	sort.Strings(xattrs)
+	return xattrs, nil
 }
 
 func countStandaloneToken(data []byte, token string) int {

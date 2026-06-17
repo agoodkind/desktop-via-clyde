@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -67,12 +68,18 @@ func TestExecutorSecondRequestAttachesToInflightRun(t *testing.T) {
 		return nil
 	}
 
-	run1 := exec.startOrAttach(context.Background(), "upgrade", "demo", first)
+	run1, err := exec.startOrAttach(context.Background(), "upgrade", "demo", first)
+	if err != nil {
+		t.Fatalf("startOrAttach(first): %v", err)
+	}
 	<-started
-	run2 := exec.startOrAttach(context.Background(), "upgrade", "demo", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
+	run2, err := exec.startOrAttach(context.Background(), "upgrade", "demo", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
 		t.Error("second job must not run while one is in flight")
 		return nil
 	})
+	if err != nil {
+		t.Fatalf("startOrAttach(second): %v", err)
+	}
 	if run1 != run2 {
 		t.Fatal("second startOrAttach did not attach to the in-flight run")
 	}
@@ -86,19 +93,92 @@ func TestExecutorSecondRequestAttachesToInflightRun(t *testing.T) {
 
 func TestExecutorIdleAfterRunCompletes(t *testing.T) {
 	exec := newExecutor()
-	run := exec.startOrAttach(context.Background(), "patch", "demo", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
+	run, err := exec.startOrAttach(context.Background(), "patch", "demo", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
 		return nil
 	})
+	if err != nil {
+		t.Fatalf("startOrAttach: %v", err)
+	}
 	collectStream(t, run)
 	if exec.startOrAttachIsBusy() {
 		t.Fatal("executor still reports an in-flight run after completion")
 	}
 }
 
+func TestExecutorDistinctTargetsRunConcurrently(t *testing.T) {
+	exec := newExecutor()
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	release := make(chan struct{})
+
+	firstRun, err := exec.startOrAttach(context.Background(), "upgrade", "codex", func(_ context.Context, emit func(*desktopviaclydev1.ProgressEvent)) error {
+		close(firstStarted)
+		<-release
+		emit(&desktopviaclydev1.ProgressEvent{Type: "step_done", Target: "codex"})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("startOrAttach(first): %v", err)
+	}
+	<-firstStarted
+	secondRun, err := exec.startOrAttach(context.Background(), "upgrade", "codex-cli", func(_ context.Context, emit func(*desktopviaclydev1.ProgressEvent)) error {
+		close(secondStarted)
+		<-release
+		emit(&desktopviaclydev1.ProgressEvent{Type: "step_done", Target: "codex-cli"})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("startOrAttach(second): %v", err)
+	}
+	if firstRun == secondRun {
+		t.Fatal("distinct targets attached to the same run")
+	}
+	<-secondStarted
+	close(release)
+
+	firstTypes := collectStream(t, firstRun)
+	secondTypes := collectStream(t, secondRun)
+	if got := strings.Join(firstTypes, ","); got != "step_done" {
+		t.Fatalf("first stream = %q, want step_done", got)
+	}
+	if got := strings.Join(secondTypes, ","); got != "step_done" {
+		t.Fatalf("second stream = %q, want step_done", got)
+	}
+}
+
+func TestExecutorRejectsDifferentMutationForSameTarget(t *testing.T) {
+	exec := newExecutor()
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	_, err := exec.startOrAttach(context.Background(), "upgrade", "codex", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
+		close(started)
+		<-release
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("startOrAttach(first): %v", err)
+	}
+	<-started
+	_, err = exec.startOrAttach(context.Background(), "patch", "codex", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
+		t.Fatal("conflicting same-target job must not start")
+		return nil
+	})
+	var conflictErr *sameTargetConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("startOrAttach(conflict) err = %v, want sameTargetConflictError", err)
+	}
+	if conflictErr.ActiveOperation != "upgrade" || conflictErr.ActiveTarget != "codex" {
+		t.Fatalf("conflict active = %#v", conflictErr)
+	}
+	if conflictErr.RequestedOperation != "patch" || conflictErr.RequestedTarget != "codex" {
+		t.Fatalf("conflict requested = %#v", conflictErr)
+	}
+	close(release)
+}
+
 // startOrAttachIsBusy reports whether the executor currently holds a run. It is
 // a test-only probe over the unexported state.
 func (e *executor) startOrAttachIsBusy() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.current != nil
+	return len(e.activeRuns()) != 0
 }

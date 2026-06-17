@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	desktopviaclydev1 "goodkind.io/desktop-via-clyde/api/desktopviaclyde/v1"
@@ -20,38 +21,71 @@ type activeRun struct {
 	broadcaster *broadcaster
 }
 
-// executor serializes operations so at most one runs at a time. A request that
-// arrives while an operation is in flight attaches to that run's broadcaster
-// instead of starting a second, which is what makes a hand-run command and the
-// daemon's own upgrade tick indistinguishable and unable to overlap during a
-// bundle swap.
+type runKey struct {
+	operation string
+	target    string
+}
+
+type sameTargetConflictError struct {
+	ActiveOperation    string
+	ActiveTarget       string
+	RequestedOperation string
+	RequestedTarget    string
+}
+
+func (e *sameTargetConflictError) Error() string {
+	return fmt.Sprintf(
+		"same-target conflict: active operation=%s active target=%s requested operation=%s requested target=%s",
+		e.ActiveOperation,
+		e.ActiveTarget,
+		e.RequestedOperation,
+		e.RequestedTarget,
+	)
+}
+
+// executor tracks independent in-flight runs by operation and target. Exact
+// duplicates attach to the same broadcaster, while distinct targets can run at
+// the same time. A different mutating operation for the same target is blocked
+// because both would touch the same bundle or installed artifact.
 type executor struct {
-	mu      sync.Mutex
-	current *activeRun
+	mu   sync.Mutex
+	runs map[runKey]*activeRun
 }
 
 func newExecutor() *executor {
 	return &executor{
-		mu:      sync.Mutex{},
-		current: nil,
+		mu:   sync.Mutex{},
+		runs: map[runKey]*activeRun{},
 	}
 }
 
-// startOrAttach returns the in-flight run when one exists, otherwise it starts
-// job as the new current run. Either way the returned run's broadcaster streams
-// the run's events to any number of subscribers.
-func (e *executor) startOrAttach(ctx context.Context, operation string, target string, job operationJob) *activeRun {
+// startOrAttach returns the exact in-flight run when one exists, otherwise it
+// starts job as a new run. The returned run's broadcaster streams the run's
+// events to any number of subscribers. A different operation for the same
+// target is rejected with a same-target conflict.
+func (e *executor) startOrAttach(ctx context.Context, operation string, target string, job operationJob) (*activeRun, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.current != nil {
-		return e.current
+	key := runKey{operation: operation, target: target}
+	if run, ok := e.runs[key]; ok {
+		return run, nil
+	}
+	for _, run := range e.runs {
+		if run.target == target {
+			return nil, &sameTargetConflictError{
+				ActiveOperation:    run.operation,
+				ActiveTarget:       run.target,
+				RequestedOperation: operation,
+				RequestedTarget:    target,
+			}
+		}
 	}
 	run := &activeRun{
 		operation:   operation,
 		target:      target,
 		broadcaster: newBroadcaster(),
 	}
-	e.current = run
+	e.runs[key] = run
 	go func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -64,27 +98,40 @@ func (e *executor) startOrAttach(ctx context.Context, operation string, target s
 		}()
 		e.runJob(ctx, run, job)
 	}()
-	return run
+	return run, nil
 }
 
-// active returns the in-flight run, or nil when the executor is idle.
-func (e *executor) active() *activeRun {
+// activeMatching returns every in-flight run that matches the optional
+// operation and target filters, ordered stably by target and operation.
+func (e *executor) activeMatching(operation string, target string) []*activeRun {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.current
+	runs := make([]*activeRun, 0, len(e.runs))
+	for _, run := range e.runs {
+		if operation != "" && run.operation != operation {
+			continue
+		}
+		if target != "" && run.target != target {
+			continue
+		}
+		runs = append(runs, run)
+	}
+	sortActiveRuns(runs)
+	return runs
+}
+
+// activeRuns returns every in-flight run in stable order.
+func (e *executor) activeRuns() []*activeRun {
+	return e.activeMatching("", "")
 }
 
 func (e *executor) runJob(ctx context.Context, run *activeRun, job operationJob) {
 	defer func() {
-		// Clear the current run before finishing the broadcaster so a subscriber
-		// that returns the moment the run finishes never observes a stale
-		// in-flight run, and a fresh operation can start immediately. These
-		// deferred steps run during a panic unwind too, before the launching
-		// goroutine's recover, so cleanup always happens.
+		// Clear the finished run before closing its broadcaster so a subscriber
+		// that returns the moment the run finishes never observes stale executor
+		// state, and a fresh operation on the same target can start immediately.
 		e.mu.Lock()
-		if e.current == run {
-			e.current = nil
-		}
+		delete(e.runs, runKey{operation: run.operation, target: run.target})
 		e.mu.Unlock()
 		run.broadcaster.finish()
 	}()
@@ -95,4 +142,13 @@ func (e *executor) runJob(ctx context.Context, run *activeRun, job operationJob)
 	if err := job(jobCtx, run.broadcaster.emit); err != nil {
 		daemonLog.ErrorContext(jobCtx, "daemon.executor.job_failed", "err", err, "operation", run.operation, "target", run.target)
 	}
+}
+
+func sortActiveRuns(runs []*activeRun) {
+	sort.Slice(runs, func(i int, j int) bool {
+		if runs[i].target != runs[j].target {
+			return runs[i].target < runs[j].target
+		}
+		return runs[i].operation < runs[j].operation
+	})
 }
