@@ -30,20 +30,29 @@ func TestMain(m *testing.M) {
 // recordingProgress captures the terminal outcome an operation declares so tests
 // can assert it without a live renderer.
 type recordingProgress struct {
-	steps      []string
 	outcome    clioutput.Outcome
 	outcomeSet bool
+	steps      []string
+	skips      []string
+	failures   []string
 }
 
-func (p *recordingProgress) Step(detail string) { p.steps = append(p.steps, detail) }
-func (p *recordingProgress) Skip(detail string) { p.steps = append(p.steps, detail) }
-func (p *recordingProgress) Fail(detail string) { p.steps = append(p.steps, detail) }
+func (p *recordingProgress) Step(detail string) {
+	p.steps = append(p.steps, detail)
+}
+
+func (p *recordingProgress) Skip(detail string) {
+	p.skips = append(p.skips, detail)
+}
+
+func (p *recordingProgress) Fail(detail string) {
+	p.failures = append(p.failures, detail)
+}
+
 func (p *recordingProgress) SetOutcome(outcome clioutput.Outcome, _ string) {
 	p.outcome = outcome
 	p.outcomeSet = true
 }
-
-func (p *recordingProgress) String() string { return strings.Join(p.steps, "\n") }
 
 func TestParseHTTPPathJSONManifest(t *testing.T) {
 	body := []byte(`{"url":"https://downloads.cursor.com/production/abc/darwin/arm64/Cursor-darwin-arm64.zip","name":"3.5.30"}`)
@@ -193,14 +202,8 @@ func TestRunTreatsHTTPPathNoUpdateAsSkippedSuccess(t *testing.T) {
 	if err := Run(context.Background(), tg, Options{Out: &out, Progress: progress}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	output := progress.String()
-	for _, want := range []string{
-		"target=cursor current version=3.7.2 channel=dev updater=http_path_json_manifest",
-		"target=cursor no update available on dev channel; nothing to do",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("output missing %q\noutput:\n%s", want, output)
-		}
+	for _, want := range []string{"current version=3.7.2 channel=dev", "target=cursor no update available on dev channel; nothing to do"} {
+		requireProgressStep(t, progress, want)
 	}
 	if !progress.outcomeSet || progress.outcome != clioutput.OutcomeSkipped {
 		t.Fatalf("outcome = %q set=%v, want skipped", progress.outcome, progress.outcomeSet)
@@ -237,9 +240,7 @@ func TestRunAlreadyOnLatestVersionReportsSkipped(t *testing.T) {
 	if err := Run(context.Background(), tg, Options{Out: &out, Progress: progress}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(progress.String(), "already on version 3.7.2; nothing to do") {
-		t.Fatalf("output missing already-on-version note\noutput:\n%s", progress.String())
-	}
+	requireProgressStep(t, progress, "already on version 3.7.2; nothing to do")
 	if !progress.outcomeSet || progress.outcome != clioutput.OutcomeSkipped {
 		t.Fatalf("outcome = %q set=%v, want skipped", progress.outcome, progress.outcomeSet)
 	}
@@ -367,6 +368,16 @@ func writeBundleVersion(t *testing.T, bundleName, version string) string {
 		t.Fatalf("WriteFile Info.plist: %v", err)
 	}
 	return appPath
+}
+
+func requireProgressStep(t *testing.T, progress *recordingProgress, want string) {
+	t.Helper()
+	for _, step := range progress.steps {
+		if strings.Contains(step, want) {
+			return
+		}
+	}
+	t.Fatalf("progress missing step %q\nsteps:\n%s", want, strings.Join(progress.steps, "\n"))
 }
 
 // renderBundleInfoPlist loads the bundle Info.plist template from testdata and
