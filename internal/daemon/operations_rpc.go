@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"errors"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -33,9 +35,8 @@ func (s *server) RunKeychainMigrate(req *desktopviaclydev1.RunKeychainMigrateReq
 }
 
 // streamOperation validates the target, starts or attaches to the run, and
-// streams its events to the client. A request for an operation while another is
-// in flight attaches to that run, so the daemon's single-operation serialization
-// holds and a hand-run command renders the same events as the daemon's own tick.
+// streams its events to the client. Exact duplicate requests attach to the same
+// target run, while a conflicting mutation on the same target is rejected.
 func (s *server) streamOperation(
 	stream grpc.ServerStreamingServer[desktopviaclydev1.ProgressEvent],
 	capability string,
@@ -49,6 +50,13 @@ func (s *server) streamOperation(
 		return status.Errorf(codes.NotFound, "unknown target %q", target)
 	}
 	job := newOperationJob(capability, operation, target, format, flags)
-	run := s.exec.startOrAttach(ctx, operation, target, job)
+	run, err := s.exec.startOrAttach(ctx, operation, target, job)
+	if err != nil {
+		var conflictErr *sameTargetConflictError
+		if errors.As(err, &conflictErr) {
+			return status.Error(codes.FailedPrecondition, conflictErr.Error())
+		}
+		return status.Errorf(codes.Internal, "start %s for %s: %v", operation, target, err)
+	}
 	return run.broadcaster.stream(ctx, stream.Send)
 }

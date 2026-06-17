@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"goodkind.io/desktop-via-clyde/internal/bundleidentity"
@@ -18,6 +19,11 @@ import (
 )
 
 var statusReportLog = slog.With("component", "desktop-via-clyde", "subcomponent", "statusreport")
+
+var (
+	readBundleVersionFn     = readBundleVersion
+	runtimeBundleStatusesFn = runtimeBundleStatuses
+)
 
 type runtimeBundleState string
 
@@ -149,29 +155,35 @@ func buildTargetStatus(ctx context.Context, target targets.Target, multiState st
 
 	entry, patched := multiState.Targets[target.ID]
 	if !patched {
-		result.RuntimeBundles = runtimeBundleStatuses(ctx, target, false)
+		result.RuntimeBundles = runtimeBundleStatusesFn(ctx, target, false)
 		return result, nil
 	}
 
+	developmentSigned := developmentSigningOverlayActive(target)
 	result.State = "patched"
 	result.Version = entry.PatchedVersion
 	result.Notes = fmt.Sprintf("signed-as=%q", entry.SignIdentity)
+	if developmentSigned {
+		result.Notes += "; development-signing active"
+	}
 	result.UpstreamSigning = upstreamSigningLabel(entry.OriginalDesignatedRequirement)
-	result.RuntimeBundles = runtimeBundleStatuses(ctx, target, true)
+	result.RuntimeBundles = runtimeBundleStatusesFn(ctx, target, !developmentSigned)
 	if drift := firstRuntimeBundleDrift(result.RuntimeBundles); drift != "" {
 		result.State = "drifted"
 		result.Notes += "; " + drift
 	}
 
-	currentVersion := readBundleVersion(target)
-	if _, err := os.Stat(paths.RealBinaryPath(target)); err != nil {
-		if os.IsNotExist(err) {
-			result.State = "drifted"
-			result.Notes = result.Notes + "; " + target.ExecName + ".real missing"
-			return result, nil
+	currentVersion := readBundleVersionFn(target)
+	if !developmentSigned {
+		if _, err := os.Stat(paths.RealBinaryPath(target)); err != nil {
+			if os.IsNotExist(err) {
+				result.State = "drifted"
+				result.Notes = result.Notes + "; " + target.ExecName + ".real missing"
+				return result, nil
+			}
+			statusReportLog.ErrorContext(ctx, "statusreport.stat_real_binary_failed", "err", err, "target", target.ID, "path", paths.RealBinaryPath(target))
+			return TargetStatus{}, fmt.Errorf("stat restored binary path %s: %w", paths.RealBinaryPath(target), err)
 		}
-		statusReportLog.ErrorContext(ctx, "statusreport.stat_real_binary_failed", "err", err, "target", target.ID, "path", paths.RealBinaryPath(target))
-		return TargetStatus{}, fmt.Errorf("stat restored binary path %s: %w", paths.RealBinaryPath(target), err)
 	}
 	if currentVersion != "" && currentVersion != entry.PatchedVersion {
 		result.State = "drifted"
@@ -226,6 +238,15 @@ func runtimeBundleStatuses(ctx context.Context, target targets.Target, expectLoc
 		results = append(results, item)
 	}
 	return results
+}
+
+func developmentSigningOverlayActive(target targets.Target) bool {
+	if target.DevelopmentSigning == nil || !target.DevelopmentSigning.Enabled {
+		return false
+	}
+	profilePath := filepath.Join(target.AppPath, "Contents", "embedded.provisionprofile")
+	_, err := os.Stat(profilePath)
+	return err == nil
 }
 
 func firstRuntimeBundleDrift(bundles []RuntimeBundleStatus) string {

@@ -36,8 +36,9 @@ const (
 // logic; the CLI is a thin client that invokes these RPCs and renders the
 // streamed ProgressEvent values through the same live model used for local
 // runs. A Run* call either starts the operation or, when one is already in
-// flight, streams the active run's events, so a hand-run command and the
-// daemon's own upgrade tick are indistinguishable and can never overlap.
+// flight for the same target and operation, streams that run's events instead.
+// Distinct targets can run at the same time, while conflicting mutations for
+// the same target are rejected.
 type DesktopServiceClient interface {
 	GetStatus(ctx context.Context, in *GetStatusRequest, opts ...grpc.CallOption) (*GetStatusResponse, error)
 	RunUpgrade(ctx context.Context, in *RunUpgradeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ProgressEvent], error)
@@ -179,8 +180,9 @@ func (c *desktopServiceClient) GetUpdaterStatus(ctx context.Context, in *GetUpda
 // logic; the CLI is a thin client that invokes these RPCs and renders the
 // streamed ProgressEvent values through the same live model used for local
 // runs. A Run* call either starts the operation or, when one is already in
-// flight, streams the active run's events, so a hand-run command and the
-// daemon's own upgrade tick are indistinguishable and can never overlap.
+// flight for the same target and operation, streams that run's events instead.
+// Distinct targets can run at the same time, while conflicting mutations for
+// the same target are rejected.
 type DesktopServiceServer interface {
 	GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error)
 	RunUpgrade(*RunUpgradeRequest, grpc.ServerStreamingServer[ProgressEvent]) error

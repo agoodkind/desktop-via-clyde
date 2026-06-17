@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +13,11 @@ import (
 	"strconv"
 	"strings"
 
+	desktopviaclydev1 "goodkind.io/desktop-via-clyde/api/desktopviaclyde/v1"
+	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/paths"
+	"goodkind.io/desktop-via-clyde/internal/response"
+	"goodkind.io/gklog/correlation"
 )
 
 //go:embed templates/updater.plist.tmpl
@@ -20,6 +25,12 @@ var updaterPlistTemplate string
 
 // launchdLabel is the per-user LaunchAgent label for the updater daemon.
 const launchdLabel = "io.goodkind.desktop-via-clyde.updater"
+
+var (
+	runLaunchctlStatus    = runLaunchctl
+	daemonReachableStatus = daemonReachable
+	fetchUpdaterStatusFn  = fetchUpdaterStatus
+)
 
 func launchAgentsDir() string {
 	return filepath.Join(paths.Home(), "Library", "LaunchAgents")
@@ -74,20 +85,54 @@ func Install(ctx context.Context, out io.Writer) error {
 	return nil
 }
 
-// Status reports whether the LaunchAgent is loaded and whether the daemon's RPC
-// socket is responding.
-func Status(ctx context.Context, out io.Writer) error {
-	if _, err := runLaunchctl(ctx, "print", launchdTarget()); err != nil {
-		_, _ = fmt.Fprintf(out, "launch agent: not loaded target=%s\n", launchdTarget())
-	} else {
-		_, _ = fmt.Fprintf(out, "launch agent: loaded target=%s\n", launchdTarget())
+type launchAgentStatus struct {
+	Loaded bool   `json:"loaded"`
+	Target string `json:"target"`
+}
+
+type daemonRPCStatus struct {
+	Responding bool   `json:"responding"`
+	Socket     string `json:"socket"`
+}
+
+type statusSnapshot struct {
+	LaunchAgent launchAgentStatus                           `json:"launch_agent"`
+	DaemonRPC   daemonRPCStatus                             `json:"daemon_rpc"`
+	Updater     *desktopviaclydev1.GetUpdaterStatusResponse `json:"updater,omitempty"`
+}
+
+// Status reports whether the LaunchAgent is loaded, whether the daemon's RPC
+// socket is responding, and the daemon's current active runs.
+func Status(ctx context.Context, out io.Writer, format clioutput.Format) error {
+	loaded := true
+	if _, err := runLaunchctlStatus(ctx, "print", launchdTarget()); err != nil {
+		loaded = false
 	}
-	if daemonReachable(ctx) {
-		_, _ = fmt.Fprintf(out, "daemon rpc: responding socket=%s\n", paths.DaemonSocketPath())
-	} else {
-		_, _ = fmt.Fprintf(out, "daemon rpc: unavailable socket=%s\n", paths.DaemonSocketPath())
+
+	snapshot := statusSnapshot{
+		LaunchAgent: launchAgentStatus{
+			Loaded: loaded,
+			Target: launchdTarget(),
+		},
+		DaemonRPC: daemonRPCStatus{
+			Responding: daemonReachableStatus(ctx),
+			Socket:     paths.DaemonSocketPath(),
+		},
+		Updater: nil,
 	}
-	return nil
+
+	if snapshot.DaemonRPC.Responding {
+		updaterStatus, err := fetchUpdaterStatusFn(ctx)
+		if err != nil {
+			return err
+		}
+		snapshot.Updater = updaterStatus
+	}
+
+	if format == clioutput.FormatJSON {
+		return writeStatusJSON(ctx, out, snapshot)
+	}
+	return writeStatusText(out, snapshot)
 }
 
 // Uninstall boots out the LaunchAgent and removes its plist.
@@ -98,6 +143,77 @@ func Uninstall(ctx context.Context, out io.Writer) error {
 		return fmt.Errorf("remove launch agent %s: %w", plistPath(), err)
 	}
 	_, _ = fmt.Fprintf(out, "removed launch agent %s\n", plistPath())
+	return nil
+}
+
+func fetchUpdaterStatus(ctx context.Context) (*desktopviaclydev1.GetUpdaterStatusResponse, error) {
+	conn, client, err := dial()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+
+	resp, err := client.GetUpdaterStatus(correlation.NewOutgoingContext(ctx), &desktopviaclydev1.GetUpdaterStatusRequest{})
+	if err != nil {
+		daemonLog.WarnContext(ctx, "daemon.status.fetch_updater_status_failed", "err", err)
+		return nil, fmt.Errorf("get updater status: %w", err)
+	}
+	return resp, nil
+}
+
+func writeStatusJSON(ctx context.Context, out io.Writer, snapshot statusSnapshot) error {
+	body, err := json.Marshal(snapshot)
+	if err != nil {
+		daemonLog.WarnContext(ctx, "daemon.status.marshal_failed", "err", err)
+		return fmt.Errorf("marshal updater status: %w", err)
+	}
+	if err := response.WriteJSON(ctx, out, body, response.JSONIndented); err != nil {
+		daemonLog.WarnContext(ctx, "daemon.status.write_json_failed", "err", err)
+		return fmt.Errorf("write updater status json: %w", err)
+	}
+	return nil
+}
+
+func writeStatusText(out io.Writer, snapshot statusSnapshot) error {
+	if snapshot.LaunchAgent.Loaded {
+		if err := writeStatusLine(out, fmt.Sprintf("launch agent: loaded target=%s\n", snapshot.LaunchAgent.Target)); err != nil {
+			return err
+		}
+	} else {
+		if err := writeStatusLine(out, fmt.Sprintf("launch agent: not loaded target=%s\n", snapshot.LaunchAgent.Target)); err != nil {
+			return err
+		}
+	}
+
+	if snapshot.DaemonRPC.Responding {
+		if err := writeStatusLine(out, fmt.Sprintf("daemon rpc: responding socket=%s\n", snapshot.DaemonRPC.Socket)); err != nil {
+			return err
+		}
+	} else {
+		if err := writeStatusLine(out, fmt.Sprintf("daemon rpc: unavailable socket=%s\n", snapshot.DaemonRPC.Socket)); err != nil {
+			return err
+		}
+	}
+
+	if snapshot.Updater == nil {
+		return nil
+	}
+	if len(snapshot.Updater.GetActiveRuns()) == 0 {
+		return writeStatusLine(out, "active runs: none\n")
+	}
+	for _, run := range snapshot.Updater.GetActiveRuns() {
+		if err := writeStatusLine(out, fmt.Sprintf("active run: target=%s operation=%s\n", run.GetTarget(), run.GetOperation())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeStatusLine(out io.Writer, value string) error {
+	if _, err := io.WriteString(out, value); err != nil {
+		daemonLog.Warn("daemon.status.write_text_failed", "err", err)
+		return fmt.Errorf("write status text: %w", err)
+	}
 	return nil
 }
 

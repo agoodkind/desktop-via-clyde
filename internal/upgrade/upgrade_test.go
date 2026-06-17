@@ -30,17 +30,20 @@ func TestMain(m *testing.M) {
 // recordingProgress captures the terminal outcome an operation declares so tests
 // can assert it without a live renderer.
 type recordingProgress struct {
+	steps      []string
 	outcome    clioutput.Outcome
 	outcomeSet bool
 }
 
-func (p *recordingProgress) Step(string) {}
-func (p *recordingProgress) Skip(string) {}
-func (p *recordingProgress) Fail(string) {}
+func (p *recordingProgress) Step(detail string) { p.steps = append(p.steps, detail) }
+func (p *recordingProgress) Skip(detail string) { p.steps = append(p.steps, detail) }
+func (p *recordingProgress) Fail(detail string) { p.steps = append(p.steps, detail) }
 func (p *recordingProgress) SetOutcome(outcome clioutput.Outcome, _ string) {
 	p.outcome = outcome
 	p.outcomeSet = true
 }
+
+func (p *recordingProgress) String() string { return strings.Join(p.steps, "\n") }
 
 func TestParseHTTPPathJSONManifest(t *testing.T) {
 	body := []byte(`{"url":"https://downloads.cursor.com/production/abc/darwin/arm64/Cursor-darwin-arm64.zip","name":"3.5.30"}`)
@@ -190,8 +193,11 @@ func TestRunTreatsHTTPPathNoUpdateAsSkippedSuccess(t *testing.T) {
 	if err := Run(context.Background(), tg, Options{Out: &out, Progress: progress}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	output := out.String()
-	for _, want := range []string{"current version=3.7.2 channel=dev", "target=cursor no update available on dev channel; nothing to do"} {
+	output := progress.String()
+	for _, want := range []string{
+		"target=cursor current version=3.7.2 channel=dev updater=http_path_json_manifest",
+		"target=cursor no update available on dev channel; nothing to do",
+	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q\noutput:\n%s", want, output)
 		}
@@ -231,8 +237,8 @@ func TestRunAlreadyOnLatestVersionReportsSkipped(t *testing.T) {
 	if err := Run(context.Background(), tg, Options{Out: &out, Progress: progress}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(out.String(), "already on version 3.7.2; nothing to do") {
-		t.Fatalf("output missing already-on-version note\noutput:\n%s", out.String())
+	if !strings.Contains(progress.String(), "already on version 3.7.2; nothing to do") {
+		t.Fatalf("output missing already-on-version note\noutput:\n%s", progress.String())
 	}
 	if !progress.outcomeSet || progress.outcome != clioutput.OutcomeSkipped {
 		t.Fatalf("outcome = %q set=%v, want skipped", progress.outcome, progress.outcomeSet)

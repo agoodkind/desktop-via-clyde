@@ -128,6 +128,9 @@ func openOperationStream(
 		return nil, fmt.Errorf("capability %q has no daemon streaming operation", req.Capability)
 	}
 	if err != nil {
+		if streamStatus, ok := status.FromError(err); ok && streamStatus.Code() == codes.FailedPrecondition {
+			return nil, errors.New(streamStatus.Message())
+		}
 		daemonLog.ErrorContext(ctx, "daemon.client.open_stream_failed", "err", err, "capability", req.Capability)
 		return nil, fmt.Errorf("open %s stream: %w", req.Capability, err)
 	}

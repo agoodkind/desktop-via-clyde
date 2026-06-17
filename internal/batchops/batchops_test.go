@@ -203,8 +203,9 @@ func TestRunWithOperationRunnerPrefixesOutputAndPrintsSummary(t *testing.T) {
 	output := out.String()
 	for _, want := range []string{
 		"Patch cursor",
-		"cursor hello ok",
-		"cursor world ok",
+		"cursor queued",
+		"cursor started",
+		"cursor completed status=ok",
 		"Result completed=1 failed=0",
 	} {
 		if !strings.Contains(output, want) {
@@ -232,11 +233,11 @@ func TestRunWithOperationRunnerJSONSummary(t *testing.T) {
 		t.Fatalf("RunWithOperationRunner(patch json): %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 7 {
-		t.Fatalf("json output line count = %d, want 7\noutput:\n%s", len(lines), out.String())
+	if len(lines) != 5 {
+		t.Fatalf("json output line count = %d, want 5\noutput:\n%s", len(lines), out.String())
 	}
 	var summary map[string]any
-	if err := json.Unmarshal([]byte(lines[6]), &summary); err != nil {
+	if err := json.Unmarshal([]byte(lines[4]), &summary); err != nil {
 		t.Fatalf("unmarshal summary: %v\nline:\n%s", err, lines[3])
 	}
 	if summary["type"] != "run_done" {
@@ -292,8 +293,8 @@ func TestRunWithOperationRunnerRoutesRawOutputToTargetLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(%s): %v", targetStarted.LogFile, err)
 	}
-	if string(body) != "raw child output\n" {
-		t.Fatalf("target log = %q, want raw child output", string(body))
+	if string(body) != "[dry-run] friendly status\nraw child output\n" {
+		t.Fatalf("target log = %q, want friendly status plus raw child output", string(body))
 	}
 }
 

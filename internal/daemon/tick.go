@@ -201,15 +201,19 @@ func (t *ticker) sweepCLIs(ctx context.Context) {
 }
 
 // runUpgradeThroughExecutor runs an upgrade for one target through the shared
-// executor and waits for it to finish, so a concurrent CLI request attaches to
-// the same run rather than starting a second.
+// executor and waits for it to finish, so a duplicate upgrade request for the
+// same target attaches instead of starting a second run.
 func (t *ticker) runUpgradeThroughExecutor(ctx context.Context, targetID string) {
 	flags := &desktopviaclydev1.OperationFlags{
 		Strings: map[string]string{},
 		Bools:   map[string]bool{},
 	}
 	job := newOperationJob(upgrade.AppUpgradeCapability, "upgrade", targetID, "", flags)
-	run := t.exec.startOrAttach(ctx, "upgrade", targetID, job)
+	run, err := t.exec.startOrAttach(ctx, "upgrade", targetID, job)
+	if err != nil {
+		daemonLog.WarnContext(ctx, "daemon.tick.run_upgrade_conflict", "err", err, "target", targetID)
+		return
+	}
 	_ = run.broadcaster.stream(ctx, func(*desktopviaclydev1.ProgressEvent) error { return nil })
 }
 
@@ -218,7 +222,11 @@ func (t *ticker) runUpgradeThroughExecutor(ctx context.Context, targetID string)
 // `upgrade <cli>` runs today including the fast compile build mode.
 func (t *ticker) runCLIUpgradeThroughExecutor(ctx context.Context, program targets.CLIProgram, op spec.OperationSpec) {
 	job := newCLIUpgradeJob(program, op.Capability, cmdflags.Defaults(op.Flags))
-	run := t.exec.startOrAttach(ctx, "upgrade", program.ID, job)
+	run, err := t.exec.startOrAttach(ctx, "upgrade", program.ID, job)
+	if err != nil {
+		daemonLog.WarnContext(ctx, "daemon.tick.run_cli_upgrade_conflict", "err", err, "target", program.ID)
+		return
+	}
 	_ = run.broadcaster.stream(ctx, func(*desktopviaclydev1.ProgressEvent) error { return nil })
 }
 
