@@ -620,8 +620,13 @@ func deleteUserTCCRows(ctx context.Context, opts Options, bundleIDs []string) er
 			}
 			return nil
 		}
-		hardResetLog.ErrorContext(ctx, "hardreset.user_tcc_stat_failed", "db", databasePath, "err", err)
-		return fmt.Errorf("stat user TCC db %s: %w", databasePath, err)
+		hardResetLog.WarnContext(ctx, "hardreset.user_tcc_stat_nonfatal", "db", databasePath, "err", err)
+		_, writeErr := fmt.Fprintf(opts.Out, "user_tcc_rows_deleted db=%s deleted=unknown reason=stat_error\n", databasePath)
+		if writeErr != nil {
+			hardResetLog.ErrorContext(ctx, "hardreset.write_user_tcc_stat_error_failed", "err", writeErr)
+			return fmt.Errorf("write user TCC stat error status: %w", writeErr)
+		}
+		return nil
 	}
 
 	sql := "DELETE FROM access WHERE client IN (" + sqlStringList(bundleIDs) + ");\nSELECT changes();\n"
@@ -629,8 +634,13 @@ func deleteUserTCCRows(ctx context.Context, opts Options, bundleIDs []string) er
 	writeCommandLog(opts, "$ /usr/bin/sqlite3 -cmd .timeout 10000 "+databasePath)
 	writeCommandLog(opts, strings.TrimSpace(string(output)))
 	if err != nil {
-		hardResetLog.ErrorContext(ctx, "hardreset.user_tcc_delete_failed", "db", databasePath, "err", err, "output", strings.TrimSpace(string(output)))
-		return fmt.Errorf("delete user TCC rows: %w", err)
+		hardResetLog.WarnContext(ctx, "hardreset.user_tcc_delete_nonfatal", "db", databasePath, "err", err, "output", strings.TrimSpace(string(output)))
+		_, writeErr := fmt.Fprintf(opts.Out, "user_tcc_rows_deleted db=%s deleted=error\n", databasePath)
+		if writeErr != nil {
+			hardResetLog.ErrorContext(ctx, "hardreset.write_user_tcc_delete_error_failed", "err", writeErr)
+			return fmt.Errorf("write user TCC delete error status: %w", writeErr)
+		}
+		return nil
 	}
 	deleted := strings.TrimSpace(string(output))
 	if deleted == "" {
@@ -729,7 +739,13 @@ func verifyNoTCCRows(ctx context.Context, opts Options, bundleIDs []string) erro
 		}
 		count, err := countTCCRows(ctx, opts, check.path, bundleIDs)
 		if err != nil {
-			return fmt.Errorf("count %s TCC rows: %w", check.label, err)
+			hardResetLog.WarnContext(ctx, "hardreset.tcc_count_nonfatal", "db", check.label, "err", err)
+			_, writeErr := fmt.Fprintf(opts.Out, "tcc_rows_remaining db=%s count=unknown reason=count_error\n", check.label)
+			if writeErr != nil {
+				hardResetLog.ErrorContext(ctx, "hardreset.write_tcc_count_error_failed", "err", writeErr, "db", check.label)
+				return fmt.Errorf("write TCC count error status: %w", writeErr)
+			}
+			continue
 		}
 		_, writeErr := fmt.Fprintf(opts.Out, "tcc_rows_remaining db=%s count=%d\n", check.label, count)
 		if writeErr != nil {

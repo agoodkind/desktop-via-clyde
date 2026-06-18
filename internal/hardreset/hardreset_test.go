@@ -326,6 +326,66 @@ func TestDeleteSystemTCCRowsBestEffortOnPrivilegedFailure(t *testing.T) {
 	}
 }
 
+func TestDeleteUserTCCRowsBestEffortOnPrivacyFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	userDB := filepath.Join(home, "Library", "Application Support", "com.apple.TCC", "TCC.db")
+	if err := os.MkdirAll(filepath.Dir(userDB), 0o755); err != nil {
+		t.Fatalf("mkdir user db parent: %v", err)
+	}
+	if err := os.WriteFile(userDB, []byte("db"), 0o644); err != nil {
+		t.Fatalf("write user db: %v", err)
+	}
+	calls := stubRunCommand(t, func(_ string, _ []string, _ string) ([]byte, error) {
+		return []byte("authorization denied"), errors.New("exit status 1")
+	})
+
+	var out bytes.Buffer
+	if err := deleteUserTCCRows(context.Background(), Options{Out: &out}, []string{"com.openai.codex"}); err != nil {
+		t.Fatalf("deleteUserTCCRows must be best-effort, got err: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("want 1 attempted command, got %d", len(*calls))
+	}
+	if !strings.Contains(out.String(), "user_tcc_rows_deleted db="+userDB+" deleted=error") {
+		t.Fatalf("output missing best-effort error status: %s", out.String())
+	}
+}
+
+func TestVerifyNoTCCRowsReportsUnknownOnCountFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	userDB := filepath.Join(home, "Library", "Application Support", "com.apple.TCC", "TCC.db")
+	if err := os.MkdirAll(filepath.Dir(userDB), 0o755); err != nil {
+		t.Fatalf("mkdir user db parent: %v", err)
+	}
+	if err := os.WriteFile(userDB, []byte("db"), 0o644); err != nil {
+		t.Fatalf("write user db: %v", err)
+	}
+	systemDB := filepath.Join(t.TempDir(), "system-TCC.db")
+	if err := os.WriteFile(systemDB, []byte("db"), 0o644); err != nil {
+		t.Fatalf("write system db: %v", err)
+	}
+	setSystemTCCDatabasePath(t, systemDB)
+	stubRunCommand(t, func(_ string, _ []string, _ string) ([]byte, error) {
+		return []byte("authorization denied"), errors.New("exit status 1")
+	})
+
+	var out bytes.Buffer
+	if err := verifyNoTCCRows(context.Background(), Options{Out: &out}, []string{"com.openai.codex"}); err != nil {
+		t.Fatalf("verifyNoTCCRows must report unknown counts, got err: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"tcc_rows_remaining db=user count=unknown reason=count_error",
+		"tcc_rows_remaining db=system count=unknown reason=count_error",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output missing %q\n%s", want, text)
+		}
+	}
+}
+
 func TestRunDeletesUserAndSystemTCCRowsAndVerifiesClean(t *testing.T) {
 	home := t.TempDir()
 	stateHome := t.TempDir()
