@@ -48,6 +48,10 @@ endif
 REPO_ROOT            := $(CURDIR)
 SHIM_OUT             := $(REPO_ROOT)/internal/embed/shim
 INJECTOR_OUT         := $(REPO_ROOT)/internal/embed/clyde-inject.dylib
+INSTALL_GUARD        := $(REPO_ROOT)/scripts/install-updater-guard.sh
+
+GO_MK_INSTALL_PRE_CMD = "$(INSTALL_GUARD)" pre "$(INSTALL_BIN)"
+GO_MK_INSTALL_POST_CMD = "$(INSTALL_GUARD)" post "$(INSTALL_BIN)"
 
 .PHONY: dvc-help-extras go-generated-prereqs shim shim-build shim-test shim-fmt shim-clean injector injector-build injector-test injector-clean clean-generated proto
 
