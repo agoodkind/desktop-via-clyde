@@ -170,16 +170,23 @@ func processMatchesTarget(command string, target targets.Target) bool {
 	if command == "" {
 		return false
 	}
-	if strings.Contains(command, filepath.Clean(target.AppPath)+string(filepath.Separator)) {
+	appPath := strings.TrimSpace(target.AppPath)
+	if appPath != "" && matchesCommandPrefix(command, filepath.Clean(appPath)) {
 		return true
 	}
-	if strings.Contains(command, filepath.Clean(target.AppPath)+" ") {
+	if matchesCommandPrefix(command, target.ExecName) {
 		return true
 	}
-	if filepath.Base(command) == target.ExecName {
-		return true
+	return false
+}
+
+func matchesCommandPrefix(command string, prefix string) bool {
+	if prefix == "" {
+		return false
 	}
-	return command == target.ExecName
+	return command == prefix ||
+		strings.HasPrefix(command, prefix+string(filepath.Separator)) ||
+		strings.HasPrefix(command, prefix+" ")
 }
 
 func formatProcesses(processes []Process) string {

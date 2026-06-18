@@ -27,6 +27,27 @@ func TestProcessesMatchesBundlePathAndExecName(t *testing.T) {
 	}
 }
 
+func TestProcessesIgnoresCommandsThatOnlyMentionBundlePath(t *testing.T) {
+	target := targets.Target{
+		ID:       "codex",
+		AppPath:  "/Applications/Codex.app",
+		ExecName: "Codex (Beta)",
+	}
+	output := []byte(`
+  101 /Users/agoodkind/.codex/computer-use/SkyComputerUseClient --note=/Applications/Codex.app/Contents/MacOS/Codex
+  102 /bin/zsh -lc test -e /Applications/Codex.app/Contents/MacOS/Codex
+  103 /Applications/Codex.app/Contents/MacOS/Codex (Beta)
+`)
+
+	processes := parseProcesses(output, target)
+	if len(processes) != 1 {
+		t.Fatalf("process count = %d, want 1: %#v", len(processes), processes)
+	}
+	if processes[0].PID != 103 {
+		t.Fatalf("matched PID = %d, want 103", processes[0].PID)
+	}
+}
+
 func TestEnsureClosedRequestsQuitAndWaits(t *testing.T) {
 	target := targets.Target{
 		ID:       "codex",
