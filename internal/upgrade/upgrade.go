@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"goodkind.io/desktop-via-clyde/internal/appguard"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/clock"
@@ -61,6 +62,8 @@ type Options struct {
 	LogOut io.Writer
 	// Progress receives typed milestone events.
 	Progress clioutput.Progress
+	// CloseBeforeMutate closes a running app before foreground bundle mutation.
+	CloseBeforeMutate bool
 }
 
 // Operation runs the app upgrade operation for one configured target.
@@ -69,12 +72,13 @@ func Operation(ctx context.Context, req operations.Request) error {
 		return fmt.Errorf("%s requires an app target", req.Capability)
 	}
 	if err := Run(ctx, *req.App, Options{
-		Channel:         req.Flags.String("channel"),
-		DryRun:          req.Flags.Bool("dry-run"),
-		MigrateKeychain: req.Flags.Bool("migrate-keychain"),
-		Out:             req.Out,
-		LogOut:          req.LogOut,
-		Progress:        req.Progress,
+		Channel:           req.Flags.String("channel"),
+		DryRun:            req.Flags.Bool("dry-run"),
+		MigrateKeychain:   req.Flags.Bool("migrate-keychain"),
+		Out:               req.Out,
+		LogOut:            req.LogOut,
+		Progress:          req.Progress,
+		CloseBeforeMutate: !req.Flags.Bool("background"),
 	}); err != nil {
 		upgradeLog.ErrorContext(ctx, "upgrade.operation_failed", "err", err)
 		return fmt.Errorf("upgrade operation: %w",
@@ -196,6 +200,15 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	if err != nil {
 		return err
 	}
+	if opts.CloseBeforeMutate {
+		if err := appguard.EnsureClosed(ctx, t, appguard.Options{
+			DryRun:  opts.DryRun,
+			Out:     opts.Out,
+			Timeout: 0,
+		}); err != nil {
+			return logUpgradeError(ctx, "upgrade.close_app_failed", fmt.Errorf("close app before bundle swap: %w", err))
+		}
+	}
 	if err := swapBundle(ctx, r, t, extractedApp, opts.DryRun); err != nil {
 		return err
 	}
@@ -245,12 +258,13 @@ func CheckAvailable(ctx context.Context, t targets.Target, channelOverride strin
 
 func patchBundleAfterUpgrade(ctx context.Context, r *patch.Runner, t targets.Target, opts Options) error {
 	patchOpts := patch.Options{
-		DryRun:          opts.DryRun,
-		MigrateKeychain: opts.MigrateKeychain,
-		Out:             opts.Out,
-		LogOut:          r.RawOut,
-		Progress:        opts.Progress,
-		Trace:           nil,
+		DryRun:            opts.DryRun,
+		MigrateKeychain:   opts.MigrateKeychain,
+		Out:               opts.Out,
+		LogOut:            r.RawOut,
+		Progress:          opts.Progress,
+		Trace:             nil,
+		CloseBeforeMutate: opts.CloseBeforeMutate,
 	}
 	if err := patch.Patch(ctx, t, patchOpts); err != nil {
 		return logUpgradeError(ctx, "upgrade.repatch_failed", fmt.Errorf("re-patch after swap: %w", err))
@@ -524,12 +538,13 @@ func handleCurrentVersion(
 	if !patched {
 		notef(r, fmt.Sprintf("target=%s already on version %s; patching clean bundle", t.ID, currentVersion))
 		if err := patch.Patch(ctx, t, patch.Options{
-			DryRun:          opts.DryRun,
-			MigrateKeychain: opts.MigrateKeychain,
-			Out:             opts.Out,
-			LogOut:          r.RawOut,
-			Progress:        opts.Progress,
-			Trace:           nil,
+			DryRun:            opts.DryRun,
+			MigrateKeychain:   opts.MigrateKeychain,
+			Out:               opts.Out,
+			LogOut:            r.RawOut,
+			Progress:          opts.Progress,
+			Trace:             nil,
+			CloseBeforeMutate: opts.CloseBeforeMutate,
 		}); err != nil {
 			return logUpgradeError(ctx, "upgrade.current_version_patch_failed", fmt.Errorf("patch clean bundle after version check: %w", err))
 		}

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"goodkind.io/desktop-via-clyde/internal/devsign"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
@@ -127,5 +128,77 @@ func TestBuildTargetStatusShimmedBundleStillRequiresRealBinary(t *testing.T) {
 	}
 	if !strings.Contains(status.Notes, "Cursor.real missing") {
 		t.Fatalf("notes = %q, want .real drift", status.Notes)
+	}
+}
+
+func TestDevelopmentSigningInjectorDriftDetectsAppLocalInjector(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	appPath := filepath.Join(t.TempDir(), "Codex.app")
+	target := targets.Target{
+		ID:       "codex",
+		AppPath:  appPath,
+		ExecName: "Codex (Beta)",
+		DevelopmentSigning: &targets.DevelopmentSigningPolicy{
+			Enabled:        true,
+			ProxyInjection: true,
+		},
+	}
+	if err := os.MkdirAll(filepath.Dir(devsign.AppLocalInjectorPath(target)), 0o755); err != nil {
+		t.Fatalf("MkdirAll app local injector dir: %v", err)
+	}
+	if err := os.WriteFile(devsign.AppLocalInjectorPath(target), []byte("old"), 0o755); err != nil {
+		t.Fatalf("WriteFile app local injector: %v", err)
+	}
+
+	drift := developmentSigningInjectorDrift(target)
+	if !strings.Contains(drift, "stale app-local injector") {
+		t.Fatalf("drift = %q, want stale app-local injector", drift)
+	}
+}
+
+func TestDevelopmentSigningInjectorDriftAcceptsExternalInjector(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	appPath := filepath.Join(t.TempDir(), "Codex.app")
+	target := targets.Target{
+		ID:       "codex",
+		AppPath:  appPath,
+		ExecName: "Codex (Beta)",
+		DevelopmentSigning: &targets.DevelopmentSigningPolicy{
+			Enabled:        true,
+			ProxyInjection: true,
+		},
+	}
+	if err := os.MkdirAll(filepath.Join(appPath, "Contents"), 0o755); err != nil {
+		t.Fatalf("MkdirAll app contents: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(devsign.InjectorPath(target)), 0o755); err != nil {
+		t.Fatalf("MkdirAll injector dir: %v", err)
+	}
+	if err := os.WriteFile(devsign.InjectorPath(target), []byte("dylib"), 0o755); err != nil {
+		t.Fatalf("WriteFile injector: %v", err)
+	}
+	if err := os.WriteFile(devsign.InjectorPolicyPath(target), []byte("policy"), 0o600); err != nil {
+		t.Fatalf("WriteFile policy: %v", err)
+	}
+	writeInjectorInfoPlist(t, target)
+
+	if drift := developmentSigningInjectorDrift(target); drift != "" {
+		t.Fatalf("drift = %q, want none", drift)
+	}
+}
+
+func writeInjectorInfoPlist(t *testing.T, target targets.Target) {
+	t.Helper()
+	body := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>LSEnvironment</key><dict>
+<key>` + devsign.DyldInsertLibrariesKey + `</key><string>` + devsign.InjectorPath(target) + `</string>
+<key>` + devsign.InjectorPolicyEnvKey + `</key><string>` + devsign.InjectorPolicyPath(target) + `</string>
+</dict>
+</dict></plist>
+`
+	if err := os.WriteFile(filepath.Join(target.AppPath, "Contents", "Info.plist"), []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile Info.plist: %v", err)
 	}
 }

@@ -89,8 +89,8 @@ Required, proven (a standalone test binary signed this way returned
   Framework` makes the app crash about 7s after launch with `EXC_BREAKPOINT`
   (SIGTRAP) deep in V8/Node, even though `codesign --verify --deep --strict`
   passes and amfi accepts the launch. Leave the Framework and all nested helpers
-  on their original Developer-ID signatures. Only the main executable, the
-  injector dylib, and the bundle seal get the dev cert.
+  on their original Developer-ID signatures. Only the main executable and the
+  bundle seal get the dev cert.
 
 - **Re-seal the bundle with `rcodesign --shallow`.** It signs only the bundle's
   main executable and regenerates `CodeResources` while leaving nested code on its
@@ -116,12 +116,19 @@ without modifying the Framework by loading the injector dylib via
 `DYLD_INSERT_LIBRARIES` set in `Contents/Info.plist` `LSEnvironment`, gated by
 adding `com.apple.security.cs.allow-dyld-environment-variables` to the main
 entitlements (dyld ignores the var for a hardened-runtime process without it).
-The injector's constructor runs before Chromium's `CommandLine::Init`. It
-`setenv`s the launch-policy env (proxy plus `NODE_EXTRA_CA_CERTS` plus the ChatGPT
-backend base URL) for child processes, and it rewrites `*_NSGetArgv()` to append
-`--proxy-server` and `--ignore-certificate-errors`, skipping `--type=` child
-processes and `ELECTRON_RUN_AS_NODE`. Verified: Codex routes through clyde on the
-proxy port range and stays stable with no Framework modification.
+The injector lives outside the app bundle at
+`$XDG_STATE_HOME/clyde/dev-signing/injectors/codex/c.dylib`, is signed with the
+local Developer ID identity, and reads its policy from
+`$XDG_STATE_HOME/clyde/dev-signing/injectors/codex/policy.bin`.
+
+The injector's constructor runs before Chromium's `CommandLine::Init`. It first
+unsets `DYLD_INSERT_LIBRARIES` so Codex-launched child tools do not inherit the
+injection. It then applies the launch-policy env (proxy plus
+`NODE_EXTRA_CA_CERTS` plus the ChatGPT backend base URL) and rewrites
+`*_NSGetArgv()` to append `--proxy-server` and `--ignore-certificate-errors`,
+skipping `--type=` child processes and `ELECTRON_RUN_AS_NODE`. The patcher must
+smoke-test the exact external dylib and policy with a tiny host process before it
+accepts the patched app.
 
 ## Verification (2026-06-05)
 

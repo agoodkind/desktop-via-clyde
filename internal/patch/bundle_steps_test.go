@@ -15,6 +15,7 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/codexclishim"
 	"goodkind.io/desktop-via-clyde/internal/computeruseext"
 	"goodkind.io/desktop-via-clyde/internal/config"
+	"goodkind.io/desktop-via-clyde/internal/devsign"
 	patch "goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/targets"
@@ -118,12 +119,11 @@ func TestCodexDevelopmentSigningResealIsLastSigningAction(t *testing.T) {
 
 	assetDir := t.TempDir()
 	tg.DevelopmentSigning = &targets.DevelopmentSigningPolicy{
-		Enabled:           true,
-		ProfilePath:       writeDevSigningAsset(t, assetDir, "dev.provisionprofile"),
-		P12Path:           writeDevSigningAsset(t, assetDir, "dev.p12"),
-		P12PasswordFile:   writeDevSigningAsset(t, assetDir, "p12-password"),
-		InjectorDylibPath: writeDevSigningAsset(t, assetDir, "inject.dylib"),
-		ProxyInjection:    true,
+		Enabled:         true,
+		ProfilePath:     writeDevSigningAsset(t, assetDir, "dev.provisionprofile"),
+		P12Path:         writeDevSigningAsset(t, assetDir, "dev.p12"),
+		P12PasswordFile: writeDevSigningAsset(t, assetDir, "p12-password"),
+		ProxyInjection:  true,
 	}
 
 	trace := &patch.Trace{}
@@ -157,6 +157,30 @@ func TestCodexDevelopmentSigningResealIsLastSigningAction(t *testing.T) {
 	if !hasNestedCodesignBefore(trace, resealIndex) {
 		t.Fatalf("no nested codesign signing command precedes the development-signing reseal; the computer-use hooks must run before the seal: %#v", trace.Events)
 	}
+	requireExternalInjectorDryRun(t, trace, tg)
+}
+
+func requireExternalInjectorDryRun(t *testing.T, trace *patch.Trace, tg targets.Target) {
+	t.Helper()
+	appLocalInjector := devsign.AppLocalInjectorPath(tg)
+	externalInjector := devsign.InjectorPath(tg)
+	policyPath := devsign.InjectorPolicyPath(tg)
+	for _, event := range trace.Events {
+		if event.Action != "run_command" {
+			continue
+		}
+		if filepath.Base(event.Command) == "codesign" && containsString(event.Args, appLocalInjector) {
+			t.Fatalf("dry-run signs app-local injector %s: %#v", appLocalInjector, event)
+		}
+		if filepath.Base(event.Command) == "rcodesign" && containsString(event.Args, appLocalInjector) {
+			t.Fatalf("dry-run rcodesign signs app-local injector %s: %#v", appLocalInjector, event)
+		}
+		if filepath.Base(event.Command) == "cp" && containsString(event.Args, appLocalInjector) {
+			t.Fatalf("dry-run copies injector into app bundle %s: %#v", appLocalInjector, event)
+		}
+	}
+	requireTraceCommand(t, trace, "/usr/libexec/PlistBuddy", []string{"-c", "Add :LSEnvironment:" + devsign.DyldInsertLibrariesKey + " string " + externalInjector, paths.InfoPlistPath(tg)})
+	requireTraceCommand(t, trace, "/usr/libexec/PlistBuddy", []string{"-c", "Add :LSEnvironment:" + devsign.InjectorPolicyEnvKey + " string " + policyPath, paths.InfoPlistPath(tg)})
 }
 
 func writeDevSigningAsset(t *testing.T, dir string, name string) string {
@@ -323,6 +347,15 @@ func equalStrings(left []string, right []string) bool {
 		}
 	}
 	return true
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func lookupTarget(t *testing.T, id string) (targets.Target, error) {

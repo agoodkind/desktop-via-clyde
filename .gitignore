@@ -3,6 +3,7 @@
 config.mk
 bin/
 internal/embed/shim
+internal/embed/clyde-inject.dylib
 internal/embed/dvc-stdio-tee-shim
 shim/.build/
 shim/.config/

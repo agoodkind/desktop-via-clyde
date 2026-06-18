@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
+	"goodkind.io/desktop-via-clyde/internal/appguard"
 	"goodkind.io/desktop-via-clyde/internal/bundleidentity"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/clioutput"
@@ -74,12 +75,13 @@ func RegisterOperations() error {
 
 // Options controls a patch invocation.
 type Options struct {
-	DryRun          bool
-	MigrateKeychain bool
-	Out             io.Writer
-	LogOut          io.Writer
-	Progress        clioutput.Progress
-	Trace           *Trace
+	DryRun            bool
+	MigrateKeychain   bool
+	Out               io.Writer
+	LogOut            io.Writer
+	Progress          clioutput.Progress
+	Trace             *Trace
+	CloseBeforeMutate bool
 }
 
 // Operation runs the app patch operation for one configured target.
@@ -96,12 +98,13 @@ func Operation(ctx context.Context, req operations.Request) error {
 		return nil
 	}
 	if err := Patch(ctx, *req.App, Options{
-		DryRun:          req.Flags.Bool("dry-run"),
-		MigrateKeychain: req.Flags.Bool("migrate-keychain"),
-		Out:             req.Out,
-		LogOut:          req.LogOut,
-		Progress:        req.Progress,
-		Trace:           nil,
+		DryRun:            req.Flags.Bool("dry-run"),
+		MigrateKeychain:   req.Flags.Bool("migrate-keychain"),
+		Out:               req.Out,
+		LogOut:            req.LogOut,
+		Progress:          req.Progress,
+		Trace:             nil,
+		CloseBeforeMutate: !req.Flags.Bool("background"),
 	}); err != nil {
 		patchLog.ErrorContext(ctx, "patch.operation_failed", "err", err)
 		return fmt.Errorf("patch operation: %w",
@@ -128,6 +131,7 @@ func runUpgradeForMissingBundle(ctx context.Context, req operations.Request) err
 	flags := operations.NewFlagValues()
 	flags.SetBool("dry-run", req.Flags.Bool("dry-run"))
 	flags.SetBool("migrate-keychain", req.Flags.Bool("migrate-keychain"))
+	flags.SetBool("background", req.Flags.Bool("background"))
 	flags.SetString("channel", "")
 	notice := fmt.Sprintf("target=%s app missing at %s; running upgrade before patch", req.App.ID, req.App.AppPath)
 	switch {
@@ -157,12 +161,13 @@ func KeychainMigrateOperation(ctx context.Context, req operations.Request) error
 		return fmt.Errorf("%s requires an app target", req.Capability)
 	}
 	if err := KeychainMigrate(ctx, *req.App, Options{
-		DryRun:          req.Flags.Bool("dry-run"),
-		MigrateKeychain: true,
-		Out:             req.Out,
-		LogOut:          req.LogOut,
-		Progress:        req.Progress,
-		Trace:           nil,
+		DryRun:            req.Flags.Bool("dry-run"),
+		MigrateKeychain:   true,
+		Out:               req.Out,
+		LogOut:            req.LogOut,
+		Progress:          req.Progress,
+		Trace:             nil,
+		CloseBeforeMutate: false,
 	}); err != nil {
 		patchLog.ErrorContext(ctx, "patch.keychain_migrate_operation_failed", "err", err)
 		return fmt.Errorf("keychain migrate operation: %w",
@@ -200,6 +205,15 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	if !opts.DryRun {
 		if _, err := os.Stat(t.AppPath); err != nil {
 			return logPatchError(ctx, "patch.bundle_stat_failed", fmt.Errorf("bundle not found at %s: %w", t.AppPath, err))
+		}
+	}
+	if opts.CloseBeforeMutate {
+		if err := appguard.EnsureClosed(ctx, t, appguard.Options{
+			DryRun:  opts.DryRun,
+			Out:     opts.Out,
+			Timeout: 0,
+		}); err != nil {
+			return logPatchError(ctx, "patch.close_app_failed", fmt.Errorf("close app before mutation: %w", err))
 		}
 	}
 
@@ -314,12 +328,13 @@ func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Op
 		return nil, logPatchError(ctx, "patch.install_shim_failed", fmt.Errorf("install shim: %w", err))
 	}
 	if err := runPreResignHooks(ctx, r, *t, Options{
-		DryRun:          r.DryRun,
-		MigrateKeychain: opts.MigrateKeychain,
-		Out:             r.Out,
-		LogOut:          r.RawOut,
-		Progress:        r.Progress,
-		Trace:           r.Trace,
+		DryRun:            r.DryRun,
+		MigrateKeychain:   opts.MigrateKeychain,
+		Out:               r.Out,
+		LogOut:            r.RawOut,
+		Progress:          r.Progress,
+		Trace:             r.Trace,
+		CloseBeforeMutate: false,
 	}); err != nil {
 		return nil, logPatchError(ctx, "patch.pre_resign_hook_failed", fmt.Errorf("run pre-resign hooks: %w", err))
 	}
@@ -899,6 +914,11 @@ func stepVerifyDevelopmentSigned(ctx context.Context, r *Runner, t targets.Targe
 	}
 	if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", t.AppPath); err != nil {
 		return logPatchError(ctx, "patch.verify_development_signed_failed", fmt.Errorf("verify development-signed bundle %s: %w", t.AppPath, err))
+	}
+	if t.DevelopmentSigning != nil && t.DevelopmentSigning.ProxyInjection {
+		if err := verifyDevelopmentSignedInjector(ctx, r, t); err != nil {
+			return err
+		}
 	}
 	return nil
 }
