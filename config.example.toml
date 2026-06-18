@@ -48,6 +48,18 @@ strip = [
 ]
 required_boolean = ["com.apple.security.cs.disable-library-validation"]
 
+# Optional development-profile signing overlay. This is only for targets that
+# need a local Apple Development profile for restricted entitlements. When
+# proxy_injection is true, the built-in injector is installed under the XDG state
+# root. Set injector_dylib_path only to override that embedded injector.
+# [apps.example.development_signing]
+# enabled = false
+# profile_path = "<STATE_ROOT>/dev-signing/dev.provisionprofile"
+# p12_path = "<STATE_ROOT>/dev-signing/dev.p12"
+# p12_password_file = "<STATE_ROOT>/dev-signing/dev-p12-password"
+# proxy_injection = true
+# injector_dylib_path = "<STATE_ROOT>/dev-signing/custom-clyde-inject.dylib"
+
 # Updater. kind is one of: squirrel_json, sparkle_appcast, http_path_json_manifest.
 # Only the fields for the chosen kind are required; see the validators in
 # internal/config/load.go. This example uses squirrel_json.

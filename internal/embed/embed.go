@@ -1,4 +1,4 @@
-// Package shimembed exposes the Swift launch shim payload.
+// Package shimembed exposes embedded helper payloads.
 //
 // ShimBinary is the MITM-routing shim that replaces an Electron app's main
 // executable so launches route through the local Clyde MITM proxy.
@@ -12,3 +12,9 @@ import (
 //
 //go:embed shim
 var ShimBinary []byte
+
+// InjectorDylib is the generic DYLD_INSERT_LIBRARIES helper used by the Codex
+// development-signing path.
+//
+//go:embed clyde-inject.dylib
+var InjectorDylib []byte

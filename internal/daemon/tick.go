@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
 	desktopviaclydev1 "goodkind.io/desktop-via-clyde/api/desktopviaclyde/v1"
+	"goodkind.io/desktop-via-clyde/internal/appguard"
 	"goodkind.io/desktop-via-clyde/internal/clock"
 	"goodkind.io/desktop-via-clyde/internal/cmdflags"
 	"goodkind.io/desktop-via-clyde/internal/spec"
@@ -206,7 +205,7 @@ func (t *ticker) sweepCLIs(ctx context.Context) {
 func (t *ticker) runUpgradeThroughExecutor(ctx context.Context, targetID string) {
 	flags := &desktopviaclydev1.OperationFlags{
 		Strings: map[string]string{},
-		Bools:   map[string]bool{},
+		Bools:   map[string]bool{"background": true},
 	}
 	job := newOperationJob(upgrade.AppUpgradeCapability, "upgrade", targetID, "", flags)
 	run, err := t.exec.startOrAttach(ctx, "upgrade", targetID, job)
@@ -239,15 +238,10 @@ func defaultCheckUpdate(ctx context.Context, target targets.Target) (upgrade.Upd
 	return check, nil
 }
 
-// appRunning reports whether the target app's main executable has a live
-// process, using a read-only pgrep exact-name match.
+// appRunning reports whether the target app or helper processes are live.
 func appRunning(ctx context.Context, target targets.Target) bool {
-	name := strings.TrimSpace(target.ExecName)
-	if name == "" {
-		return false
-	}
-	daemonLog.DebugContext(ctx, "daemon.tick.app_running.boundary", "exec", name)
-	return exec.CommandContext(ctx, "/usr/bin/pgrep", "-x", name).Run() == nil
+	daemonLog.DebugContext(ctx, "daemon.tick.app_running.boundary", "target", target.ID, "app_path", target.AppPath)
+	return appguard.Running(ctx, target)
 }
 
 // tickInterval is the adaptive cadence: relaxed by default, fast after a sweep

@@ -235,7 +235,6 @@ enabled = true
 profile_path = "/tmp/dev.provisionprofile"
 p12_path = "/tmp/dvc-spike/dev.p12"
 p12_password_file = "/Users/agoodkind/.local/state/clyde/dev-signing/dev-p12-password"
-injector_dylib_path = "/tmp/dvc-spike/libclyde-inject.dylib"
 proxy_injection = true
 
 [apps.codex.updater]

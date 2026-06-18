@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"goodkind.io/desktop-via-clyde/internal/bundleidentity"
+	"goodkind.io/desktop-via-clyde/internal/devsign"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
@@ -172,6 +173,12 @@ func buildTargetStatus(ctx context.Context, target targets.Target, multiState st
 		result.State = "drifted"
 		result.Notes += "; " + drift
 	}
+	if developmentSigned {
+		if drift := developmentSigningInjectorDrift(target); drift != "" {
+			result.State = "drifted"
+			result.Notes += "; " + drift
+		}
+	}
 
 	currentVersion := readBundleVersionFn(target)
 	if !developmentSigned {
@@ -263,6 +270,61 @@ func firstRuntimeBundleDrift(bundles []RuntimeBundleStatus) string {
 		}
 	}
 	return ""
+}
+
+func developmentSigningInjectorDrift(target targets.Target) string {
+	if target.DevelopmentSigning == nil || !target.DevelopmentSigning.ProxyInjection {
+		return ""
+	}
+	appLocalPath := devsign.AppLocalInjectorPath(target)
+	if _, err := os.Stat(appLocalPath); err == nil {
+		return "stale app-local injector present at " + appLocalPath
+	} else if !os.IsNotExist(err) {
+		return "cannot stat app-local injector " + appLocalPath + ": " + err.Error()
+	}
+
+	var info struct {
+		LSEnvironment map[string]string `plist:"LSEnvironment"`
+	}
+	data, err := os.ReadFile(paths.InfoPlistPath(target))
+	if err != nil {
+		return "cannot read Info.plist injector environment: " + err.Error()
+	}
+	if _, err := plist.Unmarshal(data, &info); err != nil {
+		return "cannot parse Info.plist injector environment: " + err.Error()
+	}
+	injectorPath := devsign.InjectorPath(target)
+	policyPath := devsign.InjectorPolicyPath(target)
+	dyldPath := strings.TrimSpace(info.LSEnvironment[devsign.DyldInsertLibrariesKey])
+	if dyldPath == "" {
+		return devsign.DyldInsertLibrariesKey + " missing from LSEnvironment"
+	}
+	if pathInsideBundle(dyldPath, target.AppPath) {
+		return devsign.DyldInsertLibrariesKey + " points inside app bundle at " + dyldPath
+	}
+	if filepath.Clean(dyldPath) != filepath.Clean(injectorPath) {
+		return devsign.DyldInsertLibrariesKey + " points at " + dyldPath + ", want " + injectorPath
+	}
+	gotPolicyPath := strings.TrimSpace(info.LSEnvironment[devsign.InjectorPolicyEnvKey])
+	if gotPolicyPath == "" {
+		return devsign.InjectorPolicyEnvKey + " missing from LSEnvironment"
+	}
+	if filepath.Clean(gotPolicyPath) != filepath.Clean(policyPath) {
+		return devsign.InjectorPolicyEnvKey + " points at " + gotPolicyPath + ", want " + policyPath
+	}
+	if _, err := os.Stat(injectorPath); err != nil {
+		return "external injector missing at " + injectorPath
+	}
+	if _, err := os.Stat(policyPath); err != nil {
+		return "injector policy missing at " + policyPath
+	}
+	return ""
+}
+
+func pathInsideBundle(path string, appPath string) bool {
+	cleanPath := filepath.Clean(path)
+	cleanApp := filepath.Clean(appPath)
+	return cleanPath == cleanApp || strings.HasPrefix(cleanPath, cleanApp+string(filepath.Separator))
 }
 
 // upstreamSigningLabel renders the recorded upstream signing identity for

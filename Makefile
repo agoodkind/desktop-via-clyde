@@ -6,7 +6,7 @@
 # staticcheck-extra). Refresh baselines via the matching *-baseline target.
 #
 # desktop-via-clyde Makefile.
-# The Swift launch shim is the only project-local generated prerequisite.
+# Project-local generated prerequisites live under internal/embed.
 
 # Identity.
 BINARY     := desktop-via-clyde
@@ -15,7 +15,6 @@ VPKG       := goodkind.io/desktop-via-clyde/internal/version
 GKLOG_VPKG := goodkind.io/gklog/version
 DIST_DIR   := bin
 BUNDLE_ID  := io.goodkind.desktop-via-clyde
-CODESIGN_IDENTITY ?= -
 
 GO_BUILD_TAGS        := gklog_stamped
 GO_BUILD_EXTRA_FLAGS := -trimpath
@@ -40,14 +39,19 @@ GO_MK_DEV_DIR ?= $(HOME)/Sites/go-makefile
 
 include bootstrap.mk
 
+ifeq ($(strip $(CODESIGN_IDENTITY)),)
+CODESIGN_IDENTITY := -
+endif
+
 .DEFAULT_GOAL := check
 
 REPO_ROOT            := $(CURDIR)
 SHIM_OUT             := $(REPO_ROOT)/internal/embed/shim
+INJECTOR_OUT         := $(REPO_ROOT)/internal/embed/clyde-inject.dylib
 
-.PHONY: dvc-help-extras go-generated-prereqs shim shim-build shim-test shim-fmt shim-clean clean-generated proto
+.PHONY: dvc-help-extras go-generated-prereqs shim shim-build shim-test shim-fmt shim-clean injector injector-build injector-test injector-clean clean-generated proto
 
-go-generated-prereqs: proto shim-build
+go-generated-prereqs: proto shim-build injector-build
 
 # Protobuf / gRPC codegen. Sources live under api/**/*.proto; config is
 # buf.yaml + buf.gen.yaml with local go-tool plugins, so only the buf binary is
@@ -72,8 +76,20 @@ shim-fmt:
 shim-clean:
 	$(MAKE) -C $(REPO_ROOT)/shim clean
 
+injector:
+	@$(MAKE) injector-build
+
+injector-build:
+	$(MAKE) -C $(REPO_ROOT)/injector build
+
+injector-test:
+	$(MAKE) -C $(REPO_ROOT)/injector test
+
+injector-clean:
+	$(MAKE) -C $(REPO_ROOT)/injector clean
+
 # Package loading, vet, test, and the shared analyzers need the embedded Swift
-# shim present because go:embed validates the file during load.
+# shim and injector present because go:embed validates files during load.
 build build-check check lint lint-golangci lint-files lint-diff staticcheck-extra vet test govulncheck install deploy: go-generated-prereqs
 
 ifneq ($(filter go-release.mk,$(GO_MK_MODULES)),)
@@ -88,11 +104,11 @@ dvc-help-extras:
 	@printf '  %-40s %s\n' 'deploy' 'alias for install'
 	@printf '\n'
 
-test: shim-test
+test: shim-test injector-test
 
 fmt: shim-fmt
 
 clean-generated:
-	rm -f $(SHIM_OUT)
+	rm -f $(SHIM_OUT) $(INJECTOR_OUT)
 
-clean: clean-dist shim-clean clean-generated
+clean: clean-dist shim-clean injector-clean clean-generated

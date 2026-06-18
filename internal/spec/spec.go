@@ -125,7 +125,8 @@ type AppSpec struct {
 // fields default to the zero value, so a target without a [development_signing]
 // table stays on the standard shim path. Secrets are referenced by file path
 // only; P12PasswordFile points at a file holding the p12 password, never the
-// password itself.
+// password itself. InjectorDylibPath is optional: when empty, proxy injection
+// uses the embedded injector built by this repo.
 type DevelopmentSigningSpec struct {
 	Enabled           bool   `toml:"enabled"`
 	ProfilePath       string `toml:"profile_path"`
