@@ -2,7 +2,9 @@ package appguard
 
 import (
 	"context"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -91,6 +93,76 @@ func TestEnsureClosedRequestsQuitAndWaits(t *testing.T) {
 	}
 }
 
+func TestEnsureClosedTerminatesWhenQuitDoesNotExit(t *testing.T) {
+	target := targets.Target{
+		ID:       "codex",
+		AppPath:  "/Applications/Codex.app",
+		BundleID: "com.openai.codex.beta",
+		ExecName: "Codex (Beta)",
+	}
+	running := true
+	quitRequested := false
+	terminated := false
+	killed := false
+	originalListProcessOutput := listProcessOutput
+	originalRequestQuit := requestQuit
+	originalSignalProcess := signalProcess
+	originalSleep := sleep
+	listProcessOutput = func(context.Context) ([]byte, error) {
+		if !running {
+			return []byte(""), nil
+		}
+		return []byte("101 /Applications/Codex.app/Contents/MacOS/Codex (Beta)\n"), nil
+	}
+	requestQuit = func(context.Context, targets.Target) error {
+		quitRequested = true
+		return nil
+	}
+	signalProcess = func(process Process, sig os.Signal) error {
+		if process.PID != 101 {
+			t.Fatalf("signal PID = %d, want 101", process.PID)
+		}
+		switch sig {
+		case syscall.SIGTERM:
+			terminated = true
+			running = false
+		case syscall.SIGKILL:
+			killed = true
+		default:
+			t.Fatalf("unexpected signal %v", sig)
+		}
+		return nil
+	}
+	sleep = func(time.Duration) {}
+	t.Cleanup(func() {
+		listProcessOutput = originalListProcessOutput
+		requestQuit = originalRequestQuit
+		signalProcess = originalSignalProcess
+		sleep = originalSleep
+	})
+
+	var out strings.Builder
+	err := EnsureClosed(context.Background(), target, Options{
+		Out:     &out,
+		Timeout: time.Nanosecond,
+	})
+	if err != nil {
+		t.Fatalf("EnsureClosed: %v", err)
+	}
+	if !quitRequested {
+		t.Fatal("quit was not requested")
+	}
+	if !terminated {
+		t.Fatal("process was not terminated")
+	}
+	if killed {
+		t.Fatal("process was killed after terminate succeeded")
+	}
+	if !strings.Contains(out.String(), "terminate running app processes") {
+		t.Fatalf("output missing terminate notice: %s", out.String())
+	}
+}
+
 func TestEnsureClosedFailsWhenProcessRemains(t *testing.T) {
 	target := targets.Target{
 		ID:       "codex",
@@ -100,20 +172,28 @@ func TestEnsureClosedFailsWhenProcessRemains(t *testing.T) {
 	}
 	originalListProcessOutput := listProcessOutput
 	originalRequestQuit := requestQuit
+	originalSignalProcess := signalProcess
 	originalSleep := sleep
 	listProcessOutput = func(context.Context) ([]byte, error) {
 		return []byte("101 /Applications/Codex.app/Contents/MacOS/Codex (Beta)\n"), nil
 	}
 	requestQuit = func(context.Context, targets.Target) error { return nil }
+	signals := make([]os.Signal, 0)
+	signalProcess = func(_ Process, sig os.Signal) error {
+		signals = append(signals, sig)
+		return nil
+	}
 	sleep = func(time.Duration) {}
 	t.Cleanup(func() {
 		listProcessOutput = originalListProcessOutput
 		requestQuit = originalRequestQuit
+		signalProcess = originalSignalProcess
 		sleep = originalSleep
 	})
 
+	var out strings.Builder
 	err := EnsureClosed(context.Background(), target, Options{
-		Out:     &strings.Builder{},
+		Out:     &out,
 		Timeout: time.Nanosecond,
 	})
 	if err == nil {
@@ -121,5 +201,17 @@ func TestEnsureClosedFailsWhenProcessRemains(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "still has running processes") {
 		t.Fatalf("error = %v", err)
+	}
+	if len(signals) != 2 || signals[0] != syscall.SIGTERM || signals[1] != syscall.SIGKILL {
+		t.Fatalf("signals = %#v, want SIGTERM then SIGKILL", signals)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"terminate running app processes",
+		"kill running app processes",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output missing %q: %s", want, text)
+		}
 	}
 }

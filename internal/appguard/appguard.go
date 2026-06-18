@@ -4,6 +4,7 @@ package appguard
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/clock"
@@ -20,6 +22,7 @@ import (
 
 const (
 	defaultCloseTimeout = 20 * time.Second
+	forceCloseTimeout   = 5 * time.Second
 	closePollInterval   = 250 * time.Millisecond
 )
 
@@ -27,6 +30,7 @@ var (
 	appguardLog       = slog.With("component", "desktop-via-clyde", "subcomponent", "appguard")
 	listProcessOutput = defaultListProcessOutput
 	requestQuit       = defaultRequestQuit
+	signalProcess     = defaultSignalProcess
 	sleep             = time.Sleep
 )
 
@@ -95,8 +99,7 @@ func EnsureClosed(ctx context.Context, target targets.Target, opts Options) erro
 			return nil
 		}
 		if !clock.Now().Before(deadline) {
-			return logAppguardError(ctx, "appguard.close_timeout",
-				fmt.Errorf("%s still has running processes after %s: %s", target.ID, timeout, formatProcesses(processes)))
+			return terminateProcesses(ctx, target, opts, processes, forceTimeout(timeout))
 		}
 		sleep(closePollInterval)
 	}
@@ -133,6 +136,22 @@ func defaultRequestQuit(ctx context.Context, target targets.Target) error {
 		return lastErr
 	}
 	return fmt.Errorf("target %s has no bundle id", target.ID)
+}
+
+func defaultSignalProcess(process Process, sig os.Signal) error {
+	osProcess, err := os.FindProcess(process.PID)
+	if err != nil {
+		appguardLog.Error("appguard.find_process_failed", "pid", process.PID, "err", err)
+		return fmt.Errorf("find process %d: %w", process.PID, err)
+	}
+	if err := osProcess.Signal(sig); err != nil {
+		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		appguardLog.Warn("appguard.signal_process_failed", "pid", process.PID, "signal", sig.String(), "err", err)
+		return fmt.Errorf("signal process %d: %w", process.PID, err)
+	}
+	return nil
 }
 
 func parseProcesses(output []byte, target targets.Target) []Process {
@@ -187,6 +206,66 @@ func matchesCommandPrefix(command string, prefix string) bool {
 	return command == prefix ||
 		strings.HasPrefix(command, prefix+string(filepath.Separator)) ||
 		strings.HasPrefix(command, prefix+" ")
+}
+
+func terminateProcesses(ctx context.Context, target targets.Target, opts Options, processes []Process, timeout time.Duration) error {
+	note(opts, fmt.Sprintf("target=%s terminate running app processes after graceful close timeout", target.ID))
+	if err := signalProcesses(processes, syscall.SIGTERM); err != nil {
+		return logAppguardError(ctx, "appguard.terminate_failed", err)
+	}
+	remaining, err := waitForExit(ctx, target, timeout)
+	if err != nil {
+		return err
+	}
+	if len(remaining) == 0 {
+		return nil
+	}
+	note(opts, fmt.Sprintf("target=%s kill running app processes after terminate timeout", target.ID))
+	if err := signalProcesses(remaining, syscall.SIGKILL); err != nil {
+		return logAppguardError(ctx, "appguard.kill_failed", err)
+	}
+	remaining, err = waitForExit(ctx, target, timeout)
+	if err != nil {
+		return err
+	}
+	if len(remaining) == 0 {
+		return nil
+	}
+	return logAppguardError(ctx, "appguard.close_timeout",
+		fmt.Errorf("%s still has running processes after forced close: %s", target.ID, formatProcesses(remaining)))
+}
+
+func signalProcesses(processes []Process, sig os.Signal) error {
+	for _, process := range processes {
+		if err := signalProcess(process, sig); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func waitForExit(ctx context.Context, target targets.Target, timeout time.Duration) ([]Process, error) {
+	deadline := clock.Now().Add(timeout)
+	for {
+		processes, err := Processes(ctx, target)
+		if err != nil {
+			return nil, err
+		}
+		if len(processes) == 0 {
+			return nil, nil
+		}
+		if !clock.Now().Before(deadline) {
+			return processes, nil
+		}
+		sleep(closePollInterval)
+	}
+}
+
+func forceTimeout(timeout time.Duration) time.Duration {
+	if timeout < forceCloseTimeout {
+		return timeout
+	}
+	return forceCloseTimeout
 }
 
 func formatProcesses(processes []Process) string {
