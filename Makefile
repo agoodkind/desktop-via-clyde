@@ -39,6 +39,10 @@ GO_MK_DEV_DIR ?= $(HOME)/Sites/go-makefile
 
 include bootstrap.mk
 
+ifeq ($(strip $(CODESIGN_IDENTITY)),)
+CODESIGN_IDENTITY := -
+endif
+
 .DEFAULT_GOAL := check
 
 REPO_ROOT            := $(CURDIR)
