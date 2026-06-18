@@ -19,6 +19,14 @@ launchd_target() {
     printf 'gui/%s/%s\n' "$(id -u)" "${LAUNCHD_LABEL}"
 }
 
+launchd_domain() {
+    printf 'gui/%s\n' "$(id -u)"
+}
+
+plist_path() {
+    printf '%s/Library/LaunchAgents/%s.plist\n' "${HOME}" "${LAUNCHD_LABEL}"
+}
+
 updater_is_loaded() {
     launchctl print "$(launchd_target)" >/dev/null 2>&1
 }
@@ -50,8 +58,8 @@ stop_updater() {
         fi
     fi
 
-    launchctl bootout "$(launchd_target)" >/dev/null 2>&1 || true
-    rm -f "${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+    launchctl bootout "$(launchd_domain)" "$(plist_path)" >/dev/null 2>&1 || true
+    rm -f "$(plist_path)"
     printf 'install_guard updater=stopped method=launchctl\n'
 }
 
