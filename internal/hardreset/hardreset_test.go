@@ -11,7 +11,9 @@ import (
 	"text/template"
 	"time"
 
+	"goodkind.io/desktop-via-clyde/internal/appguard"
 	"goodkind.io/desktop-via-clyde/internal/extensions"
+	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
@@ -256,6 +258,15 @@ func stubRunCommand(t *testing.T, handler func(name string, args []string, stdin
 	return &calls
 }
 
+func stubEnsureAppClosed(t *testing.T, handler func(targets.Target, appguard.Options) error) {
+	t.Helper()
+	original := ensureAppClosed
+	ensureAppClosed = func(_ context.Context, target targets.Target, opts appguard.Options) error {
+		return handler(target, opts)
+	}
+	t.Cleanup(func() { ensureAppClosed = original })
+}
+
 func setSystemTCCDatabasePath(t *testing.T, path string) {
 	t.Helper()
 	original := systemTCCDatabasePath
@@ -469,6 +480,111 @@ func TestRunDeletesUserAndSystemTCCRowsAndVerifiesClean(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("Run output missing %q\n%s", want, text)
 		}
+	}
+}
+
+func TestRunClosesAppBeforeTCCAndArtifactRemoval(t *testing.T) {
+	home := t.TempDir()
+	stateHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", stateHome)
+
+	userDB := filepath.Join(home, "Library", "Application Support", "com.apple.TCC", "TCC.db")
+	if err := os.MkdirAll(filepath.Dir(userDB), 0o755); err != nil {
+		t.Fatalf("mkdir user db parent: %v", err)
+	}
+	if err := os.WriteFile(userDB, []byte("db"), 0o644); err != nil {
+		t.Fatalf("write user db: %v", err)
+	}
+	systemDB := filepath.Join(t.TempDir(), "system-TCC.db")
+	if err := os.WriteFile(systemDB, []byte("db"), 0o644); err != nil {
+		t.Fatalf("write system db: %v", err)
+	}
+	setSystemTCCDatabasePath(t, systemDB)
+	stubRunCommand(t, func(_ string, args []string, stdin string) ([]byte, error) {
+		if strings.Contains(stdin, "DELETE FROM access") {
+			return []byte("1\n"), nil
+		}
+		if len(args) > 0 && strings.Contains(args[len(args)-1], "count(*)") {
+			return []byte("0\n"), nil
+		}
+		return []byte(""), nil
+	})
+
+	closeCalls := 0
+	stubEnsureAppClosed(t, func(target targets.Target, opts appguard.Options) error {
+		closeCalls++
+		_, writeErr := opts.Out.Write([]byte("hardreset_app_closed target=" + target.ID + "\n"))
+		return writeErr
+	})
+
+	appPath := writeTestCodexBundle(t)
+	target := targets.Target{
+		ID:       "codex",
+		AppPath:  appPath,
+		BundleID: "com.openai.codex.beta",
+	}
+	var out bytes.Buffer
+	if err := Run(context.Background(), target, Options{Out: &out, CloseBeforeMutate: true}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if closeCalls != 1 {
+		t.Fatalf("close calls = %d, want 1", closeCalls)
+	}
+	text := out.String()
+	closeIndex := strings.Index(text, "hardreset_app_closed target=codex")
+	tccIndex := strings.Index(text, "tccutil_reset_all")
+	artifactIndex := strings.Index(text, "artifact action=remove kind=app_bundle path="+appPath+" status=removed")
+	if closeIndex == -1 {
+		t.Fatalf("output missing close proof\n%s", text)
+	}
+	if tccIndex == -1 {
+		t.Fatalf("output missing tccutil summary\n%s", text)
+	}
+	if artifactIndex == -1 {
+		t.Fatalf("output missing app bundle removal\n%s", text)
+	}
+	if closeIndex > tccIndex {
+		t.Fatalf("close proof occurred after TCC reset\n%s", text)
+	}
+	if closeIndex > artifactIndex {
+		t.Fatalf("close proof occurred after app removal\n%s", text)
+	}
+}
+
+func TestOperationClosesBeforeMutateByDefault(t *testing.T) {
+	appPath := writeTestCodexBundle(t)
+	target := targets.Target{
+		ID:       "codex",
+		AppPath:  appPath,
+		BundleID: "com.openai.codex.beta",
+	}
+	flags := operations.NewFlagValues()
+	flags.SetBool("dry-run", true)
+
+	closeCalls := 0
+	var closeDryRun bool
+	stubEnsureAppClosed(t, func(_ targets.Target, opts appguard.Options) error {
+		closeCalls++
+		closeDryRun = opts.DryRun
+		return nil
+	})
+
+	var out bytes.Buffer
+	err := Operation(context.Background(), operations.Request{
+		App:        &target,
+		Capability: AppHardResetCapability,
+		Flags:      flags,
+		Out:        &out,
+	})
+	if err != nil {
+		t.Fatalf("Operation: %v", err)
+	}
+	if closeCalls != 1 {
+		t.Fatalf("close calls = %d, want 1", closeCalls)
+	}
+	if !closeDryRun {
+		t.Fatal("close gate did not inherit dry-run flag")
 	}
 }
 

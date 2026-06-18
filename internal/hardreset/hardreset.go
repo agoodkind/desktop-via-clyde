@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"goodkind.io/desktop-via-clyde/internal/appguard"
 	"goodkind.io/desktop-via-clyde/internal/bundleidentity"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/operations"
@@ -45,7 +46,14 @@ var systemTCCDatabasePath = "/Library/Application Support/com.apple.TCC/TCC.db"
 // (sqlite3, sudo, tccutil, killall) without executing them against the host.
 type commandRunner func(ctx context.Context, name string, args []string, stdin string) ([]byte, error)
 
-var runCommand commandRunner = execCommand
+// closeAppFunc asks a foreground target app to quit before mutating bundle
+// artifacts.
+type closeAppFunc func(ctx context.Context, target targets.Target, opts appguard.Options) error
+
+var (
+	runCommand      commandRunner = execCommand
+	ensureAppClosed closeAppFunc  = appguard.EnsureClosed
+)
 
 func execCommand(ctx context.Context, name string, args []string, stdin string) ([]byte, error) {
 	hardResetLog.DebugContext(ctx, "hardreset.run_command.boundary", "name", name, "args", strings.Join(args, " "))
@@ -84,9 +92,10 @@ func Operation(ctx context.Context, req operations.Request) error {
 		out = os.Stdout
 	}
 	if err := Run(ctx, *req.App, Options{
-		DryRun: req.Flags.Bool("dry-run"),
-		Out:    out,
-		LogOut: req.LogOut,
+		DryRun:            req.Flags.Bool("dry-run"),
+		Out:               out,
+		LogOut:            req.LogOut,
+		CloseBeforeMutate: !req.Flags.Bool("background"),
 	}); err != nil {
 		hardResetLog.ErrorContext(ctx, "hardreset.operation_failed", "err", err)
 		return fmt.Errorf("hard-reset operation: %w",
@@ -97,9 +106,10 @@ func Operation(ctx context.Context, req operations.Request) error {
 
 // Options controls one hard-reset invocation.
 type Options struct {
-	DryRun bool
-	Out    io.Writer
-	LogOut io.Writer
+	DryRun            bool
+	Out               io.Writer
+	LogOut            io.Writer
+	CloseBeforeMutate bool
 }
 
 // Plan records the TCC reset commands for one target.
@@ -172,6 +182,16 @@ func Run(ctx context.Context, target targets.Target, opts Options) error {
 			artifact.Glob,
 		); err != nil {
 			return fmt.Errorf("write hard-reset artifact: %w", err)
+		}
+	}
+	if opts.CloseBeforeMutate {
+		if err := ensureAppClosed(ctx, target, appguard.Options{
+			DryRun:  opts.DryRun,
+			Out:     opts.Out,
+			Timeout: 0,
+		}); err != nil {
+			hardResetLog.ErrorContext(ctx, "hardreset.close_app_failed", "target", target.ID, "err", err)
+			return fmt.Errorf("close app before hard reset: %w", err)
 		}
 	}
 	if err := resetTCCUtilAll(ctx, opts, plan.TCCUtilBundleIDs); err != nil {
