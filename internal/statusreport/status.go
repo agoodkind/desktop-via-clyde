@@ -24,6 +24,7 @@ var statusReportLog = slog.With("component", "desktop-via-clyde", "subcomponent"
 var (
 	readBundleVersionFn     = readBundleVersion
 	runtimeBundleStatusesFn = runtimeBundleStatuses
+	trustedMITMCADriftFn    = devsign.TrustedMITMCADrift
 )
 
 type runtimeBundleState string
@@ -175,6 +176,10 @@ func buildTargetStatus(ctx context.Context, target targets.Target, multiState st
 	}
 	if developmentSigned {
 		if drift := developmentSigningInjectorDrift(target); drift != "" {
+			result.State = "drifted"
+			result.Notes += "; " + drift
+		}
+		if drift := trustedMITMCADriftFn(ctx, target); drift != "" {
 			result.State = "drifted"
 			result.Notes += "; " + drift
 		}

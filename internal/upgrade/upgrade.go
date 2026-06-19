@@ -25,6 +25,7 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/clock"
+	"goodkind.io/desktop-via-clyde/internal/devsign"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
@@ -163,6 +164,11 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 		return err
 	}
 	noteBundleVersion(r, t, channel, bundleState)
+	if !opts.DryRun {
+		if err := devsign.EnsureTrustedMITMCA(ctx, t); err != nil {
+			return logUpgradeError(ctx, "upgrade.mitm_trust_required", fmt.Errorf("verify MITM CA trust before upgrade: %w", err))
+		}
+	}
 
 	m, err := fetchManifest(ctx, t, bundleState.CurrentVersion, channel)
 	if err != nil {

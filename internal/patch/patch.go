@@ -206,6 +206,9 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 		if _, err := os.Stat(t.AppPath); err != nil {
 			return logPatchError(ctx, "patch.bundle_stat_failed", fmt.Errorf("bundle not found at %s: %w", t.AppPath, err))
 		}
+		if err := devsign.EnsureTrustedMITMCA(ctx, t); err != nil {
+			return logPatchError(ctx, "patch.mitm_trust_required", fmt.Errorf("verify MITM CA trust before patch: %w", err))
+		}
 	}
 	if opts.CloseBeforeMutate {
 		if err := appguard.EnsureClosed(ctx, t, appguard.Options{
