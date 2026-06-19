@@ -94,7 +94,7 @@ injector-clean:
 
 # Package loading, vet, test, and the shared analyzers need the embedded Swift
 # shim and injector present because go:embed validates files during load.
-build build-check check lint lint-golangci lint-files lint-diff staticcheck-extra vet test govulncheck install deploy: go-generated-prereqs
+build build-check check lint lint-golangci lint-format lint-files lint-diff staticcheck-extra vet test govulncheck install deploy: go-generated-prereqs
 
 ifneq ($(filter go-release.mk,$(GO_MK_MODULES)),)
 release: go-generated-prereqs

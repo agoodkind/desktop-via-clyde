@@ -12,13 +12,17 @@ EMBED_OUT="${REPO_ROOT}/internal/embed/shim"
 build_arch() {
     local arch="$1"
     local out_path="$2"
+    local built_bin=""
     cd "${SCRIPT_DIR}"
     swift build \
         --configuration release \
         --triple "${arch}-apple-macosx12.0" \
         --disable-sandbox >&2
-    local built_bin
-    built_bin="$(swift build --configuration release --triple "${arch}-apple-macosx12.0" --show-bin-path)/Shim"
+    if [[ -f "${SCRIPT_DIR}/.build/${arch}-apple-macosx/release/Shim" ]]; then
+        built_bin="${SCRIPT_DIR}/.build/${arch}-apple-macosx/release/Shim"
+    elif [[ -f "${SCRIPT_DIR}/.build/${arch}-apple-macosx12.0/release/Shim" ]]; then
+        built_bin="${SCRIPT_DIR}/.build/${arch}-apple-macosx12.0/release/Shim"
+    fi
     if [[ ! -f "${built_bin}" ]]; then
         echo "shim/build.sh: missing build output ${built_bin}" >&2
         return 1

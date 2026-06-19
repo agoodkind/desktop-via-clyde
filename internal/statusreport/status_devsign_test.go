@@ -24,6 +24,7 @@ func TestBuildTargetStatusDevelopmentSigningSkipsRealBinaryRequirement(t *testin
 
 	originalRuntimeBundleStatusesFn := runtimeBundleStatusesFn
 	originalReadBundleVersionFn := readBundleVersionFn
+	originalTrustedMITMCADriftFn := trustedMITMCADriftFn
 	runtimeBundleStatusesFn = func(_ context.Context, _ targets.Target, expectLocalTeam bool) []RuntimeBundleStatus {
 		if expectLocalTeam {
 			t.Fatal("development-signed bundle unexpectedly required local runtime teams")
@@ -42,7 +43,9 @@ func TestBuildTargetStatusDevelopmentSigningSkipsRealBinaryRequirement(t *testin
 	t.Cleanup(func() {
 		runtimeBundleStatusesFn = originalRuntimeBundleStatusesFn
 		readBundleVersionFn = originalReadBundleVersionFn
+		trustedMITMCADriftFn = originalTrustedMITMCADriftFn
 	})
+	trustedMITMCADriftFn = func(context.Context, targets.Target) string { return "" }
 
 	target := targets.Target{
 		ID:       "codex",
@@ -85,6 +88,7 @@ func TestBuildTargetStatusShimmedBundleStillRequiresRealBinary(t *testing.T) {
 
 	originalRuntimeBundleStatusesFn := runtimeBundleStatusesFn
 	originalReadBundleVersionFn := readBundleVersionFn
+	originalTrustedMITMCADriftFn := trustedMITMCADriftFn
 	runtimeBundleStatusesFn = func(_ context.Context, _ targets.Target, expectLocalTeam bool) []RuntimeBundleStatus {
 		if !expectLocalTeam {
 			t.Fatal("shimmed bundle unexpectedly skipped local runtime team check")
@@ -102,7 +106,9 @@ func TestBuildTargetStatusShimmedBundleStillRequiresRealBinary(t *testing.T) {
 	t.Cleanup(func() {
 		runtimeBundleStatusesFn = originalRuntimeBundleStatusesFn
 		readBundleVersionFn = originalReadBundleVersionFn
+		trustedMITMCADriftFn = originalTrustedMITMCADriftFn
 	})
+	trustedMITMCADriftFn = func(context.Context, targets.Target) string { return "" }
 
 	target := targets.Target{
 		ID:       "cursor",
@@ -184,6 +190,68 @@ func TestDevelopmentSigningInjectorDriftAcceptsExternalInjector(t *testing.T) {
 
 	if drift := developmentSigningInjectorDrift(target); drift != "" {
 		t.Fatalf("drift = %q, want none", drift)
+	}
+}
+
+func TestBuildTargetStatusDevelopmentSigningDriftsWhenMITMTrustMissing(t *testing.T) {
+	appPath := filepath.Join(t.TempDir(), "Codex.app")
+	if err := os.MkdirAll(filepath.Join(appPath, "Contents"), 0o755); err != nil {
+		t.Fatalf("MkdirAll app contents: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(appPath, "Contents", "embedded.provisionprofile"), []byte("profile"), 0o600); err != nil {
+		t.Fatalf("WriteFile embedded profile: %v", err)
+	}
+
+	originalRuntimeBundleStatusesFn := runtimeBundleStatusesFn
+	originalReadBundleVersionFn := readBundleVersionFn
+	originalTrustedMITMCADriftFn := trustedMITMCADriftFn
+	runtimeBundleStatusesFn = func(_ context.Context, _ targets.Target, expectLocalTeam bool) []RuntimeBundleStatus {
+		return []RuntimeBundleStatus{
+			{BundleID: "com.openai.codex.beta", Path: ".", TeamID: "H3BMXM4W7H", State: string(runtimeBundleStateLocal)},
+		}
+	}
+	readBundleVersionFn = func(target targets.Target) string {
+		if target.AppPath != appPath {
+			t.Fatalf("readBundleVersion target = %q, want %q", target.AppPath, appPath)
+		}
+		return "4009"
+	}
+	trustedMITMCADriftFn = func(context.Context, targets.Target) string {
+		return "launch policy CA is not trusted"
+	}
+	t.Cleanup(func() {
+		runtimeBundleStatusesFn = originalRuntimeBundleStatusesFn
+		readBundleVersionFn = originalReadBundleVersionFn
+		trustedMITMCADriftFn = originalTrustedMITMCADriftFn
+	})
+
+	target := targets.Target{
+		ID:       "codex",
+		AppPath:  appPath,
+		ExecName: "Codex (Beta)",
+		DevelopmentSigning: &targets.DevelopmentSigningPolicy{
+			Enabled: true,
+		},
+	}
+	multiState := state.MultiState{
+		Targets: map[string]state.TargetState{
+			"codex": {
+				PatchedVersion: "4009",
+				PatchedAt:      time.Unix(0, 0).UTC(),
+				SignIdentity:   "Developer ID Application: Alex Goodkind (H3BMXM4W7H)",
+			},
+		},
+	}
+
+	status, err := buildTargetStatus(context.Background(), target, multiState)
+	if err != nil {
+		t.Fatalf("buildTargetStatus: %v", err)
+	}
+	if status.State != "drifted" {
+		t.Fatalf("state = %q, want drifted", status.State)
+	}
+	if !strings.Contains(status.Notes, "launch policy CA is not trusted") {
+		t.Fatalf("notes = %q, want trust drift", status.Notes)
 	}
 }
 

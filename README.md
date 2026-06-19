@@ -1,33 +1,40 @@
 # desktop-via-clyde
 
-`desktop-via-clyde` patches configured macOS Electron app bundles so normal app launches run through Clyde-controlled local routing.
+`desktop-via-clyde` patches configured macOS desktop app bundles so normal
+launches use Clyde-controlled local routing.
 
-This project modifies third-party app bundles in place and re-signs them with a local signing identity. It is research software for machines and accounts the operator controls. It is not affiliated with, endorsed by, or supported by any upstream app vendor. The software is provided under the MIT License without warranty; see `LICENSE`.
+The tool modifies third-party app bundles in place and re-signs them with a
+local identity. It is research software for machines and accounts the operator
+controls. It is not affiliated with upstream app vendors. The software is
+provided under the MIT License without warranty; see `LICENSE`.
 
-## Runtime Locations
+## Current Truth
 
-The runtime config lives at `$XDG_CONFIG_HOME/desktop-via-clyde/config.toml`, with `$HOME/.config/desktop-via-clyde/config.toml` as the default path.
+Runtime behavior is config-driven. Read the active target definitions from
+`$XDG_CONFIG_HOME/desktop-via-clyde/config.toml`, or
+`$HOME/.config/desktop-via-clyde/config.toml` when `XDG_CONFIG_HOME` is unset.
 
-Runtime state lives under `$XDG_STATE_HOME/clyde`, with `$HOME/.local/state/clyde` as the default root. Patch state, helper installs, logs, and the Clyde MITM CA all live under that state root.
+Runtime state lives under `$XDG_STATE_HOME/clyde`, or `$HOME/.local/state/clyde`
+when `XDG_STATE_HOME` is unset. Patch state, logs, helper installs, generated
+signing assets, and the Clyde MITM CA live under that state root.
 
-The checked-in config fixture lives under `internal/testconfig/testdata`.
+Use the CLI help and status output for the current command surface:
 
-## Patched Bundle Shape
+```sh
+desktop-via-clyde --help
+desktop-via-clyde status
+```
 
-The patched app executable is the Swift launch shim at `<App>.app/Contents/MacOS/<ExecName>`.
+## Source Owners
 
-The original vendor executable is kept at `<App>.app/Contents/MacOS/<ExecName>.real`.
+`config.example.toml` documents the config shape. The schema lives in
+`internal/spec`, and target materialization lives in `internal/config`,
+`internal/extensions`, and `internal/targets`.
 
-The launch policy is serialized into `<App>.app/Contents/Resources/<ExecName>.launch-policy.json`.
+Patch orchestration lives in `internal/patch`. Development-profile signing and
+external injector setup live in `internal/devsign`.
 
-Codex Desktop resolves its bundled CLI through `<Codex.app>/Contents/Resources/codex`.
+Upgrade and updater behavior live in `internal/upgrade` and `internal/daemon`.
 
-## Source Locations
-
-The CLI and linked extension composition live under `cmd/desktop-via-clyde` and `internal/composition`.
-
-Config loading and target materialization live under `internal/config`, `internal/extensions`, and `internal/targets`.
-
-Patch orchestration and launch-policy serialization live under `internal/patch`.
-
-The Swift launch shim lives under `shim`, and its embedded payload lives under `internal/embed`.
+The Swift launch shim lives in `shim`. The external injector source lives in
+`injector`, with embedded build outputs under `internal/embed`.
