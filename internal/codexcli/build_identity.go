@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -192,137 +195,218 @@ func prepareStampedBuildSource(
 		log.ErrorContext(ctx, "codexcli.prepare_stamped_build_source.mkdir_build_root_failed", "err", err)
 		return "", fmt.Errorf("create build root: %w", err)
 	}
-	if err := os.RemoveAll(buildDir); err != nil {
-		log.ErrorContext(ctx, "codexcli.prepare_stamped_build_source.remove_build_dir_failed", "err", err)
-		return "", fmt.Errorf("remove stale build source: %w", err)
-	}
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
 		log.ErrorContext(ctx, "codexcli.prepare_stamped_build_source.mkdir_build_dir_failed", "err", err)
 		return "", fmt.Errorf("create build source: %w", err)
-	}
-	archivePath := filepath.Join(buildRoot, ".source-"+identity.BuildHash+".tar")
-	defer func() {
-		_ = os.Remove(archivePath)
-	}()
-	if err := r.RunWithHeartbeat(ctx,
-		"codex-cli: archiving Codex source",
-		30*time.Second,
-		"git",
-		"-C",
-		sourceDir,
-		"archive",
-		"--format=tar",
-		"-o",
-		archivePath,
-		"HEAD",
-	); err != nil {
-		log.ErrorContext(ctx, "codexcli.prepare_stamped_build_source.archive_failed", "err", err)
-		return "", fmt.Errorf("archive Codex source: %w", err)
-	}
-	if err := r.RunWithHeartbeat(ctx,
-		"codex-cli: extracting Codex source",
-		30*time.Second,
-		"tar",
-		"-xf",
-		archivePath,
-		"-C",
-		buildDir,
-	); err != nil {
-		log.ErrorContext(ctx, "codexcli.prepare_stamped_build_source.extract_failed", "err", err)
-		return "", fmt.Errorf("extract Codex source archive: %w", err)
 	}
 	if err := os.MkdirAll(targetCacheDir, 0o755); err != nil {
 		log.ErrorContext(ctx, "codexcli.prepare_stamped_build_source.mkdir_target_cache_failed", "err", err)
 		return "", fmt.Errorf("create build target cache: %w", err)
 	}
+	// Capture the base version the previous build stamped before rsync overwrites the
+	// work manifest. The workspace mtime is only preserved when the base is unchanged,
+	// so a base bump (new release tag) advances the mtime and forces cargo to rebuild
+	// the non-app crates with the new base.
+	previousBaseVersion, _ := readTomlPackageVersion(filepath.Join(buildDir, "codex-rs", "Cargo.toml"), "[workspace.package]")
+	// Mirror the source working tree into a reused build dir with rsync rather than
+	// re-extracting a git archive. git archive rewrites every file mtime to the commit
+	// time, so each commit invalidates Cargo's fingerprints in the shared target cache
+	// and forces a near-full recompile. rsync -a preserves mtimes, so unchanged files
+	// keep their cache entries warm, while --delete drops files removed upstream. The
+	// target excludes keep the symlinked cache and any in-place build output from being
+	// copied into the work tree.
+	if err := r.RunWithHeartbeat(ctx,
+		"codex-cli: syncing Codex source",
+		30*time.Second,
+		"rsync",
+		"-a",
+		"--delete",
+		"--exclude",
+		".git/",
+		"--exclude",
+		"target/",
+		sourceDir+"/",
+		buildDir+"/",
+	); err != nil {
+		log.ErrorContext(ctx, "codexcli.prepare_stamped_build_source.sync_failed", "err", err)
+		return "", fmt.Errorf("sync Codex source: %w", err)
+	}
+	// Point the work tree's Cargo target at the shared cache. The sync preserves a
+	// correct symlink across builds, so only replace the path when it is missing or wrong.
 	targetPath := filepath.Join(buildDir, "codex-rs", "target")
-	if err := os.RemoveAll(targetPath); err != nil {
-		log.ErrorContext(ctx, "codexcli.prepare_stamped_build_source.remove_target_failed", "err", err)
-		return "", fmt.Errorf("remove build target path: %w", err)
+	if existing, linkErr := os.Readlink(targetPath); linkErr != nil || existing != targetCacheDir {
+		if err := os.RemoveAll(targetPath); err != nil {
+			log.ErrorContext(ctx, "codexcli.prepare_stamped_build_source.remove_target_failed", "err", err)
+			return "", fmt.Errorf("remove build target path: %w", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			log.ErrorContext(ctx, "codexcli.prepare_stamped_build_source.mkdir_target_parent_failed", "err", err)
+			return "", fmt.Errorf("create build target parent: %w", err)
+		}
+		if err := os.Symlink(targetCacheDir, targetPath); err != nil {
+			log.ErrorContext(ctx, "codexcli.prepare_stamped_build_source.symlink_target_failed", "err", err)
+			return "", fmt.Errorf("link build target cache: %w", err)
+		}
 	}
-	if err := os.Symlink(targetCacheDir, targetPath); err != nil {
-		log.ErrorContext(ctx, "codexcli.prepare_stamped_build_source.symlink_target_failed", "err", err)
-		return "", fmt.Errorf("link build target cache: %w", err)
-	}
-	if err := stampCodexBuildSource(buildDir, identity); err != nil {
+	if err := stampCodexBuildSource(buildDir, identity, previousBaseVersion); err != nil {
 		return "", err
 	}
 	return buildDir, nil
 }
 
-func stampCodexBuildSource(buildDir string, identity codexBuildIdentity) error {
-	return writeWorkspacePackageVersion(
-		filepath.Join(buildDir, "codex-rs", "Cargo.toml"),
-		identity.PackageVersion,
-	)
+// appFacingVersionCrates carry the full per-commit version so the app and
+// `codex --version` show the exact build. Every other crate, and the workspace
+// base version, stays at the stable release version so cargo caches the heavy
+// crates (core) and the external dependency wall across commits; a new commit
+// then recompiles only these few crates plus the final link instead of the
+// whole 91-crate workspace.
+var appFacingVersionCrates = []string{
+	"cli",
+	"app-server",
+	"app-server-daemon",
+	"tui",
+	"exec",
+	"mcp-server",
 }
 
-func writeWorkspacePackageVersion(path string, packageVersion string) error {
-	log := codexcliLog.With("function", "writeWorkspacePackageVersion")
-	cleanPath := filepath.Clean(path)
-	log.Info("codexcli.write_workspace_package_version.boundary", "path", cleanPath, "package_version", packageVersion)
-	if err := validateStampedPackageVersion(packageVersion); err != nil {
-		log.Error("codexcli.write_workspace_package_version.invalid_version", "err", err)
+func stampCodexBuildSource(buildDir string, identity codexBuildIdentity, previousBaseVersion string) error {
+	log := codexcliLog.With("function", "stampCodexBuildSource")
+	if err := validateStampedPackageVersion(identity.PackageVersion); err != nil {
+		log.Error("codexcli.stamp_codex_build_source.invalid_version", "err", err)
 		return err
 	}
+	if !isStableSemverCore(identity.BaseVersion) {
+		err := fmt.Errorf("invalid base version %q", identity.BaseVersion)
+		log.Error("codexcli.stamp_codex_build_source.invalid_base_version", "err", err)
+		return err
+	}
+	codexRoot := filepath.Join(buildDir, "codex-rs")
+	// Preserve the workspace manifest's mtime (the rsync-copied source mtime) only when
+	// the base version is unchanged from the previous build, so across normal commits the
+	// identical manifest keeps cargo from rechecking all 91 members. On a base bump the
+	// mtime advances, forcing cargo to rebuild the non-app crates with the new base. The
+	// app crate manifests never preserve their mtime: their per-commit version changes, so
+	// cargo must see the change and recompile them.
+	preserveWorkspaceMtime := previousBaseVersion == identity.BaseVersion
+	if err := stampPackageVersionInTable(filepath.Join(codexRoot, "Cargo.toml"), "[workspace.package]", identity.BaseVersion, preserveWorkspaceMtime); err != nil {
+		return err
+	}
+	for _, crate := range appFacingVersionCrates {
+		cratePath := filepath.Join(codexRoot, crate, "Cargo.toml")
+		if _, err := os.Stat(cratePath); errors.Is(err, os.ErrNotExist) {
+			log.Warn("codexcli.stamp_codex_build_source.crate_missing", "crate", crate)
+			continue
+		}
+		if err := stampPackageVersionInTable(cratePath, "[package]", identity.PackageVersion, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func stampPackageVersionInTable(path string, tableHeader string, version string, preserveMtime bool) error {
+	log := codexcliLog.With("function", "stampPackageVersionInTable")
+	cleanPath := filepath.Clean(path)
+	log.Info("codexcli.stamp_package_version_in_table.boundary", "path", cleanPath, "table", tableHeader, "version", version)
 	info, err := os.Stat(cleanPath)
 	if err != nil {
-		log.Error("codexcli.write_workspace_package_version.stat_failed", "err", err)
+		log.Error("codexcli.stamp_package_version_in_table.stat_failed", "err", err)
 		return fmt.Errorf("stat %s: %w", cleanPath, err)
 	}
+	sourceModTime := info.ModTime()
 	data, err := os.ReadFile(cleanPath)
 	if err != nil {
-		log.Error("codexcli.write_workspace_package_version.read_failed", "err", err)
+		log.Error("codexcli.stamp_package_version_in_table.read_failed", "err", err)
 		return fmt.Errorf("read %s: %w", cleanPath, err)
 	}
-	contents := string(data)
-	lines := strings.SplitAfter(contents, "\n")
-	inWorkspacePackage := false
-	foundWorkspacePackage := false
-	stampedVersion := false
+	lines := strings.SplitAfter(string(data), "\n")
+	inTable := false
+	foundTable := false
+	stamped := false
 	for index, line := range lines {
-		trimmedLine := strings.TrimSpace(strings.TrimSuffix(line, "\n"))
-		trimmedLine = strings.TrimSuffix(trimmedLine, "\r")
+		trimmedLine := strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"))
 		if strings.HasPrefix(trimmedLine, "[") && strings.HasSuffix(trimmedLine, "]") {
-			if inWorkspacePackage && !stampedVersion {
-				err := fmt.Errorf("stamp %s: workspace.package version was not found", cleanPath)
-				log.Error("codexcli.write_workspace_package_version.missing_version", "err", err)
+			if inTable && !stamped {
+				err := fmt.Errorf("stamp %s: %s version was not found", cleanPath, tableHeader)
+				log.Error("codexcli.stamp_package_version_in_table.missing_version", "err", err)
 				return err
 			}
-			inWorkspacePackage = trimmedLine == "[workspace.package]"
-			if inWorkspacePackage {
-				foundWorkspacePackage = true
+			inTable = trimmedLine == tableHeader
+			if inTable {
+				foundTable = true
 			}
 			continue
 		}
-		if !inWorkspacePackage || !isTomlVersionAssignment(trimmedLine) {
+		if !inTable || !isTomlVersionAssignment(trimmedLine) {
 			continue
 		}
-		lines[index] = stampedVersionLine(line, packageVersion)
-		stampedVersion = true
+		lines[index] = stampedVersionLine(line, version)
+		stamped = true
 		break
 	}
-	if !foundWorkspacePackage {
-		err := fmt.Errorf("stamp %s: workspace.package table was not found", cleanPath)
-		log.Error("codexcli.write_workspace_package_version.missing_table", "err", err)
+	if !foundTable {
+		err := fmt.Errorf("stamp %s: %s table was not found", cleanPath, tableHeader)
+		log.Error("codexcli.stamp_package_version_in_table.missing_table", "err", err)
 		return err
 	}
-	if !stampedVersion {
-		err := fmt.Errorf("stamp %s: workspace.package version was not found", cleanPath)
-		log.Error("codexcli.write_workspace_package_version.missing_version", "err", err)
+	if !stamped {
+		err := fmt.Errorf("stamp %s: %s version was not found", cleanPath, tableHeader)
+		log.Error("codexcli.stamp_package_version_in_table.missing_version", "err", err)
 		return err
 	}
-	// #nosec G703 -- cleanPath is the fixed Cargo.toml path inside the local archived build copy.
+	// #nosec G703 -- cleanPath is a fixed Cargo.toml path inside the local build copy.
 	if err := os.WriteFile(cleanPath, []byte(strings.Join(lines, "")), info.Mode().Perm()); err != nil {
-		log.Error("codexcli.write_workspace_package_version.write_failed", "err", err)
+		log.Error("codexcli.stamp_package_version_in_table.write_failed", "err", err)
 		return fmt.Errorf("write %s: %w", cleanPath, err)
+	}
+	if preserveMtime {
+		if err := os.Chtimes(cleanPath, sourceModTime, sourceModTime); err != nil {
+			log.Error("codexcli.stamp_package_version_in_table.chtimes_failed", "err", err)
+			return fmt.Errorf("restore mtime %s: %w", cleanPath, err)
+		}
 	}
 	return nil
 }
 
 func isTomlVersionAssignment(trimmedLine string) bool {
 	left, _, ok := strings.Cut(trimmedLine, "=")
-	return ok && strings.TrimSpace(left) == "version"
+	if !ok {
+		return false
+	}
+	key := strings.TrimSpace(left)
+	return key == "version" || key == "version.workspace"
+}
+
+// readTomlPackageVersion returns the quoted version assigned in the given table,
+// e.g. `version = "0.141.0"` under [workspace.package]. It returns ("", false)
+// when the file is missing, the table is absent, or the version inherits the
+// workspace (version.workspace = true), so a prior build's stamped base can be
+// compared against the current one.
+func readTomlPackageVersion(path string, tableHeader string) (string, bool) {
+	data, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return "", false
+	}
+	inTable := false
+	for line := range strings.SplitSeq(string(data), "\n") {
+		trimmedLine := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if strings.HasPrefix(trimmedLine, "[") && strings.HasSuffix(trimmedLine, "]") {
+			inTable = trimmedLine == tableHeader
+			continue
+		}
+		if !inTable {
+			continue
+		}
+		left, right, ok := strings.Cut(trimmedLine, "=")
+		if !ok || strings.TrimSpace(left) != "version" {
+			continue
+		}
+		if value, err := strconv.Unquote(strings.TrimSpace(right)); err == nil {
+			return value, true
+		}
+		return "", false
+	}
+	return "", false
 }
 
 func stampedVersionLine(existingLine string, packageVersion string) string {
@@ -402,4 +486,163 @@ func isHexIdentifier(value string, length int) bool {
 
 func isLowerHex(runeValue rune) bool {
 	return unicode.IsDigit(runeValue) || (runeValue >= 'a' && runeValue <= 'f')
+}
+
+// targetCacheKeepVariants is how many fingerprinted variants of each crate to
+// retain in the shared Cargo target cache. Every scheduled build is a new commit
+// that is never revisited, so keeping only the newest discards nothing useful.
+const targetCacheKeepVariants = 1
+
+// cargoArtifactPattern splits a cargo output name into a crate base and its
+// trailing metadata hash, e.g. "libcodex_core-1a2b3c4d5e6f7a8b.rlib" ->
+// ("libcodex_core", "1a2b3c4d5e6f7a8b"). The greedy prefix ensures the LAST
+// "-<hex>" segment (cargo's metadata hash) is taken as the hash.
+var cargoArtifactPattern = regexp.MustCompile(`^(.*)-([0-9a-fA-F]{8,})(\..*)?$`)
+
+type cargoArtifactVariant struct {
+	paths   []string
+	modTime time.Time
+}
+
+// pruneTargetCacheArtifacts bounds the shared Cargo target cache by keeping only
+// the newest `keep` fingerprinted variants of each crate base name. cargo never
+// evicts superseded artifacts, so a scheduler that builds a new commit on every
+// run otherwise grows target/deps without bound. What this primarily reclaims is
+// the per-commit churn of the app-facing workspace crates, whose hash changes
+// every commit. Variants are grouped by base name, so a crate present at multiple
+// versions (some external deps) may have an older-mtime variant pruned; cargo and
+// sccache rebuild it cheaply on the next build, so the cache stays correct but not
+// strictly minimal. It is best-effort: failures are logged and never abort the
+// build.
+func pruneTargetCacheArtifacts(ctx context.Context, r *patch.Runner, targetCacheDir string, keep int) {
+	log := codexcliLog.With("function", "pruneTargetCacheArtifacts")
+	log.InfoContext(ctx, "codexcli.prune_target_cache.boundary", "target_cache_dir", targetCacheDir, "keep", keep)
+	if r.DryRun {
+		return
+	}
+	if keep < 1 {
+		keep = 1
+	}
+	removed := 0
+	for _, profileDir := range discoverCargoProfileDirs(targetCacheDir) {
+		for _, sub := range []string{"deps", ".fingerprint", "build", "incremental"} {
+			removed += pruneCargoArtifactDir(ctx, filepath.Join(profileDir, sub), keep)
+		}
+	}
+	if removed > 0 {
+		notef(r, fmt.Sprintf("codex-cli: pruned %d superseded build artifact variant(s) from target cache", removed))
+		log.InfoContext(ctx, "codexcli.prune_target_cache.completed", "removed_variants", removed)
+	}
+}
+
+// discoverCargoProfileDirs finds cargo profile directories under the target
+// cache, both host (target/<profile>) and target-triple (target/<triple>/<profile>).
+// A profile dir is any directory that contains a "deps" subdir, so profile and
+// triple names are not hardcoded.
+func discoverCargoProfileDirs(targetCacheDir string) []string {
+	var dirs []string
+	topEntries, err := os.ReadDir(targetCacheDir)
+	if err != nil {
+		return dirs
+	}
+	for _, top := range topEntries {
+		if !top.IsDir() {
+			continue
+		}
+		topPath := filepath.Join(targetCacheDir, top.Name())
+		if isDir(filepath.Join(topPath, "deps")) {
+			dirs = append(dirs, topPath)
+		}
+		subEntries, err := os.ReadDir(topPath)
+		if err != nil {
+			continue
+		}
+		for _, sub := range subEntries {
+			if !sub.IsDir() {
+				continue
+			}
+			subPath := filepath.Join(topPath, sub.Name())
+			if isDir(filepath.Join(subPath, "deps")) {
+				dirs = append(dirs, subPath)
+			}
+		}
+	}
+	return dirs
+}
+
+// pruneCargoArtifactDir keeps the newest `keep` hash variants of each crate base
+// in dir and removes the rest. It returns the number of variants removed.
+func pruneCargoArtifactDir(ctx context.Context, dir string, keep int) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	groups := map[string]map[string]*cargoArtifactVariant{}
+	for _, entry := range entries {
+		base, hash, ok := parseCargoArtifactName(entry.Name())
+		if !ok {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		byHash := groups[base]
+		if byHash == nil {
+			byHash = map[string]*cargoArtifactVariant{}
+			groups[base] = byHash
+		}
+		variant := byHash[hash]
+		if variant == nil {
+			variant = &cargoArtifactVariant{paths: nil, modTime: time.Time{}}
+			byHash[hash] = variant
+		}
+		variant.paths = append(variant.paths, filepath.Join(dir, entry.Name()))
+		if info.ModTime().After(variant.modTime) {
+			variant.modTime = info.ModTime()
+		}
+	}
+	removed := 0
+	for _, byHash := range groups {
+		if len(byHash) <= keep {
+			continue
+		}
+		removed += removeStaleVariants(ctx, byHash, keep)
+	}
+	return removed
+}
+
+// removeStaleVariants deletes all but the newest `keep` hash variants in byHash
+// and returns how many variants it removed.
+func removeStaleVariants(ctx context.Context, byHash map[string]*cargoArtifactVariant, keep int) int {
+	log := codexcliLog.With("function", "removeStaleVariants")
+	variants := make([]*cargoArtifactVariant, 0, len(byHash))
+	for _, variant := range byHash {
+		variants = append(variants, variant)
+	}
+	sort.Slice(variants, func(i, j int) bool {
+		return variants[i].modTime.After(variants[j].modTime)
+	})
+	removed := 0
+	for _, variant := range variants[keep:] {
+		failed := false
+		for _, path := range variant.paths {
+			if err := os.RemoveAll(path); err != nil {
+				log.ErrorContext(ctx, "codexcli.prune_target_cache.remove_failed", "err", err, "path", path)
+				failed = true
+			}
+		}
+		if !failed {
+			removed++
+		}
+	}
+	return removed
+}
+
+func parseCargoArtifactName(name string) (string, string, bool) {
+	match := cargoArtifactPattern.FindStringSubmatch(name)
+	if match == nil {
+		return "", "", false
+	}
+	return match[1], match[2], true
 }
