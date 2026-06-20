@@ -23,6 +23,12 @@ GO_BUILD_EXTRA_FLAGS := -trimpath
 GO_MK_MODULES := go-build.mk
 GO_MK_DEV_DIR ?= $(HOME)/Sites/go-makefile
 
+# Codegen hook: go.mk runs go-generated-prereqs (proto plus the go:embed shim and
+# injector payloads) as an order-only prerequisite of every build, lint, vet,
+# test, and govulncheck target, so the embedded files exist before any target
+# compiles a package that go:embeds them.
+GO_MK_GENERATE := go-generated-prereqs
+
 # Machine-local signing and release overrides live in untracked config.mk.
 -include config.mk
 
@@ -81,13 +87,13 @@ injector-test:
 injector-clean:
 	$(MAKE) -C $(REPO_ROOT)/injector clean
 
-# Package loading, vet, test, and the shared analyzers need the embedded Swift
-# shim and injector present because go:embed validates files during load.
-build build-check check lint lint-golangci lint-format lint-files lint-diff staticcheck-extra vet test govulncheck install deploy: go-generated-prereqs
-
-ifneq ($(filter go-release.mk,$(GO_MK_MODULES)),)
-release: go-generated-prereqs
-endif
+# go.mk wires go-generated-prereqs (via GO_MK_GENERATE above) into every build,
+# lint, vet, test, govulncheck, install, and release target. The targets below
+# sit outside that central set but still load the go:embed package, so they keep
+# the prerequisite here. lint-format is one of them: unlike a C-parser consumer,
+# this repo's generated code is Go and embedded payloads, so the formatter's
+# package load fails when go:embed targets are missing.
+lint-format lint-files lint-diff: | go-generated-prereqs
 
 help: dvc-help-extras
 
