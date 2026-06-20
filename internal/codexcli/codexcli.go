@@ -742,6 +742,43 @@ func readPackageMetadata(packageDir string, packageVariant string) (packageMetad
 	return metadata, nil
 }
 
+// overwriteCodexPackageVersion sets the version field in codex-package.json to
+// the full per-commit version. The package script derives the metadata version
+// from the workspace base version, which is now kept stable for build caching,
+// so the per-commit identity must be written back here to keep release-reuse
+// keying and the metadata check accurate. Other fields are preserved verbatim.
+func overwriteCodexPackageVersion(packageDir string, version string) error {
+	log := codexcliLog.With("function", "overwriteCodexPackageVersion")
+	path := filepath.Join(packageDir, "codex-package.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Error("codexcli.overwrite_codex_package_version.read_failed", "err", err)
+		return fmt.Errorf("read package metadata: %w", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		log.Error("codexcli.overwrite_codex_package_version.parse_failed", "err", err)
+		return fmt.Errorf("parse package metadata: %w", err)
+	}
+	encoded, err := json.Marshal(version)
+	if err != nil {
+		log.Error("codexcli.overwrite_codex_package_version.encode_failed", "err", err)
+		return fmt.Errorf("encode package version: %w", err)
+	}
+	fields["version"] = encoded
+	out, err := json.Marshal(fields)
+	if err != nil {
+		log.Error("codexcli.overwrite_codex_package_version.marshal_failed", "err", err)
+		return fmt.Errorf("marshal package metadata: %w", err)
+	}
+	// #nosec G306 -- package metadata is non-sensitive build output.
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		log.Error("codexcli.overwrite_codex_package_version.write_failed", "err", err)
+		return fmt.Errorf("write package metadata: %w", err)
+	}
+	return nil
+}
+
 func latestMainReleaseDir(packageHome string) string {
 	return filepath.Join(
 		packageHome,

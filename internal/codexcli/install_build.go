@@ -3,6 +3,7 @@ package codexcli
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"goodkind.io/desktop-via-clyde/internal/patch"
@@ -92,6 +93,12 @@ func buildStampedPackage(
 	if err := buildPackage(ctx, r, buildSourceDir, opts.PackageDir, opts.PackageVariant, target, entrypointPath); err != nil {
 		return packageMetadata{}, err
 	}
+	if !opts.DryRun {
+		if err := overwriteCodexPackageVersion(opts.PackageDir, identity.PackageVersion); err != nil {
+			return packageMetadata{}, err
+		}
+	}
+	pruneTargetCacheArtifacts(ctx, r, filepath.Join(codexBuildRoot(opts.SourceDir), "target"), targetCacheKeepVariants)
 	return readStampedPackageMetadata(r, opts, target, identity)
 }
 

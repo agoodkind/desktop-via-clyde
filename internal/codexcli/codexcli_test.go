@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/patch"
@@ -329,7 +330,7 @@ func TestBuildHashChangesWithBuildInputs(t *testing.T) {
 	}
 }
 
-func TestStampCodexBuildSourceWritesOnlyCargoToml(t *testing.T) {
+func TestStampCodexBuildSourceSplitsWorkspaceAndAppCrateVersions(t *testing.T) {
 	buildDir := t.TempDir()
 	identity := newBuildIdentity(
 		"0.137.0",
@@ -340,26 +341,372 @@ func TestStampCodexBuildSourceWritesOnlyCargoToml(t *testing.T) {
 		"codex",
 		"codex",
 	)
-	cargoPath := filepath.Join(buildDir, "codex-rs", "Cargo.toml")
-	versionPath := filepath.Join(buildDir, "codex-rs", "tui", "src", "version.rs")
-	mainPath := filepath.Join(buildDir, "codex-rs", "cli", "src", "main.rs")
-	writeFixtureFile(t, cargoPath, "[workspace]\nmembers = []\n\n[workspace.package]\nedition = \"2024\"\nversion = \"0.0.0\"\n")
+	codexRoot := filepath.Join(buildDir, "codex-rs")
+	workspacePath := filepath.Join(codexRoot, "Cargo.toml")
+	writeFixtureFile(t, workspacePath, "[workspace]\nmembers = []\n\n[workspace.package]\nedition = \"2024\"\nversion = \"0.0.0\"\n")
+	// App-facing crates inherit the workspace version via version.workspace = true.
+	appCrate := filepath.Join(codexRoot, "cli", "Cargo.toml")
+	tuiCrate := filepath.Join(codexRoot, "tui", "Cargo.toml")
+	writeFixtureFile(t, appCrate, "[package]\nname = \"codex-cli\"\nversion.workspace = true\nedition.workspace = true\n")
+	writeFixtureFile(t, tuiCrate, "[package]\nname = \"codex-tui\"\nversion.workspace = true\n")
+	// A non-app crate stays on the stable base version (left inheriting the workspace).
+	coreCrate := filepath.Join(codexRoot, "core", "Cargo.toml")
+	writeFixtureFile(t, coreCrate, "[package]\nname = \"codex-core\"\nversion.workspace = true\n")
+	// Source files must never be modified by stamping.
+	versionPath := filepath.Join(codexRoot, "tui", "src", "version.rs")
 	writeFixtureFile(t, versionPath, "pub const CODEX_CLI_VERSION: &str = env!(\"CARGO_PKG_VERSION\");\n")
-	writeFixtureFile(t, mainPath, "mod doctor;\n")
 
-	if err := stampCodexBuildSource(buildDir, identity); err != nil {
+	if err := stampCodexBuildSource(buildDir, identity, ""); err != nil {
 		t.Fatalf("stampCodexBuildSource: %v", err)
 	}
 
-	cargoToml := readFixtureFile(t, cargoPath)
-	if !strings.Contains(cargoToml, `version = "`+identity.PackageVersion+`"`) {
-		t.Fatalf("Cargo.toml missing stamped package version:\n%s", cargoToml)
+	if got := readFixtureFile(t, workspacePath); !strings.Contains(got, `version = "`+identity.BaseVersion+`"`) {
+		t.Fatalf("workspace Cargo.toml should hold the stable base version:\n%s", got)
+	}
+	for _, cratePath := range []string{appCrate, tuiCrate} {
+		got := readFixtureFile(t, cratePath)
+		if !strings.Contains(got, `version = "`+identity.PackageVersion+`"`) {
+			t.Fatalf("app crate %s missing full per-commit version:\n%s", cratePath, got)
+		}
+	}
+	if got := readFixtureFile(t, coreCrate); !strings.Contains(got, "version.workspace = true") {
+		t.Fatalf("non-app crate core should keep inheriting the workspace version:\n%s", got)
 	}
 	if got := readFixtureFile(t, versionPath); got != "pub const CODEX_CLI_VERSION: &str = env!(\"CARGO_PKG_VERSION\");\n" {
 		t.Fatalf("version.rs was modified:\n%s", got)
 	}
-	if got := readFixtureFile(t, mainPath); got != "mod doctor;\n" {
-		t.Fatalf("main.rs was modified:\n%s", got)
+}
+
+func TestStampPackageVersionInTableMtimeBehavior(t *testing.T) {
+	past := time.Unix(1_700_000_000, 0)
+
+	// Workspace manifest: preserveMtime keeps the source mtime so cargo does not
+	// recheck the whole workspace when the base version is unchanged.
+	wsPath := filepath.Join(t.TempDir(), "Cargo.toml")
+	writeFixtureFile(t, wsPath, "[workspace.package]\nversion = \"0.0.0\"\n")
+	setMtime(t, wsPath, past)
+	if err := stampPackageVersionInTable(wsPath, "[workspace.package]", "0.141.0", true); err != nil {
+		t.Fatalf("stamp workspace: %v", err)
+	}
+	wsInfo, err := os.Stat(wsPath)
+	if err != nil {
+		t.Fatalf("stat workspace: %v", err)
+	}
+	if !wsInfo.ModTime().Truncate(time.Second).Equal(past.Truncate(time.Second)) {
+		t.Fatalf("workspace mtime not preserved: got %v want %v", wsInfo.ModTime(), past)
+	}
+	if got := readFixtureFile(t, wsPath); !strings.Contains(got, `version = "0.141.0"`) {
+		t.Fatalf("workspace version not stamped:\n%s", got)
+	}
+
+	// App crate manifest: mtime must advance so cargo recompiles when the
+	// per-commit version changes.
+	appPath := filepath.Join(t.TempDir(), "Cargo.toml")
+	writeFixtureFile(t, appPath, "[package]\nname = \"codex-cli\"\nversion.workspace = true\n")
+	setMtime(t, appPath, past)
+	full := "0.141.0-main.64bdeed9f7ad+tree.53a0b16bef4b.build.a9b9299c326b"
+	if err := stampPackageVersionInTable(appPath, "[package]", full, false); err != nil {
+		t.Fatalf("stamp app crate: %v", err)
+	}
+	appInfo, err := os.Stat(appPath)
+	if err != nil {
+		t.Fatalf("stat app crate: %v", err)
+	}
+	if appInfo.ModTime().Truncate(time.Second).Equal(past.Truncate(time.Second)) {
+		t.Fatalf("app crate mtime should advance, still %v", appInfo.ModTime())
+	}
+	if got := readFixtureFile(t, appPath); !strings.Contains(got, `version = "`+full+`"`) {
+		t.Fatalf("app crate version not stamped:\n%s", got)
+	}
+}
+
+func TestStampCodexBuildSourceWorkspaceMtimeGatedOnBase(t *testing.T) {
+	past := time.Unix(1_700_000_000, 0)
+	newID := func() codexBuildIdentity {
+		return newBuildIdentity(
+			"0.141.0", "80b65e994573", "abcdef0123456789abcdef0123456789abcdef01",
+			"aarch64-apple-darwin", BuildModeLocalFast, "codex", "codex",
+		)
+	}
+	stampWorkspace := func(t *testing.T, previousBase string) time.Time {
+		t.Helper()
+		buildDir := t.TempDir()
+		wsPath := filepath.Join(buildDir, "codex-rs", "Cargo.toml")
+		writeFixtureFile(t, wsPath, "[workspace.package]\nversion = \"0.0.0\"\n")
+		setMtime(t, wsPath, past)
+		if err := stampCodexBuildSource(buildDir, newID(), previousBase); err != nil {
+			t.Fatalf("stampCodexBuildSource: %v", err)
+		}
+		info, err := os.Stat(wsPath)
+		if err != nil {
+			t.Fatalf("stat workspace: %v", err)
+		}
+		return info.ModTime()
+	}
+
+	// Same base as the previous build: mtime preserved so cargo skips the recheck.
+	if got := stampWorkspace(t, "0.141.0"); !got.Truncate(time.Second).Equal(past.Truncate(time.Second)) {
+		t.Fatalf("same-base workspace mtime should be preserved, got %v", got)
+	}
+	// Base bump: mtime advances so cargo rebuilds non-app crates with the new base.
+	if got := stampWorkspace(t, "0.140.0"); got.Truncate(time.Second).Equal(past.Truncate(time.Second)) {
+		t.Fatalf("base-bump workspace mtime should advance, still %v", got)
+	}
+}
+
+func TestOverwriteCodexPackageVersionPreservesOtherFields(t *testing.T) {
+	packageDir := t.TempDir()
+	path := filepath.Join(packageDir, "codex-package.json")
+	writeFixtureFile(t, path, `{"layoutVersion":1,"version":"0.137.0","target":"aarch64-apple-darwin","variant":"codex"}`)
+	full := "0.137.0-main.80b65e994573+tree.abcdef012345.build.0123456789ab"
+
+	if err := overwriteCodexPackageVersion(packageDir, full); err != nil {
+		t.Fatalf("overwriteCodexPackageVersion: %v", err)
+	}
+
+	metadata, err := readPackageMetadata(packageDir, "codex")
+	if err != nil {
+		t.Fatalf("readPackageMetadata: %v", err)
+	}
+	if metadata.Version != full {
+		t.Fatalf("version = %q, want %q", metadata.Version, full)
+	}
+	if metadata.Target != "aarch64-apple-darwin" || metadata.Variant != "codex" {
+		t.Fatalf("other fields not preserved: %+v", metadata)
+	}
+	if got := readFixtureFile(t, path); !strings.Contains(got, `"layoutVersion":1`) {
+		t.Fatalf("layoutVersion not preserved:\n%s", got)
+	}
+}
+
+func TestPrepareStampedBuildSourceMirrorsSourceWithSharedTargetCache(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not available")
+	}
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	writeFixtureFile(t, filepath.Join(sourceDir, "codex-rs", "Cargo.toml"),
+		"[workspace]\nmembers = []\n\n[workspace.package]\nedition = \"2024\"\nversion = \"0.0.0\"\n")
+	writeFixtureFile(t, filepath.Join(sourceDir, "codex-rs", "core", "src", "lib.rs"), "pub fn run() {}\n")
+	// An in-place build target in the source must never be copied into the work tree.
+	writeFixtureFile(t, filepath.Join(sourceDir, "codex-rs", "target", "junk.bin"), "stale build output\n")
+
+	identity := newBuildIdentity(
+		"0.137.0", "80b65e994573", "abcdef0123456789abcdef0123456789abcdef01",
+		"aarch64-apple-darwin", BuildModeLocalFast, "codex", "codex",
+	)
+	r := patch.NewRunner(context.Background(), false, &bytes.Buffer{})
+	buildDir, err := prepareStampedBuildSource(context.Background(), r, sourceDir, identity)
+	if err != nil {
+		t.Fatalf("prepareStampedBuildSource: %v", err)
+	}
+
+	wantBuildDir := filepath.Join(root, "build", "work")
+	if buildDir != wantBuildDir {
+		t.Fatalf("buildDir = %q, want %q", buildDir, wantBuildDir)
+	}
+	cargoToml := readFixtureFile(t, filepath.Join(buildDir, "codex-rs", "Cargo.toml"))
+	if !strings.Contains(cargoToml, `version = "`+identity.BaseVersion+`"`) {
+		t.Fatalf("workspace Cargo.toml missing stable base version:\n%s", cargoToml)
+	}
+	if got := readFixtureFile(t, filepath.Join(buildDir, "codex-rs", "core", "src", "lib.rs")); got != "pub fn run() {}\n" {
+		t.Fatalf("lib.rs not mirrored: %q", got)
+	}
+	targetLink, err := os.Readlink(filepath.Join(buildDir, "codex-rs", "target"))
+	if err != nil {
+		t.Fatalf("Readlink work target: %v", err)
+	}
+	wantCache := filepath.Join(root, "build", "target")
+	if targetLink != wantCache {
+		t.Fatalf("work target symlink = %q, want %q", targetLink, wantCache)
+	}
+	if _, err := os.Stat(filepath.Join(wantCache, "junk.bin")); !os.IsNotExist(err) {
+		t.Fatalf("in-place source target was copied into shared cache: err=%v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(root, "build"))
+	if err != nil {
+		t.Fatalf("ReadDir build: %v", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		leaked := strings.HasPrefix(name, "source-") ||
+			strings.HasPrefix(name, ".source-") ||
+			(strings.HasPrefix(name, "target-") && name != "target")
+		if leaked {
+			t.Fatalf("unexpected leaked build dir/file: %q", name)
+		}
+	}
+}
+
+func TestPrepareStampedBuildSourceReusesCacheAndPreservesMtimes(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not available")
+	}
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	writeFixtureFile(t, filepath.Join(sourceDir, "codex-rs", "Cargo.toml"),
+		"[workspace]\nmembers = []\n\n[workspace.package]\nedition = \"2024\"\nversion = \"0.0.0\"\n")
+	libPath := filepath.Join(sourceDir, "codex-rs", "core", "src", "lib.rs")
+	writeFixtureFile(t, libPath, "pub fn run() {}\n")
+	// Pin an unchanged source file to a fixed past mtime; rsync -a must preserve it,
+	// unlike the old git-archive path that rewrote every file to the commit time.
+	pastTime := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(libPath, pastTime, pastTime); err != nil {
+		t.Fatalf("Chtimes source lib.rs: %v", err)
+	}
+
+	identity := newBuildIdentity(
+		"0.137.0", "80b65e994573", "abcdef0123456789abcdef0123456789abcdef01",
+		"aarch64-apple-darwin", BuildModeLocalFast, "codex", "codex",
+	)
+	r := patch.NewRunner(context.Background(), false, &bytes.Buffer{})
+	buildDir, err := prepareStampedBuildSource(context.Background(), r, sourceDir, identity)
+	if err != nil {
+		t.Fatalf("prepareStampedBuildSource run 1: %v", err)
+	}
+	workLib := filepath.Join(buildDir, "codex-rs", "core", "src", "lib.rs")
+	info, err := os.Stat(workLib)
+	if err != nil {
+		t.Fatalf("Stat work lib.rs: %v", err)
+	}
+	if !info.ModTime().Truncate(time.Second).Equal(pastTime.Truncate(time.Second)) {
+		t.Fatalf("work lib.rs mtime = %v, want preserved %v", info.ModTime(), pastTime)
+	}
+
+	// A sentinel in the shared cache must survive a second build (cache is reused, not wiped).
+	sentinel := filepath.Join(root, "build", "target", "SENTINEL")
+	writeFixtureFile(t, sentinel, "warm\n")
+	// Change a different file so the second sync has work to do.
+	writeFixtureFile(t, filepath.Join(sourceDir, "codex-rs", "core", "src", "extra.rs"), "pub fn extra() {}\n")
+
+	if _, err := prepareStampedBuildSource(context.Background(), r, sourceDir, identity); err != nil {
+		t.Fatalf("prepareStampedBuildSource run 2: %v", err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("shared cache sentinel lost across builds: %v", err)
+	}
+	info2, err := os.Stat(workLib)
+	if err != nil {
+		t.Fatalf("Stat work lib.rs run 2: %v", err)
+	}
+	if !info2.ModTime().Truncate(time.Second).Equal(pastTime.Truncate(time.Second)) {
+		t.Fatalf("work lib.rs mtime changed on rebuild = %v, want preserved %v", info2.ModTime(), pastTime)
+	}
+	if got := readFixtureFile(t, filepath.Join(buildDir, "codex-rs", "core", "src", "extra.rs")); got != "pub fn extra() {}\n" {
+		t.Fatalf("new source file not mirrored on rebuild: %q", got)
+	}
+}
+
+func setMtime(t *testing.T, path string, when time.Time) {
+	t.Helper()
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatalf("Chtimes %s: %v", path, err)
+	}
+}
+
+func TestPruneTargetCacheArtifactsKeepsNewestVariant(t *testing.T) {
+	root := t.TempDir()
+	profile := filepath.Join(root, "aarch64-apple-darwin", "release")
+	deps := filepath.Join(profile, "deps")
+	oldHash := "1111111111111111"
+	newHash := "2222222222222222"
+	extHash := "abababababababab"
+	oldTime := time.Unix(1_700_000_000, 0)
+	newTime := time.Unix(1_700_100_000, 0)
+
+	depFiles := map[string]time.Time{
+		"libcodex_core-" + oldHash + ".rlib":  oldTime,
+		"libcodex_core-" + oldHash + ".rmeta": oldTime,
+		"libcodex_core-" + newHash + ".rlib":  newTime,
+		"libcodex_core-" + newHash + ".rmeta": newTime,
+		"codex-" + oldHash:                    oldTime,
+		"codex-" + oldHash + ".d":             oldTime,
+		"codex-" + newHash:                    newTime,
+		"codex-" + newHash + ".d":             newTime,
+		"libserde-" + extHash + ".rlib":       oldTime,
+		"CACHEDIR.TAG":                        oldTime,
+	}
+	for name, when := range depFiles {
+		path := filepath.Join(deps, name)
+		writeFixtureFile(t, path, name)
+		setMtime(t, path, when)
+	}
+	// .fingerprint and build are dirs named <crate>-<hash>; set the dir mtime after
+	// writing children so the test controls which variant is newest.
+	fpOld := filepath.Join(profile, ".fingerprint", "codex-"+oldHash)
+	fpNew := filepath.Join(profile, ".fingerprint", "codex-"+newHash)
+	buildOld := filepath.Join(profile, "build", "somecrate-"+oldHash)
+	buildNew := filepath.Join(profile, "build", "somecrate-"+newHash)
+	for _, dir := range []string{fpOld, fpNew, buildOld, buildNew} {
+		writeFixtureFile(t, filepath.Join(dir, "out"), "x")
+	}
+	setMtime(t, fpOld, oldTime)
+	setMtime(t, fpNew, newTime)
+	setMtime(t, buildOld, oldTime)
+	setMtime(t, buildNew, newTime)
+
+	r := patch.NewRunner(context.Background(), false, &bytes.Buffer{})
+	pruneTargetCacheArtifacts(context.Background(), r, root, 1)
+
+	mustExist := []string{
+		filepath.Join(deps, "libcodex_core-"+newHash+".rlib"),
+		filepath.Join(deps, "libcodex_core-"+newHash+".rmeta"),
+		filepath.Join(deps, "codex-"+newHash),
+		filepath.Join(deps, "codex-"+newHash+".d"),
+		filepath.Join(deps, "libserde-"+extHash+".rlib"),
+		filepath.Join(deps, "CACHEDIR.TAG"),
+		fpNew,
+		buildNew,
+	}
+	for _, path := range mustExist {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected kept path missing: %s: %v", path, err)
+		}
+	}
+	mustGone := []string{
+		filepath.Join(deps, "libcodex_core-"+oldHash+".rlib"),
+		filepath.Join(deps, "libcodex_core-"+oldHash+".rmeta"),
+		filepath.Join(deps, "codex-"+oldHash),
+		filepath.Join(deps, "codex-"+oldHash+".d"),
+		fpOld,
+		buildOld,
+	}
+	for _, path := range mustGone {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("expected pruned path still present: %s: err=%v", path, err)
+		}
+	}
+}
+
+func TestPruneCargoArtifactDirKeepsTwoNewest(t *testing.T) {
+	deps := t.TempDir()
+	base := "libcodex_core"
+	hashes := []struct {
+		hash string
+		when time.Time
+	}{
+		{"1111111111111111", time.Unix(1_700_000_000, 0)},
+		{"2222222222222222", time.Unix(1_700_100_000, 0)},
+		{"3333333333333333", time.Unix(1_700_200_000, 0)},
+	}
+	for _, h := range hashes {
+		path := filepath.Join(deps, base+"-"+h.hash+".rlib")
+		writeFixtureFile(t, path, h.hash)
+		setMtime(t, path, h.when)
+	}
+
+	removed := pruneCargoArtifactDir(context.Background(), deps, 2)
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if _, err := os.Stat(filepath.Join(deps, base+"-1111111111111111.rlib")); !os.IsNotExist(err) {
+		t.Fatalf("oldest variant should be pruned: err=%v", err)
+	}
+	for _, hash := range []string{"2222222222222222", "3333333333333333"} {
+		if _, err := os.Stat(filepath.Join(deps, base+"-"+hash+".rlib")); err != nil {
+			t.Fatalf("newer variant %s should be kept: %v", hash, err)
+		}
 	}
 }
 
