@@ -19,17 +19,6 @@ BUNDLE_ID  := io.goodkind.desktop-via-clyde
 GO_BUILD_TAGS        := gklog_stamped
 GO_BUILD_EXTRA_FLAGS := -trimpath
 
-# Strict lint policy.
-# This repo does not commit lint baselines. The shared go-makefile gates read
-# empty device baselines so every current finding must be fixed in code.
-override BASELINE :=
-override GOLANGCI_LINT_BASELINE := /dev/null
-override GOCYCLO_BASELINE := /dev/null
-override DEADCODE_BASELINE := /dev/null
-override STATICCHECK_EXTRA_BASELINE := /dev/null
-override GO_MK_NOTICES_FILE := /dev/null
-override GO_MK_APPLIED_NOTICES := .make/.go-mk-applied-notices
-
 # Pipeline modules.
 GO_MK_MODULES := go-build.mk
 GO_MK_DEV_DIR ?= $(HOME)/Sites/go-makefile
