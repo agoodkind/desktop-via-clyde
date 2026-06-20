@@ -746,7 +746,8 @@ func readPackageMetadata(packageDir string, packageVariant string) (packageMetad
 // the full per-commit version. The package script derives the metadata version
 // from the workspace base version, which is now kept stable for build caching,
 // so the per-commit identity must be written back here to keep release-reuse
-// keying and the metadata check accurate. Other fields are preserved verbatim.
+// keying and the metadata check accurate. Other fields keep their values
+// (decoded as raw JSON), though re-encoding the object may reorder keys.
 func overwriteCodexPackageVersion(packageDir string, version string) error {
 	log := codexcliLog.With("function", "overwriteCodexPackageVersion")
 	path := filepath.Join(packageDir, "codex-package.json")

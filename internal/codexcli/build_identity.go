@@ -505,12 +505,15 @@ type cargoArtifactVariant struct {
 }
 
 // pruneTargetCacheArtifacts bounds the shared Cargo target cache by keeping only
-// the newest `keep` fingerprinted variants of each crate. cargo never evicts
-// superseded artifacts, so a scheduler that builds a new commit on every run
-// otherwise grows target/deps without bound. External dependency crates carry a
-// single stable variant and are always kept; only churned workspace-crate
-// variants are removed. It is best-effort: failures are logged and never abort
-// the build.
+// the newest `keep` fingerprinted variants of each crate base name. cargo never
+// evicts superseded artifacts, so a scheduler that builds a new commit on every
+// run otherwise grows target/deps without bound. What this primarily reclaims is
+// the per-commit churn of the app-facing workspace crates, whose hash changes
+// every commit. Variants are grouped by base name, so a crate present at multiple
+// versions (some external deps) may have an older-mtime variant pruned; cargo and
+// sccache rebuild it cheaply on the next build, so the cache stays correct but not
+// strictly minimal. It is best-effort: failures are logged and never abort the
+// build.
 func pruneTargetCacheArtifacts(ctx context.Context, r *patch.Runner, targetCacheDir string, keep int) {
 	log := codexcliLog.With("function", "pruneTargetCacheArtifacts")
 	log.InfoContext(ctx, "codexcli.prune_target_cache.boundary", "target_cache_dir", targetCacheDir, "keep", keep)
