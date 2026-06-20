@@ -88,10 +88,12 @@ injector-clean:
 	$(MAKE) -C $(REPO_ROOT)/injector clean
 
 # go.mk wires go-generated-prereqs (via GO_MK_GENERATE above) into every build,
-# lint, vet, test, govulncheck, install, and release target. lint-files and
-# lint-diff are go.mk scoped-lint targets outside that set but still compile the
-# go:embed package, so they keep the prerequisite here.
-lint-files lint-diff: | go-generated-prereqs
+# lint, vet, test, govulncheck, install, and release target. The targets below
+# sit outside that central set but still load the go:embed package, so they keep
+# the prerequisite here. lint-format is one of them: unlike a C-parser consumer,
+# this repo's generated code is Go and embedded payloads, so the formatter's
+# package load fails when go:embed targets are missing.
+lint-format lint-files lint-diff: | go-generated-prereqs
 
 help: dvc-help-extras
 
