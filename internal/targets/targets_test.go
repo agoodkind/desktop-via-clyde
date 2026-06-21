@@ -10,16 +10,16 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/spec"
 )
 
-func TestAllHasThreeTargets(t *testing.T) {
+func TestAllHasFourTargets(t *testing.T) {
 	installFixture(t)
-	if len(All()) != 3 {
-		t.Fatalf("expected 3 targets, got %d", len(All()))
+	if len(All()) != 4 {
+		t.Fatalf("expected 4 targets, got %d", len(All()))
 	}
 }
 
 func TestLookupKnown(t *testing.T) {
 	installFixture(t)
-	for _, id := range []string{"cursor", "codex", "claude"} {
+	for _, id := range []string{"cursor", "codex", "claude", "conductor"} {
 		tg, err := lookupTarget(id)
 		if err != nil {
 			t.Errorf("Lookup(%q) returned error: %v", id, err)
@@ -47,6 +47,12 @@ func TestEntitlementsPolicyPerTarget(t *testing.T) {
 		"cursor": {},
 		"codex":  {"com.apple.security.application-groups"},
 		"claude": {"com.apple.security.application-groups"},
+		"conductor": {
+			"com.apple.application-identifier",
+			"com.apple.developer.team-identifier",
+			"keychain-access-groups",
+			"com.apple.security.application-groups",
+		},
 	}
 	wantRequired := map[string][]string{
 		"cursor": {
@@ -58,6 +64,9 @@ func TestEntitlementsPolicyPerTarget(t *testing.T) {
 			"com.apple.security.cs.disable-library-validation",
 		},
 		"claude": {
+			"com.apple.security.cs.disable-library-validation",
+		},
+		"conductor": {
 			"com.apple.security.cs.disable-library-validation",
 		},
 	}

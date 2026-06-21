@@ -631,6 +631,158 @@ name = "dry-run"
 type = "bool"
 usage = "print reset commands without changing privacy grants"
 
+[apps.conductor]
+app_path = "/Applications/Conductor.app"
+bundle_id = "com.conductor.app"
+exec_name = "conductor"
+keychain_services = ["com.conductor.app.production.settings"]
+
+[apps.conductor.command]
+use = "conductor"
+short = "Operate on /Applications/Conductor.app"
+
+[apps.conductor.entitlements]
+strip = [
+    "com.apple.application-identifier",
+    "com.apple.developer.team-identifier",
+    "keychain-access-groups",
+    "com.apple.security.application-groups",
+]
+required_boolean = ["com.apple.security.cs.disable-library-validation"]
+
+[apps.conductor.updater]
+kind = "tauri_minisign"
+url_template = "https://cdn.crabnebula.app/update/melty/conductor/{target}-{arch}/{version}"
+minisign_public_key = "RWSPp4Zy9sO0/jUsBPnLTK0HBVKCvMSNeyWuUf/G+wvBGwIG+lLpDuKX"
+user_agent = "Conductor/desktop-via-clyde"
+platform = "darwin-aarch64"
+default_channel = "stable"
+
+[[apps.conductor.updater.channels]]
+name = "stable"
+
+[apps.conductor.launch_policy]
+proxy_host = "localhost"
+proxy_port = 48731
+ca_certificate = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+no_proxy = "localhost,127.0.0.1,::1,[::1]"
+launch_working_directory = "/Users/agoodkind"
+
+[[apps.conductor.launch_policy.preflights]]
+kind = "file_exists"
+path = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.conductor.launch_policy.preflights]]
+kind = "tcp_reachable"
+host = "localhost"
+port = 48731
+timeout_ms = 1000
+
+[[apps.conductor.launch_policy.environment]]
+action = "set"
+key = "HTTPS_PROXY"
+value = "http://localhost:48731"
+
+[[apps.conductor.launch_policy.environment]]
+action = "set"
+key = "HTTP_PROXY"
+value = "http://localhost:48731"
+
+[[apps.conductor.launch_policy.environment]]
+action = "set"
+key = "ALL_PROXY"
+value = "http://localhost:48731"
+
+[[apps.conductor.launch_policy.environment]]
+action = "set"
+key = "NO_PROXY"
+value = "localhost,127.0.0.1,::1,[::1]"
+
+[[apps.conductor.launch_policy.environment]]
+action = "set"
+key = "no_proxy"
+value = "localhost,127.0.0.1,::1,[::1]"
+
+[[apps.conductor.launch_policy.environment]]
+action = "set"
+key = "NODE_EXTRA_CA_CERTS"
+value = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+
+[[apps.conductor.launch_policy.environment]]
+action = "set"
+key = "CODEX_CA_CERTIFICATE"
+value = "/Users/agoodkind/.local/state/clyde/mitm/ca/clyde-mitm-ca.crt"
+
+[apps.conductor.operations.patch]
+use = "patch"
+short = "Install the shim into one app bundle and re-sign it"
+capability = "app.patch"
+
+[[apps.conductor.operations.patch.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without modifying the bundle"
+
+[[apps.conductor.operations.patch.flags]]
+name = "migrate-keychain"
+type = "bool"
+usage = "restore keychain access during patch"
+
+[[apps.conductor.operations.patch.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.conductor.operations.upgrade]
+use = "upgrade"
+short = "Fetch the latest build from the upstream update manifest, verify, swap into the app path, and re-patch"
+capability = "app.upgrade"
+
+[[apps.conductor.operations.upgrade.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without modifying the bundle"
+
+[[apps.conductor.operations.upgrade.flags]]
+name = "migrate-keychain"
+type = "bool"
+usage = "restore keychain access after install"
+
+[[apps.conductor.operations.upgrade.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.conductor.operations.keychain-migrate]
+use = "keychain-migrate"
+short = "Restore keychain access for a patched app"
+capability = "app.keychain-migrate"
+
+[[apps.conductor.operations.keychain-migrate.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print every step without touching keychain items"
+
+[[apps.conductor.operations.keychain-migrate.flags]]
+name = "app-path"
+type = "string"
+usage = "override the target .app path for isolated testing"
+
+[apps.conductor.operations.status]
+use = "status"
+short = "Print state for this target"
+capability = "app.status"
+
+[apps.conductor.operations.hard-reset]
+use = "hard-reset"
+short = "Reset configured macOS privacy grants for this target"
+capability = "app.hard-reset"
+
+[[apps.conductor.operations.hard-reset.flags]]
+name = "dry-run"
+type = "bool"
+usage = "print reset commands without changing privacy grants"
+
 [clis.codex-cli.command]
 use = "codex-cli"
 short = "Build, sign, install, and inspect the local Codex CLI"

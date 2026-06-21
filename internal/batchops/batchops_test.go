@@ -43,7 +43,7 @@ func TestRunWithOperationRunnerPatchSelectsConfiguredApps(t *testing.T) {
 		t.Fatalf("RunWithOperationRunner(patch): %v", err)
 	}
 	sort.Strings(gotIDs)
-	wantIDs := []string{"claude", "codex", "cursor"}
+	wantIDs := []string{"claude", "codex", "conductor", "cursor"}
 	if strings.Join(gotIDs, ",") != strings.Join(wantIDs, ",") {
 		t.Fatalf("patch ids = %#v, want %#v", gotIDs, wantIDs)
 	}
@@ -91,8 +91,8 @@ func TestRunWithOperationRunnerUpgradeIncludesCLIAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunWithOperationRunner(upgrade): %v", err)
 	}
-	if len(observedByID) != 4 {
-		t.Fatalf("upgrade target count = %d, want 4", len(observedByID))
+	if len(observedByID) != 5 {
+		t.Fatalf("upgrade target count = %d, want 5", len(observedByID))
 	}
 	if observedByID["cursor"].channel != "stable" {
 		t.Fatalf("cursor channel = %q, want stable", observedByID["cursor"].channel)
@@ -144,8 +144,8 @@ func TestRunWithOperationRunnerAggregatesFailures(t *testing.T) {
 	if !strings.Contains(err.Error(), "codex") {
 		t.Fatalf("error = %q, want codex", err.Error())
 	}
-	if len(visited) != 4 {
-		t.Fatalf("visited targets = %#v, want 4 attempts", visited)
+	if len(visited) != 5 {
+		t.Fatalf("visited targets = %#v, want 5 attempts", visited)
 	}
 }
 
