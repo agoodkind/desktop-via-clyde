@@ -1,7 +1,7 @@
 // Package upgrade fetches the latest registered target build from the upstream
 // update manifest, swaps it into /Applications, and re-runs the patch flow so
-// the new bundle launches through the clyde MITM proxy. It performs no vendor
-// signature or designated-requirement verification on the download.
+// the new bundle launches through the clyde MITM proxy. It verifies downloads
+// only for updater kinds that declare a verification scheme.
 package upgrade
 
 import (
@@ -89,8 +89,10 @@ func Operation(ctx context.Context, req operations.Request) error {
 }
 
 type updateManifest struct {
-	URL  string
-	Name string
+	URL       string
+	Name      string
+	Signature string
+	Format    string
 }
 
 type pathJSONManifest struct {
@@ -134,6 +136,15 @@ type squirrelJSONUpdate struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 	URL     string `json:"url"`
+}
+
+type tauriMinisignManifest struct {
+	Version   string `json:"version"`
+	Notes     string `json:"notes"`
+	PubDate   string `json:"pub_date"`
+	URL       string `json:"url"`
+	Signature string `json:"signature"`
+	Format    string `json:"format"`
 }
 
 const missingBundleCurrentVersion = "0.0.0"
@@ -198,11 +209,14 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 		}
 	}()
 
-	zipPath := filepath.Join(staging, archiveName(t, m.URL))
-	if err := downloadZip(ctx, r, m.URL, zipPath, opts.DryRun); err != nil {
+	archivePath := filepath.Join(staging, manifestArchiveName(t, m))
+	if err := downloadArchive(ctx, r, m.URL, archivePath, archiveAccept(t), opts.DryRun); err != nil {
 		return err
 	}
-	extractedApp, err := extractZip(ctx, r, zipPath, staging, t, opts.DryRun)
+	if err := verifyArchive(ctx, r, t, m, archivePath, opts.DryRun); err != nil {
+		return err
+	}
+	extractedApp, err := extractArchive(ctx, r, archivePath, staging, t, opts.DryRun)
 	if err != nil {
 		return err
 	}
@@ -333,6 +347,8 @@ func fetchManifest(ctx context.Context, t targets.Target, currentVersion, channe
 		return fetchSparkleManifest(ctx, t, channel)
 	case targets.UpdaterSquirrelJSON:
 		return fetchSquirrelJSONManifest(ctx, t)
+	case targets.UpdaterTauriMinisign:
+		return fetchTauriMinisignManifest(ctx, t, currentVersion)
 	default:
 		return updateManifest{}, fmt.Errorf("target %s has unsupported updater kind %q", t.ID, t.Updater.Kind)
 	}
@@ -433,7 +449,12 @@ func parseHTTPPathJSONManifest(body []byte) (updateManifest, error) {
 	if err := json.Unmarshal(body, &m); err != nil {
 		return updateManifest{}, logUpgradeErrorNoContext("upgrade.http_path_json_manifest_parse_failed", fmt.Errorf("parse path JSON manifest: %w (body=%s)", err, string(body)))
 	}
-	return updateManifest(m), nil
+	return updateManifest{
+		URL:       m.URL,
+		Name:      m.Name,
+		Signature: "",
+		Format:    "",
+	}, nil
 }
 
 func parseSparkleAppcast(body []byte) (updateManifest, error) {
@@ -450,8 +471,10 @@ func parseSparkleAppcast(body []byte) (updateManifest, error) {
 		}
 		name := firstNonEmpty(item.Version, item.ShortVersionString, item.Title)
 		return updateManifest{
-			URL:  item.Enclosure.URL,
-			Name: name,
+			URL:       item.Enclosure.URL,
+			Name:      name,
+			Signature: "",
+			Format:    "",
 		}, nil
 	}
 	return updateManifest{}, errors.New("sparkle appcast contains no arm64 full zip enclosure")
@@ -467,9 +490,22 @@ func parseSquirrelJSONManifest(body []byte) (updateManifest, error) {
 			continue
 		}
 		name := firstNonEmpty(release.UpdateTo.Version, release.Version, release.UpdateTo.Name)
-		return updateManifest{URL: release.UpdateTo.URL, Name: name}, nil
+		return updateManifest{
+			URL:       release.UpdateTo.URL,
+			Name:      name,
+			Signature: "",
+			Format:    "",
+		}, nil
 	}
 	return updateManifest{}, errors.New("squirrel manifest contains no updateTo.url")
+}
+
+func splitTauriPlatform(platform string) (string, string) {
+	index := strings.LastIndex(platform, "-")
+	if index == -1 {
+		return platform, ""
+	}
+	return platform[:index], platform[index+1:]
 }
 
 func renderUpdaterTemplate(template string, values map[string]string) string {
@@ -572,11 +608,11 @@ func makeStagingDir(ctx context.Context, t targets.Target, version string) (stri
 	return root, nil
 }
 
-// downloadZip streams the manifest URL to zipPath. It bypasses proxy
+// downloadArchive streams the manifest URL to archivePath. It bypasses proxy
 // configuration for the same reason the manifest fetch does.
-func downloadZip(ctx context.Context, r *patch.Runner, srcURL, zipPath string, dryRun bool) error {
-	upgradeLog.DebugContext(ctx, "upgrade.download_zip.boundary", "url", srcURL, "zip_path", zipPath, "dry_run", dryRun)
-	notef(r, fmt.Sprintf("downloading %s -> %s", srcURL, zipPath))
+func downloadArchive(ctx context.Context, r *patch.Runner, srcURL, archivePath, accept string, dryRun bool) error {
+	upgradeLog.DebugContext(ctx, "upgrade.download_archive.boundary", "url", srcURL, "archive_path", archivePath, "dry_run", dryRun)
+	notef(r, fmt.Sprintf("downloading %s -> %s", srcURL, archivePath))
 	if dryRun {
 		return nil
 	}
@@ -585,7 +621,7 @@ func downloadZip(ctx context.Context, r *patch.Runner, srcURL, zipPath string, d
 		return logUpgradeError(ctx, "upgrade.download_request_build_failed", fmt.Errorf("build download request: %w", err))
 	}
 	req.Header.Set("User-Agent", "desktop-via-clyde/upgrade")
-	req.Header.Set("Accept", "application/zip")
+	req.Header.Set("Accept", accept)
 	client := directHTTPClient(30 * time.Minute)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -595,17 +631,31 @@ func downloadZip(ctx context.Context, r *patch.Runner, srcURL, zipPath string, d
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("download status %d for %s", resp.StatusCode, srcURL)
 	}
-	out, err := os.Create(zipPath)
+	out, err := os.Create(archivePath)
 	if err != nil {
-		return logUpgradeError(ctx, "upgrade.download_zip_create_failed", fmt.Errorf("create zip file: %w", err))
+		return logUpgradeError(ctx, "upgrade.download_archive_create_failed", fmt.Errorf("create archive file: %w", err))
 	}
 	defer func() { _ = out.Close() }()
 	n, err := io.Copy(out, resp.Body)
 	if err != nil {
-		return logUpgradeError(ctx, "upgrade.download_zip_write_failed", fmt.Errorf("write zip body: %w", err))
+		return logUpgradeError(ctx, "upgrade.download_archive_write_failed", fmt.Errorf("write archive body: %w", err))
 	}
 	notef(r, fmt.Sprintf("downloaded %d bytes", n))
 	return nil
+}
+
+func archiveAccept(t targets.Target) string {
+	if t.Updater.Kind == targets.UpdaterTauriMinisign {
+		return "application/gzip"
+	}
+	return "application/zip"
+}
+
+func manifestArchiveName(t targets.Target, m updateManifest) string {
+	if t.Updater.Kind == targets.UpdaterTauriMinisign {
+		return tauriMinisignArchiveName(t)
+	}
+	return archiveName(t, m.URL)
 }
 
 func archiveName(t targets.Target, srcURL string) string {
@@ -617,6 +667,32 @@ func archiveName(t targets.Target, srcURL string) string {
 		}
 	}
 	return t.ID + ".zip"
+}
+
+func verifyArchive(ctx context.Context, r *patch.Runner, t targets.Target, m updateManifest, archivePath string, dryRun bool) error {
+	switch t.Updater.Kind {
+	case targets.UpdaterHTTPPathJSONManifest,
+		targets.UpdaterSparkleAppcast,
+		targets.UpdaterSquirrelJSON:
+		return nil
+	case targets.UpdaterTauriMinisign:
+		return verifyTauriMinisignArchive(ctx, r, t, m, archivePath, dryRun)
+	default:
+		return nil
+	}
+}
+
+func extractArchive(ctx context.Context, r *patch.Runner, archivePath, staging string, t targets.Target, dryRun bool) (string, error) {
+	switch t.Updater.Kind {
+	case targets.UpdaterHTTPPathJSONManifest,
+		targets.UpdaterSparkleAppcast,
+		targets.UpdaterSquirrelJSON:
+		return extractZip(ctx, r, archivePath, staging, t, dryRun)
+	case targets.UpdaterTauriMinisign:
+		return extractTarGz(ctx, r, archivePath, staging, t, dryRun)
+	default:
+		return extractZip(ctx, r, archivePath, staging, t, dryRun)
+	}
 }
 
 // extractZip unpacks the zip via /usr/bin/ditto which preserves bundle

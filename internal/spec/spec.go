@@ -24,6 +24,8 @@ const (
 	UpdaterKindSparkleAppcast UpdaterKind = "sparkle_appcast"
 	// UpdaterKindSquirrelJSON fetches a Squirrel-style JSON manifest.
 	UpdaterKindSquirrelJSON UpdaterKind = "squirrel_json"
+	// UpdaterKindTauriMinisign fetches a Tauri manifest with a minisign signature.
+	UpdaterKindTauriMinisign UpdaterKind = "tauri_minisign"
 )
 
 // PreflightKind identifies one supported launch preflight check.
@@ -163,6 +165,7 @@ type UpdaterSpec struct {
 	Platform          string           `toml:"platform"`
 	Product           string           `toml:"product"`
 	SparklePublicKey  string           `toml:"sparkle_public_key"`
+	MinisignPublicKey string           `toml:"minisign_public_key"`
 	DeviceIDParamName string           `toml:"device_id_param_name"`
 	DefaultChannel    string           `toml:"default_channel"`
 	Channels          []UpdaterChannel `toml:"channels"`

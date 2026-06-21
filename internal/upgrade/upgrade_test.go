@@ -1,7 +1,9 @@
 package upgrade
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"net/http"
@@ -124,6 +126,46 @@ func TestParseSquirrelJSONManifest(t *testing.T) {
 	}
 }
 
+func TestParseTauriMinisignManifest(t *testing.T) {
+	body := []byte(`{
+  "version": "1.2.3",
+  "notes": "Test release",
+  "pub_date": "2026-06-01T00:00:00Z",
+  "url": "https://updates.example.invalid/download",
+  "signature": "trusted-signature",
+  "format": "app"
+}`)
+	got, err := parseTauriMinisignManifest(body)
+	if err != nil {
+		t.Fatalf("parseTauriMinisignManifest: %v", err)
+	}
+	if got.Name != "1.2.3" {
+		t.Fatalf("Name = %q, want 1.2.3", got.Name)
+	}
+	if got.Signature != "trusted-signature" {
+		t.Fatalf("Signature = %q, want trusted-signature", got.Signature)
+	}
+	if got.Format != "app" {
+		t.Fatalf("Format = %q, want app", got.Format)
+	}
+}
+
+func TestParseTauriMinisignManifestRejectsNonAppFormat(t *testing.T) {
+	body := []byte(`{
+  "version": "1.2.3",
+  "url": "https://updates.example.invalid/download",
+  "signature": "trusted-signature",
+  "format": "dmg"
+}`)
+	_, err := parseTauriMinisignManifest(body)
+	if err == nil {
+		t.Fatal("parseTauriMinisignManifest should reject non-app format")
+	}
+	if !strings.Contains(err.Error(), "want app") {
+		t.Fatalf("error = %q, want app format rejection", err)
+	}
+}
+
 func TestArchiveNameUsesURLPathBase(t *testing.T) {
 	got := archiveName(targets.Target{ID: "codex"}, "https://persistent.oaistatic.com/codex-app-prod/Codex-darwin-arm64-26.519.41501.zip?cache=1")
 	if got != "Codex-darwin-arm64-26.519.41501.zip" {
@@ -135,6 +177,42 @@ func TestArchiveNameFallback(t *testing.T) {
 	got := archiveName(targets.Target{ID: "claude"}, "::::")
 	if got != "claude.zip" {
 		t.Fatalf("archiveName fallback = %q", got)
+	}
+}
+
+func TestManifestArchiveNameUsesTauriTarGzName(t *testing.T) {
+	tg := targets.Target{
+		ID:       "conductor",
+		AppPath:  "/Applications/Conductor.app",
+		ExecName: "Conductor",
+		Updater: targets.Updater{
+			Kind: targets.UpdaterTauriMinisign,
+		},
+	}
+	got := manifestArchiveName(tg, updateManifest{
+		URL:       "https://updates.example.invalid/download",
+		Name:      "1.2.3",
+		Signature: "trusted-signature",
+		Format:    "app",
+	})
+	if got != "Conductor.app.tar.gz" {
+		t.Fatalf("manifestArchiveName = %q, want Conductor.app.tar.gz", got)
+	}
+	if !strings.HasSuffix(got, ".tar.gz") {
+		t.Fatalf("manifestArchiveName = %q, want .tar.gz suffix", got)
+	}
+}
+
+func TestManifestArchiveNameUsesTauriFallback(t *testing.T) {
+	tg := targets.Target{
+		ID: "conductor",
+		Updater: targets.Updater{
+			Kind: targets.UpdaterTauriMinisign,
+		},
+	}
+	got := manifestArchiveName(tg, updateManifest{Name: "1.2.3"})
+	if got != "update.app.tar.gz" {
+		t.Fatalf("manifestArchiveName = %q, want update.app.tar.gz", got)
 	}
 }
 
@@ -353,6 +431,129 @@ func TestExtractZipAcceptsSingleDifferentlyNamedAppRoot(t *testing.T) {
 	want := filepath.Join(staging, "extracted", "Codex (Beta).app")
 	if got != want {
 		t.Fatalf("extractZip path = %q, want %q", got, want)
+	}
+}
+
+func TestExtractTarGzExtractsAppTreeAndSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	tarGzPath := filepath.Join(tmpDir, "Fake.app.tar.gz")
+	writeTarGzFixture(t, tarGzPath, []tarGzEntry{
+		{name: "Fake.app/", typeFlag: tar.TypeDir, mode: 0o755},
+		{name: "Fake.app/Contents/", typeFlag: tar.TypeDir, mode: 0o755},
+		{name: "Fake.app/Contents/MacOS/", typeFlag: tar.TypeDir, mode: 0o755},
+		{name: "Fake.app/Contents/MacOS/Fake", typeFlag: tar.TypeReg, mode: 0o755, body: "hello"},
+		{name: "Fake.app/Contents/Resources/", typeFlag: tar.TypeDir, mode: 0o755},
+		{
+			name:     "Fake.app/Contents/Resources/FakeLink",
+			typeFlag: tar.TypeSymlink,
+			mode:     0o755,
+			linkname: "../MacOS/Fake",
+		},
+	})
+	staging := filepath.Join(tmpDir, "staging")
+	tg := targets.Target{
+		ID:       "fake",
+		AppPath:  "/Applications/Fake.app",
+		ExecName: "Fake",
+		Updater: targets.Updater{
+			Kind: targets.UpdaterTauriMinisign,
+		},
+	}
+	got, err := extractTarGz(context.Background(), patch.NewRunner(context.Background(), false, io.Discard), tarGzPath, staging, tg, false)
+	if err != nil {
+		t.Fatalf("extractTarGz: %v", err)
+	}
+	want := filepath.Join(staging, "extracted", "Fake.app")
+	if got != want {
+		t.Fatalf("extractTarGz path = %q, want %q", got, want)
+	}
+	payload, err := os.ReadFile(filepath.Join(got, "Contents", "MacOS", "Fake"))
+	if err != nil {
+		t.Fatalf("ReadFile extracted payload: %v", err)
+	}
+	if string(payload) != "hello" {
+		t.Fatalf("payload = %q, want hello", payload)
+	}
+	linkTarget, err := os.Readlink(filepath.Join(got, "Contents", "Resources", "FakeLink"))
+	if err != nil {
+		t.Fatalf("Readlink in-dir symlink: %v", err)
+	}
+	if linkTarget != "../MacOS/Fake" {
+		t.Fatalf("symlink target = %q, want ../MacOS/Fake", linkTarget)
+	}
+}
+
+func TestExtractTarGzRejectsEscapingSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	tarGzPath := filepath.Join(tmpDir, "Fake.app.tar.gz")
+	writeTarGzFixture(t, tarGzPath, []tarGzEntry{
+		{name: "Fake.app/", typeFlag: tar.TypeDir, mode: 0o755},
+		{name: "Fake.app/link", typeFlag: tar.TypeSymlink, mode: 0o755, linkname: "../../evil"},
+	})
+	staging := filepath.Join(tmpDir, "staging")
+	outsidePath := filepath.Join(staging, "evil")
+	tg := targets.Target{
+		ID:       "fake",
+		AppPath:  "/Applications/Fake.app",
+		ExecName: "Fake",
+		Updater: targets.Updater{
+			Kind: targets.UpdaterTauriMinisign,
+		},
+	}
+	_, err := extractTarGz(context.Background(), patch.NewRunner(context.Background(), false, io.Discard), tarGzPath, staging, tg, false)
+	if err == nil {
+		t.Fatal("extractTarGz should reject escaping symlink")
+	}
+	if !strings.Contains(err.Error(), "points outside extraction root") {
+		t.Fatalf("error = %q, want escaping symlink rejection", err)
+	}
+	if _, err := os.Lstat(outsidePath); err == nil {
+		t.Fatalf("outside path %s should not exist", outsidePath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("Lstat outside path: %v", err)
+	}
+}
+
+type tarGzEntry struct {
+	name     string
+	typeFlag byte
+	mode     int64
+	body     string
+	linkname string
+}
+
+func writeTarGzFixture(t *testing.T, path string, entries []tarGzEntry) {
+	t.Helper()
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	tarWriter := tar.NewWriter(gzipWriter)
+	for _, entry := range entries {
+		header := &tar.Header{
+			Name:     entry.name,
+			Typeflag: entry.typeFlag,
+			Mode:     entry.mode,
+			Linkname: entry.linkname,
+		}
+		if entry.typeFlag == tar.TypeReg {
+			header.Size = int64(len(entry.body))
+		}
+		if err := tarWriter.WriteHeader(header); err != nil {
+			t.Fatalf("WriteHeader %s: %v", entry.name, err)
+		}
+		if entry.typeFlag == tar.TypeReg {
+			if _, err := tarWriter.Write([]byte(entry.body)); err != nil {
+				t.Fatalf("Write payload %s: %v", entry.name, err)
+			}
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("Close tar writer: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("Close gzip writer: %v", err)
+	}
+	if err := os.WriteFile(path, buffer.Bytes(), 0o644); err != nil {
+		t.Fatalf("WriteFile tar.gz fixture: %v", err)
 	}
 }
 
