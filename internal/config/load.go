@@ -294,13 +294,17 @@ func normalizeAndValidateUpdater(path string, updater *spec.UpdaterSpec) error {
 	updater.Platform = strings.TrimSpace(updater.Platform)
 	updater.Product = strings.TrimSpace(updater.Product)
 	updater.SparklePublicKey = strings.TrimSpace(updater.SparklePublicKey)
+	updater.MinisignPublicKey = strings.TrimSpace(updater.MinisignPublicKey)
 	updater.DeviceIDParamName = strings.TrimSpace(updater.DeviceIDParamName)
 	updater.DefaultChannel = strings.TrimSpace(updater.DefaultChannel)
 
 	switch updater.Kind {
-	case spec.UpdaterKindHTTPPathJSONManifest, spec.UpdaterKindSparkleAppcast, spec.UpdaterKindSquirrelJSON:
+	case spec.UpdaterKindHTTPPathJSONManifest,
+		spec.UpdaterKindSparkleAppcast,
+		spec.UpdaterKindSquirrelJSON,
+		spec.UpdaterKindTauriMinisign:
 	default:
-		return fmt.Errorf("%s.kind must be one of http_path_json_manifest|sparkle_appcast|squirrel_json", path)
+		return fmt.Errorf("%s.kind must be one of http_path_json_manifest|sparkle_appcast|squirrel_json|tauri_minisign", path)
 	}
 
 	channels := make([]spec.UpdaterChannel, 0, len(updater.Channels))
@@ -330,6 +334,10 @@ func normalizeAndValidateUpdater(path string, updater *spec.UpdaterSpec) error {
 		}
 	case spec.UpdaterKindSquirrelJSON:
 		if err := validateSquirrelUpdater(path, updater); err != nil {
+			return err
+		}
+	case spec.UpdaterKindTauriMinisign:
+		if err := validateTauriMinisignUpdater(path, updater); err != nil {
 			return err
 		}
 	}
@@ -498,6 +506,22 @@ func validateSquirrelUpdater(path string, updater *spec.UpdaterSpec) error {
 	}
 	if len(updater.Channels) > 0 || updater.DefaultChannel != "" {
 		return fmt.Errorf("%s does not support channels", path)
+	}
+	return nil
+}
+
+func validateTauriMinisignUpdater(path string, updater *spec.UpdaterSpec) error {
+	if updater.URLTemplate == "" {
+		return fmt.Errorf("%s.url_template is required", path)
+	}
+	if updater.MinisignPublicKey == "" {
+		return fmt.Errorf("%s.minisign_public_key is required", path)
+	}
+	if updater.UserAgent == "" {
+		return fmt.Errorf("%s.user_agent is required", path)
+	}
+	if updater.Platform == "" {
+		return fmt.Errorf("%s.platform is required", path)
 	}
 	return nil
 }

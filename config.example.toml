@@ -60,7 +60,8 @@ required_boolean = ["com.apple.security.cs.disable-library-validation"]
 # proxy_injection = true
 # injector_dylib_path = "<STATE_ROOT>/dev-signing/custom-clyde-inject.dylib"
 
-# Updater. kind is one of: squirrel_json, sparkle_appcast, http_path_json_manifest.
+# Updater. kind is one of: squirrel_json, sparkle_appcast, http_path_json_manifest,
+# tauri_minisign.
 # Only the fields for the chosen kind are required; see the validators in
 # internal/config/load.go. This example uses squirrel_json.
 [apps.example.updater]
@@ -68,6 +69,16 @@ kind = "squirrel_json"
 url = "https://updates.example.com/darwin/universal/squirrel/update"
 user_agent = "Example/desktop-via-clyde"
 device_id_param_name = "device_id"
+
+# Tauri apps served by CrabNebula can use tauri_minisign. The endpoint returns
+# 204 No Content when the current version is already latest, or a flat manifest
+# with a minisign signature when an update is available.
+# [apps.example.updater]
+# kind = "tauri_minisign"
+# url_template = "https://cdn.crabnebula.app/update/<OWNER>/<APP>/{target}-{arch}/{version}"
+# minisign_public_key = "<MINISIGN_PUBLIC_KEY>"
+# user_agent = "Example/desktop-via-clyde/{version}"
+# platform = "darwin-aarch64"
 
 # Launch policy serialized into the patched bundle. It drives the shim: proxy
 # routing, injected env and argv, and preflight checks before launch. Paths are

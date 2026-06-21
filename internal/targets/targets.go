@@ -18,6 +18,8 @@ const (
 	UpdaterSparkleAppcast spec.UpdaterKind = spec.UpdaterKindSparkleAppcast
 	// UpdaterSquirrelJSON fetches a Squirrel-style JSON manifest.
 	UpdaterSquirrelJSON spec.UpdaterKind = spec.UpdaterKindSquirrelJSON
+	// UpdaterTauriMinisign fetches a Tauri manifest with a minisign signature.
+	UpdaterTauriMinisign spec.UpdaterKind = spec.UpdaterKindTauriMinisign
 )
 
 // Updater describes the upstream updater endpoint for one target.
@@ -29,6 +31,7 @@ type Updater struct {
 	Platform          string
 	Product           string
 	SparklePublicKey  string
+	MinisignPublicKey string
 	DeviceIDParamName string
 	DefaultChannel    string
 	Channels          []spec.UpdaterChannel
@@ -212,6 +215,7 @@ func buildUpdater(updater spec.UpdaterSpec) Updater {
 		Platform:          updater.Platform,
 		Product:           updater.Product,
 		SparklePublicKey:  updater.SparklePublicKey,
+		MinisignPublicKey: updater.MinisignPublicKey,
 		DeviceIDParamName: updater.DeviceIDParamName,
 		DefaultChannel:    updater.DefaultChannel,
 		Channels:          append([]spec.UpdaterChannel(nil), updater.Channels...),

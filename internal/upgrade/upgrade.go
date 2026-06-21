@@ -1,18 +1,22 @@
 // Package upgrade fetches the latest registered target build from the upstream
 // update manifest, swaps it into /Applications, and re-runs the patch flow so
-// the new bundle launches through the clyde MITM proxy. It performs no vendor
-// signature or designated-requirement verification on the download.
+// the new bundle launches through the clyde MITM proxy. It verifies downloads
+// only for updater kinds that declare a verification scheme.
 package upgrade
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -89,8 +93,10 @@ func Operation(ctx context.Context, req operations.Request) error {
 }
 
 type updateManifest struct {
-	URL  string
-	Name string
+	URL       string
+	Name      string
+	Signature string
+	Format    string
 }
 
 type pathJSONManifest struct {
@@ -134,6 +140,15 @@ type squirrelJSONUpdate struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 	URL     string `json:"url"`
+}
+
+type tauriMinisignManifest struct {
+	Version   string `json:"version"`
+	Notes     string `json:"notes"`
+	PubDate   string `json:"pub_date"`
+	URL       string `json:"url"`
+	Signature string `json:"signature"`
+	Format    string `json:"format"`
 }
 
 const missingBundleCurrentVersion = "0.0.0"
@@ -198,11 +213,14 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 		}
 	}()
 
-	zipPath := filepath.Join(staging, archiveName(t, m.URL))
-	if err := downloadZip(ctx, r, m.URL, zipPath, opts.DryRun); err != nil {
+	archivePath := filepath.Join(staging, manifestArchiveName(t, m))
+	if err := downloadArchive(ctx, r, m.URL, archivePath, archiveAccept(t), opts.DryRun); err != nil {
 		return err
 	}
-	extractedApp, err := extractZip(ctx, r, zipPath, staging, t, opts.DryRun)
+	if err := verifyArchive(ctx, r, t, m, archivePath, opts.DryRun); err != nil {
+		return err
+	}
+	extractedApp, err := extractArchive(ctx, r, archivePath, staging, t, opts.DryRun)
 	if err != nil {
 		return err
 	}
@@ -333,6 +351,8 @@ func fetchManifest(ctx context.Context, t targets.Target, currentVersion, channe
 		return fetchSparkleManifest(ctx, t, channel)
 	case targets.UpdaterSquirrelJSON:
 		return fetchSquirrelJSONManifest(ctx, t)
+	case targets.UpdaterTauriMinisign:
+		return fetchTauriMinisignManifest(ctx, t, currentVersion)
 	default:
 		return updateManifest{}, fmt.Errorf("target %s has unsupported updater kind %q", t.ID, t.Updater.Kind)
 	}
@@ -391,6 +411,24 @@ func fetchSquirrelJSONManifest(ctx context.Context, t targets.Target) (updateMan
 	return parseSquirrelJSONManifest(body)
 }
 
+func fetchTauriMinisignManifest(ctx context.Context, t targets.Target, currentVersion string) (updateManifest, error) {
+	target, arch := splitTauriPlatform(t.Updater.Platform)
+	endpoint := renderUpdaterTemplate(t.Updater.URLTemplate, map[string]string{
+		"target":   target,
+		"arch":     arch,
+		"version":  currentVersion,
+		"platform": t.Updater.Platform,
+	})
+	body, err := fetchURL(ctx, endpoint, renderUserAgent(t.Updater.UserAgent, currentVersion), "application/json", 1<<16)
+	if err != nil {
+		if errors.Is(err, errNoUpdate) {
+			return updateManifest{}, errNoUpdate
+		}
+		return updateManifest{}, err
+	}
+	return parseTauriMinisignManifest(body)
+}
+
 var errNoUpdate = errors.New("no update available")
 
 func noUpdateMessage(targetID string, channel string) string {
@@ -433,7 +471,12 @@ func parseHTTPPathJSONManifest(body []byte) (updateManifest, error) {
 	if err := json.Unmarshal(body, &m); err != nil {
 		return updateManifest{}, logUpgradeErrorNoContext("upgrade.http_path_json_manifest_parse_failed", fmt.Errorf("parse path JSON manifest: %w (body=%s)", err, string(body)))
 	}
-	return updateManifest(m), nil
+	return updateManifest{
+		URL:       m.URL,
+		Name:      m.Name,
+		Signature: "",
+		Format:    "",
+	}, nil
 }
 
 func parseSparkleAppcast(body []byte) (updateManifest, error) {
@@ -450,8 +493,10 @@ func parseSparkleAppcast(body []byte) (updateManifest, error) {
 		}
 		name := firstNonEmpty(item.Version, item.ShortVersionString, item.Title)
 		return updateManifest{
-			URL:  item.Enclosure.URL,
-			Name: name,
+			URL:       item.Enclosure.URL,
+			Name:      name,
+			Signature: "",
+			Format:    "",
 		}, nil
 	}
 	return updateManifest{}, errors.New("sparkle appcast contains no arm64 full zip enclosure")
@@ -467,9 +512,51 @@ func parseSquirrelJSONManifest(body []byte) (updateManifest, error) {
 			continue
 		}
 		name := firstNonEmpty(release.UpdateTo.Version, release.Version, release.UpdateTo.Name)
-		return updateManifest{URL: release.UpdateTo.URL, Name: name}, nil
+		return updateManifest{
+			URL:       release.UpdateTo.URL,
+			Name:      name,
+			Signature: "",
+			Format:    "",
+		}, nil
 	}
 	return updateManifest{}, errors.New("squirrel manifest contains no updateTo.url")
+}
+
+func parseTauriMinisignManifest(body []byte) (updateManifest, error) {
+	m := tauriMinisignManifest{
+		Version:   "",
+		Notes:     "",
+		PubDate:   "",
+		URL:       "",
+		Signature: "",
+		Format:    "",
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return updateManifest{}, logUpgradeErrorNoContext("upgrade.tauri_minisign_manifest_parse_failed", fmt.Errorf("parse Tauri minisign manifest JSON: %w (body=%s)", err, string(body)))
+	}
+	version := strings.TrimSpace(m.Version)
+	if version == "" {
+		return updateManifest{}, errors.New("tauri minisign manifest is missing version")
+	}
+	format := strings.TrimSpace(m.Format)
+	if format != "app" {
+		return updateManifest{}, fmt.Errorf("tauri minisign manifest format = %q, want app", format)
+	}
+	name := "Conductor-" + version + ".app.tar.gz"
+	return updateManifest{
+		URL:       strings.TrimSpace(m.URL),
+		Name:      name,
+		Signature: strings.TrimSpace(m.Signature),
+		Format:    format,
+	}, nil
+}
+
+func splitTauriPlatform(platform string) (string, string) {
+	index := strings.LastIndex(platform, "-")
+	if index == -1 {
+		return platform, ""
+	}
+	return platform[:index], platform[index+1:]
 }
 
 func renderUpdaterTemplate(template string, values map[string]string) string {
@@ -572,11 +659,11 @@ func makeStagingDir(ctx context.Context, t targets.Target, version string) (stri
 	return root, nil
 }
 
-// downloadZip streams the manifest URL to zipPath. It bypasses proxy
+// downloadArchive streams the manifest URL to archivePath. It bypasses proxy
 // configuration for the same reason the manifest fetch does.
-func downloadZip(ctx context.Context, r *patch.Runner, srcURL, zipPath string, dryRun bool) error {
-	upgradeLog.DebugContext(ctx, "upgrade.download_zip.boundary", "url", srcURL, "zip_path", zipPath, "dry_run", dryRun)
-	notef(r, fmt.Sprintf("downloading %s -> %s", srcURL, zipPath))
+func downloadArchive(ctx context.Context, r *patch.Runner, srcURL, archivePath, accept string, dryRun bool) error {
+	upgradeLog.DebugContext(ctx, "upgrade.download_archive.boundary", "url", srcURL, "archive_path", archivePath, "dry_run", dryRun)
+	notef(r, fmt.Sprintf("downloading %s -> %s", srcURL, archivePath))
 	if dryRun {
 		return nil
 	}
@@ -585,7 +672,7 @@ func downloadZip(ctx context.Context, r *patch.Runner, srcURL, zipPath string, d
 		return logUpgradeError(ctx, "upgrade.download_request_build_failed", fmt.Errorf("build download request: %w", err))
 	}
 	req.Header.Set("User-Agent", "desktop-via-clyde/upgrade")
-	req.Header.Set("Accept", "application/zip")
+	req.Header.Set("Accept", accept)
 	client := directHTTPClient(30 * time.Minute)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -595,17 +682,38 @@ func downloadZip(ctx context.Context, r *patch.Runner, srcURL, zipPath string, d
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("download status %d for %s", resp.StatusCode, srcURL)
 	}
-	out, err := os.Create(zipPath)
+	out, err := os.Create(archivePath)
 	if err != nil {
-		return logUpgradeError(ctx, "upgrade.download_zip_create_failed", fmt.Errorf("create zip file: %w", err))
+		return logUpgradeError(ctx, "upgrade.download_archive_create_failed", fmt.Errorf("create archive file: %w", err))
 	}
 	defer func() { _ = out.Close() }()
 	n, err := io.Copy(out, resp.Body)
 	if err != nil {
-		return logUpgradeError(ctx, "upgrade.download_zip_write_failed", fmt.Errorf("write zip body: %w", err))
+		return logUpgradeError(ctx, "upgrade.download_archive_write_failed", fmt.Errorf("write archive body: %w", err))
 	}
 	notef(r, fmt.Sprintf("downloaded %d bytes", n))
 	return nil
+}
+
+func archiveAccept(t targets.Target) string {
+	if t.Updater.Kind == targets.UpdaterTauriMinisign {
+		return "application/gzip"
+	}
+	return "application/zip"
+}
+
+func manifestArchiveName(t targets.Target, m updateManifest) string {
+	name := archiveName(t, m.URL)
+	if t.Updater.Kind != targets.UpdaterTauriMinisign {
+		return name
+	}
+	if strings.HasSuffix(name, ".tar.gz") {
+		return name
+	}
+	if m.Name != "" {
+		return m.Name
+	}
+	return name
 }
 
 func archiveName(t targets.Target, srcURL string) string {
@@ -617,6 +725,54 @@ func archiveName(t targets.Target, srcURL string) string {
 		}
 	}
 	return t.ID + ".zip"
+}
+
+func verifyArchive(ctx context.Context, r *patch.Runner, t targets.Target, m updateManifest, archivePath string, dryRun bool) error {
+	switch t.Updater.Kind {
+	case targets.UpdaterHTTPPathJSONManifest,
+		targets.UpdaterSparkleAppcast,
+		targets.UpdaterSquirrelJSON:
+		return nil
+	case targets.UpdaterTauriMinisign:
+		return verifyTauriMinisignArchive(ctx, r, t, m, archivePath, dryRun)
+	default:
+		return nil
+	}
+}
+
+func verifyTauriMinisignArchive(ctx context.Context, r *patch.Runner, t targets.Target, m updateManifest, archivePath string, dryRun bool) error {
+	notef(r, fmt.Sprintf("target=%s verify minisign signature for %s", t.ID, archivePath))
+	if m.Signature == "" {
+		return logUpgradeError(ctx, "upgrade.tauri_minisign_signature_missing", errors.New("tauri minisign manifest is missing signature"))
+	}
+	if dryRun {
+		return nil
+	}
+	artifact, err := os.ReadFile(archivePath)
+	if err != nil {
+		return logUpgradeError(ctx, "upgrade.tauri_minisign_archive_read_failed", fmt.Errorf("read downloaded archive for minisign verification: %w", err))
+	}
+	signatureFile, err := base64.StdEncoding.DecodeString(m.Signature)
+	if err != nil {
+		return logUpgradeError(ctx, "upgrade.tauri_minisign_signature_decode_failed", fmt.Errorf("decode tauri minisign signature: %w", err))
+	}
+	if err := verifyMinisign(ctx, t.Updater.MinisignPublicKey, artifact, signatureFile); err != nil {
+		return logUpgradeError(ctx, "upgrade.tauri_minisign_verify_failed", fmt.Errorf("verify minisign signature for %s: %w", archivePath, err))
+	}
+	return nil
+}
+
+func extractArchive(ctx context.Context, r *patch.Runner, archivePath, staging string, t targets.Target, dryRun bool) (string, error) {
+	switch t.Updater.Kind {
+	case targets.UpdaterHTTPPathJSONManifest,
+		targets.UpdaterSparkleAppcast,
+		targets.UpdaterSquirrelJSON:
+		return extractZip(ctx, r, archivePath, staging, t, dryRun)
+	case targets.UpdaterTauriMinisign:
+		return extractTarGz(ctx, r, archivePath, staging, t, dryRun)
+	default:
+		return extractZip(ctx, r, archivePath, staging, t, dryRun)
+	}
 }
 
 // extractZip unpacks the zip via /usr/bin/ditto which preserves bundle
@@ -646,6 +802,132 @@ func extractZip(ctx context.Context, r *patch.Runner, zipPath, staging string, t
 	}
 	notef(r, fmt.Sprintf("target=%s extracted app root %s differs from configured app name %s", t.ID, filepath.Base(fallbackApp), filepath.Base(t.AppPath)))
 	return fallbackApp, nil
+}
+
+func extractTarGz(ctx context.Context, r *patch.Runner, tarGzPath, staging string, t targets.Target, dryRun bool) (string, error) {
+	extractDir := filepath.Join(staging, "extracted")
+	expected := filepath.Join(extractDir, filepath.Base(t.AppPath))
+	if dryRun {
+		return expected, nil
+	}
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		return "", logUpgradeError(ctx, "upgrade.extract_dir_create_failed", fmt.Errorf("create extract dir: %w", err))
+	}
+	if err := writeTarGzArchive(ctx, tarGzPath, extractDir); err != nil {
+		return "", logUpgradeError(ctx, "upgrade.tauri_extract_tar_gz_failed", fmt.Errorf("extract tar.gz: %w", err))
+	}
+	if _, err := os.Stat(expected); err == nil {
+		return expected, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", logUpgradeError(ctx, "upgrade.extracted_app_stat_failed", fmt.Errorf("stat expected app %s: %w", expected, err))
+	}
+	fallbackApp, err := singleExtractedAppRoot(extractDir)
+	if err != nil {
+		return "", logUpgradeError(ctx, "upgrade.extracted_app_stat_failed", fmt.Errorf("expected %s inside tar.gz: %w", filepath.Base(t.AppPath), err))
+	}
+	notef(r, fmt.Sprintf("target=%s extracted app root %s differs from configured app name %s", t.ID, filepath.Base(fallbackApp), filepath.Base(t.AppPath)))
+	return fallbackApp, nil
+}
+
+func writeTarGzArchive(ctx context.Context, tarGzPath string, extractDir string) error {
+	file, err := os.Open(tarGzPath)
+	if err != nil {
+		return logUpgradeError(ctx, "upgrade.tar_gz_open_failed", fmt.Errorf("open %s: %w", tarGzPath, err))
+	}
+	defer func() { _ = file.Close() }()
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		return logUpgradeError(ctx, "upgrade.tar_gz_stream_open_failed", fmt.Errorf("open gzip stream: %w", err))
+	}
+	defer func() { _ = gzipReader.Close() }()
+	tarReader := tar.NewReader(gzipReader)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return logUpgradeError(ctx, "upgrade.tar_header_read_failed", fmt.Errorf("read tar header: %w", err))
+		}
+		if err := writeTarEntry(ctx, tarReader, header, extractDir); err != nil {
+			return err
+		}
+	}
+}
+
+func writeTarEntry(ctx context.Context, tarReader *tar.Reader, header *tar.Header, extractDir string) error {
+	slog.DebugContext(ctx, "upgrade.tar_entry", "name", header.Name, "type", int(header.Typeflag))
+	targetPath, err := safeExtractPath(ctx, extractDir, header.Name)
+	if err != nil {
+		return err
+	}
+	switch header.Typeflag {
+	case tar.TypeDir:
+		if err := os.MkdirAll(targetPath, header.FileInfo().Mode()); err != nil {
+			return logUpgradeError(ctx, "upgrade.tar_entry_dir_create_failed", fmt.Errorf("create directory %s: %w", targetPath, err))
+		}
+	case tar.TypeReg:
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return logUpgradeError(ctx, "upgrade.tar_entry_file_parent_create_failed", fmt.Errorf("create parent directory for %s: %w", targetPath, err))
+		}
+		out, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, header.FileInfo().Mode())
+		if err != nil {
+			return logUpgradeError(ctx, "upgrade.tar_entry_file_create_failed", fmt.Errorf("create file %s: %w", targetPath, err))
+		}
+		if _, err := io.Copy(out, tarReader); err != nil {
+			_ = out.Close()
+			return logUpgradeError(ctx, "upgrade.tar_entry_file_write_failed", fmt.Errorf("write file %s: %w", targetPath, err))
+		}
+		if err := out.Close(); err != nil {
+			return logUpgradeError(ctx, "upgrade.tar_entry_file_close_failed", fmt.Errorf("close file %s: %w", targetPath, err))
+		}
+	case tar.TypeSymlink:
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return logUpgradeError(ctx, "upgrade.tar_entry_symlink_parent_create_failed", fmt.Errorf("create parent directory for %s: %w", targetPath, err))
+		}
+		if err := os.Remove(targetPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return logUpgradeError(ctx, "upgrade.tar_entry_symlink_remove_failed", fmt.Errorf("remove existing symlink path %s: %w", targetPath, err))
+		}
+		if err := os.Symlink(header.Linkname, targetPath); err != nil {
+			return logUpgradeError(ctx, "upgrade.tar_entry_symlink_create_failed", fmt.Errorf("create symlink %s: %w", targetPath, err))
+		}
+	case tar.TypeLink:
+		linkPath, err := safeExtractPath(ctx, extractDir, header.Linkname)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return logUpgradeError(ctx, "upgrade.tar_entry_hardlink_parent_create_failed", fmt.Errorf("create parent directory for %s: %w", targetPath, err))
+		}
+		if err := os.Link(linkPath, targetPath); err != nil {
+			return logUpgradeError(ctx, "upgrade.tar_entry_hardlink_create_failed", fmt.Errorf("create hard link %s: %w", targetPath, err))
+		}
+	default:
+		return fmt.Errorf("unsupported tar entry %s type %d", header.Name, header.Typeflag)
+	}
+	return nil
+}
+
+func safeExtractPath(ctx context.Context, root string, name string) (string, error) {
+	cleaned := filepath.Clean(name)
+	if cleaned == "." {
+		return "", fmt.Errorf("empty tar entry path")
+	}
+	if filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("tar entry %s is absolute", name)
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("tar entry %s escapes extraction root", name)
+	}
+	targetPath := filepath.Join(root, cleaned)
+	relativePath, err := filepath.Rel(root, targetPath)
+	if err != nil {
+		return "", logUpgradeError(ctx, "upgrade.tar_entry_path_resolve_failed", fmt.Errorf("resolve tar entry %s: %w", name, err))
+	}
+	if relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("tar entry %s escapes extraction root", name)
+	}
+	return targetPath, nil
 }
 
 func singleExtractedAppRoot(extractDir string) (string, error) {
