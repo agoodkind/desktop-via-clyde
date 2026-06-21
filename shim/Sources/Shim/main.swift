@@ -85,6 +85,23 @@ struct LaunchPolicy: Decodable {
     case arguments
     case preflights
   }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    proxyHost = try container.decode(String.self, forKey: .proxyHost)
+    proxyPort = try container.decode(UInt16.self, forKey: .proxyPort)
+    caCertificate = try container.decode(String.self, forKey: .caCertificate)
+    noProxy = try container.decode(String.self, forKey: .noProxy)
+    launchWorkingDirectory = try container.decode(String.self, forKey: .launchWorkingDirectory)
+    ignoreDryRunSignal = try container.decodeIfPresent(String.self, forKey: .ignoreDryRunSignal)
+    // Tolerate null or absent collections so a target that injects no
+    // environment, arguments, or preflights (for example a Tauri app that
+    // needs only proxy env, where the serializer emits "arguments": null)
+    // loads instead of failing to decode.
+    environment = try container.decodeIfPresent([EnvAction].self, forKey: .environment) ?? []
+    arguments = try container.decodeIfPresent([ArgAction].self, forKey: .arguments) ?? []
+    preflights = try container.decodeIfPresent([Preflight].self, forKey: .preflights) ?? []
+  }
 }
 
 // MARK: - LaunchContext
