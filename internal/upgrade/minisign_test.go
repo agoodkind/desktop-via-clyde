@@ -40,6 +40,45 @@ func TestVerifyMinisignRejectsKeyIDMismatch(t *testing.T) {
 	}
 }
 
+// Golden vector produced by the reference minisign 0.12 tool (prehashed, the
+// algorithm conductor's Tauri updater uses). Reference-verified with
+// `minisign -V`. This guards the real wire format against regressions in the
+// trusted-comment concatenation; a self-generated fixture cannot, because a bug
+// in signing and verifying agree with each other.
+const (
+	goldenMinisignPublicKey = "RWRQLX8UHSZxXNisvmahvVFHLdzBixj/FI1f9wjUUtEMs3vUmRKGg27O"
+	goldenMinisignPayload   = "desktop-via-clyde minisign golden payload\n"
+	goldenMinisignSignature = "untrusted comment: signature from minisign secret key\n" +
+		"RURQLX8UHSZxXOomjjUJoV1sFKQA3965fqkgKOnJ0S2MvrVm3RxFksLNbxs3ND80yEl2OfWjAAC9ZNs3hxofzNHD4MgCvsP53g0=\n" +
+		"trusted comment: golden prehash vector\n" +
+		"IB8Aq1G5TY0Pc3IPtfTMVDstBpbFaVCqYJakNsu70grGZ7QERnDZbUeNG9X83DgDtPSChIHhtNIYELM3KeAjDA==\n"
+)
+
+func TestVerifyMinisignAcceptsRealMinisignPrehashVector(t *testing.T) {
+	err := verifyMinisign(
+		context.Background(),
+		goldenMinisignPublicKey,
+		[]byte(goldenMinisignPayload),
+		[]byte(goldenMinisignSignature),
+	)
+	if err != nil {
+		t.Fatalf("verifyMinisign on a real minisign-signed vector: %v", err)
+	}
+}
+
+func TestVerifyMinisignRejectsRealVectorWithMutatedTrustedComment(t *testing.T) {
+	mutated := strings.Replace(goldenMinisignSignature, "golden prehash vector", "tampered comment xxxxx", 1)
+	err := verifyMinisign(
+		context.Background(),
+		goldenMinisignPublicKey,
+		[]byte(goldenMinisignPayload),
+		[]byte(mutated),
+	)
+	if err == nil {
+		t.Fatal("verifyMinisign should reject a real vector whose trusted comment was mutated")
+	}
+}
+
 func minisignFixture(t *testing.T, payload []byte) (string, []byte) {
 	t.Helper()
 	seed := make([]byte, ed25519.SeedSize)
@@ -63,8 +102,11 @@ func minisignFixture(t *testing.T, payload []byte) (string, []byte) {
 	signatureBlob = append(signatureBlob, signature...)
 
 	trustedComment := []byte("timestamp:1\tfile:test")
-	globalMessage := make([]byte, 0, len(signatureBlob)+len(trustedComment))
-	globalMessage = append(globalMessage, signatureBlob...)
+	// Real minisign signs the bare 64-byte signature followed by the trusted
+	// comment, not the 74-byte blob. The fixture must match so the test exercises
+	// the real wire format rather than agreeing with a verifier bug.
+	globalMessage := make([]byte, 0, len(signature)+len(trustedComment))
+	globalMessage = append(globalMessage, signature...)
 	globalMessage = append(globalMessage, trustedComment...)
 	globalSignature := ed25519.Sign(privateKey, globalMessage)
 	lines := []string{
