@@ -22,32 +22,77 @@ const (
 	trustedCommentPrefix      = "trusted comment: "
 )
 
+type minisignSignature struct {
+	blob            []byte
+	keyID           []byte
+	signature       []byte
+	algorithm       string
+	trustedComment  []byte
+	globalSignature []byte
+}
+
 func verifyMinisign(ctx context.Context, publicKeyLine string, data []byte, signatureFile []byte) error {
+	algorithm, err := minisignSignatureAlgorithm(ctx, signatureFile)
+	if err != nil {
+		return err
+	}
+	switch algorithm {
+	case minisignPrehashAlgorithm:
+		digest := blake2b.Sum512(data)
+		return verifyMinisignDigest(ctx, publicKeyLine, digest[:], signatureFile)
+	case minisignLegacyAlgorithm:
+		return verifyMinisignMessage(ctx, publicKeyLine, data, signatureFile, minisignLegacyAlgorithm)
+	default:
+		return fmt.Errorf("minisign signature algorithm %q is unsupported", algorithm)
+	}
+}
+
+func verifyMinisignDigest(ctx context.Context, publicKeyLine string, digest []byte, signatureFile []byte) error {
+	if len(digest) != blake2b.Size {
+		return fmt.Errorf("minisign digest has %d bytes, want %d", len(digest), blake2b.Size)
+	}
+	return verifyMinisignMessage(ctx, publicKeyLine, digest, signatureFile, minisignPrehashAlgorithm)
+}
+
+func verifyMinisignMessage(
+	ctx context.Context,
+	publicKeyLine string,
+	message []byte,
+	signatureFile []byte,
+	expectedAlgorithm string,
+) error {
 	publicKey, publicKeyID, err := decodeMinisignPublicKey(ctx, publicKeyLine)
 	if err != nil {
 		return err
 	}
-	signatureBlob, signatureKeyID, signature, algorithm, trustedComment, globalSignature, err := decodeMinisignSignature(ctx, signatureFile)
+	decodedSignature, err := decodeMinisignSignature(ctx, signatureFile)
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(signatureKeyID, publicKeyID) {
+	if !bytes.Equal(decodedSignature.keyID, publicKeyID) {
 		return fmt.Errorf("minisign key id mismatch")
 	}
-	message, err := minisignMessage(algorithm, data)
-	if err != nil {
-		return err
+	if decodedSignature.algorithm != expectedAlgorithm {
+		return fmt.Errorf("minisign signature algorithm %q does not match expected %q", decodedSignature.algorithm, expectedAlgorithm)
 	}
-	if !ed25519.Verify(publicKey, message, signature) {
+	if !ed25519.Verify(publicKey, message, decodedSignature.signature) {
 		return fmt.Errorf("minisign payload signature verification failed")
 	}
-	globalMessage := make([]byte, 0, len(signatureBlob)+len(trustedComment))
-	globalMessage = append(globalMessage, signatureBlob...)
-	globalMessage = append(globalMessage, trustedComment...)
-	if !ed25519.Verify(publicKey, globalMessage, globalSignature) {
+	globalMessage := make([]byte, 0, len(decodedSignature.blob)+len(decodedSignature.trustedComment))
+	globalMessage = append(globalMessage, decodedSignature.blob...)
+	globalMessage = append(globalMessage, decodedSignature.trustedComment...)
+	if !ed25519.Verify(publicKey, globalMessage, decodedSignature.globalSignature) {
 		return fmt.Errorf("minisign trusted comment signature verification failed")
 	}
 	return nil
+}
+
+func minisignSignatureAlgorithm(ctx context.Context, signatureFile []byte) (string, error) {
+	decodedSignature, err := decodeMinisignSignature(ctx, signatureFile)
+	if err != nil {
+		return "", err
+	}
+	return decodedSignature.algorithm, nil
 }
 
 func decodeMinisignPublicKey(ctx context.Context, publicKeyLine string) (ed25519.PublicKey, []byte, error) {
@@ -71,48 +116,43 @@ func decodeMinisignPublicKey(ctx context.Context, publicKeyLine string) (ed25519
 	return publicKey, keyID, nil
 }
 
-func decodeMinisignSignature(ctx context.Context, signatureFile []byte) ([]byte, []byte, []byte, string, []byte, []byte, error) {
+func decodeMinisignSignature(ctx context.Context, signatureFile []byte) (minisignSignature, error) {
 	lines := minisignLines(string(signatureFile))
 	if len(lines) != 4 {
-		return nil, nil, nil, "", nil, nil, fmt.Errorf("minisign signature file has %d non-empty lines, want 4", len(lines))
+		return minisignSignature{}, fmt.Errorf("minisign signature file has %d non-empty lines, want 4", len(lines))
 	}
 	signatureBlob, err := base64.StdEncoding.DecodeString(strings.TrimSpace(lines[1]))
 	if err != nil {
-		return nil, nil, nil, "", nil, nil, logUpgradeError(ctx, "upgrade.minisign_sig_base64", fmt.Errorf("decode minisign signature blob: %w", err))
+		return minisignSignature{}, logUpgradeError(ctx, "upgrade.minisign_sig_base64", fmt.Errorf("decode minisign signature blob: %w", err))
 	}
 	if len(signatureBlob) != minisignSignatureBlobSize {
-		return nil, nil, nil, "", nil, nil, fmt.Errorf("minisign signature blob has %d bytes, want %d", len(signatureBlob), minisignSignatureBlobSize)
+		return minisignSignature{}, fmt.Errorf("minisign signature blob has %d bytes, want %d", len(signatureBlob), minisignSignatureBlobSize)
 	}
 	algorithm := string(signatureBlob[:minisignAlgorithmSize])
 	if algorithm != minisignPrehashAlgorithm && algorithm != minisignLegacyAlgorithm {
-		return nil, nil, nil, "", nil, nil, fmt.Errorf("minisign signature algorithm %q is unsupported", algorithm)
+		return minisignSignature{}, fmt.Errorf("minisign signature algorithm %q is unsupported", algorithm)
 	}
 	trustedComment, err := parseTrustedComment(lines[2])
 	if err != nil {
-		return nil, nil, nil, "", nil, nil, err
+		return minisignSignature{}, err
 	}
 	globalSignature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(lines[3]))
 	if err != nil {
-		return nil, nil, nil, "", nil, nil, logUpgradeError(ctx, "upgrade.minisign_global_sig_base64", fmt.Errorf("decode minisign trusted comment signature: %w", err))
+		return minisignSignature{}, logUpgradeError(ctx, "upgrade.minisign_global_sig_base64", fmt.Errorf("decode minisign trusted comment signature: %w", err))
 	}
 	if len(globalSignature) != ed25519.SignatureSize {
-		return nil, nil, nil, "", nil, nil, fmt.Errorf("minisign trusted comment signature has %d bytes, want %d", len(globalSignature), ed25519.SignatureSize)
+		return minisignSignature{}, fmt.Errorf("minisign trusted comment signature has %d bytes, want %d", len(globalSignature), ed25519.SignatureSize)
 	}
 	signatureKeyID := append([]byte(nil), signatureBlob[minisignAlgorithmSize:minisignAlgorithmSize+minisignKeyIDSize]...)
 	signature := append([]byte(nil), signatureBlob[minisignAlgorithmSize+minisignKeyIDSize:]...)
-	return signatureBlob, signatureKeyID, signature, algorithm, trustedComment, globalSignature, nil
-}
-
-func minisignMessage(algorithm string, data []byte) ([]byte, error) {
-	switch algorithm {
-	case minisignPrehashAlgorithm:
-		digest := blake2b.Sum512(data)
-		return digest[:], nil
-	case minisignLegacyAlgorithm:
-		return data, nil
-	default:
-		return nil, fmt.Errorf("minisign signature algorithm %q is unsupported", algorithm)
-	}
+	return minisignSignature{
+		blob:            signatureBlob,
+		keyID:           signatureKeyID,
+		signature:       signature,
+		algorithm:       algorithm,
+		trustedComment:  trustedComment,
+		globalSignature: globalSignature,
+	}, nil
 }
 
 func parseTrustedComment(line string) ([]byte, error) {
