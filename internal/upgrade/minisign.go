@@ -78,8 +78,12 @@ func verifyMinisignMessage(
 	if !ed25519.Verify(publicKey, message, decodedSignature.signature) {
 		return fmt.Errorf("minisign payload signature verification failed")
 	}
-	globalMessage := make([]byte, 0, len(decodedSignature.blob)+len(decodedSignature.trustedComment))
-	globalMessage = append(globalMessage, decodedSignature.blob...)
+	// The global signature covers the bare 64-byte ed25519 signature followed by
+	// the trusted comment, NOT the 74-byte blob (which prepends the 2-byte
+	// algorithm and 8-byte key id). See jedisct1/minisign: the signed buffer is
+	// sig_struct.sig || trusted_comment.
+	globalMessage := make([]byte, 0, len(decodedSignature.signature)+len(decodedSignature.trustedComment))
+	globalMessage = append(globalMessage, decodedSignature.signature...)
 	globalMessage = append(globalMessage, decodedSignature.trustedComment...)
 	if !ed25519.Verify(publicKey, globalMessage, decodedSignature.globalSignature) {
 		return fmt.Errorf("minisign trusted comment signature verification failed")
