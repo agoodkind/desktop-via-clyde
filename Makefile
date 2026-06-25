@@ -28,6 +28,8 @@ GO_MK_DEV_DIR ?= $(HOME)/Sites/go-makefile
 # test, and govulncheck target, so the embedded files exist before any target
 # compiles a package that go:embeds them.
 GO_MK_GENERATE := go-generated-prereqs
+GO_MK_GENERATE_INPUTS := shim injector api
+GO_MK_GENERATE_OUTPUTS := internal/embed/shim internal/embed/clyde-inject.dylib
 
 # Machine-local signing and release overrides live in untracked config.mk.
 -include config.mk
