@@ -29,7 +29,7 @@ GO_MK_DEV_DIR ?= $(HOME)/Sites/go-makefile
 # compiles a package that go:embeds them.
 GO_MK_GENERATE := go-generated-prereqs
 GO_MK_GENERATE_INPUTS := shim injector api buf.yaml buf.gen.yaml
-GO_MK_GENERATE_OUTPUTS := internal/embed/shim internal/embed/clyde-inject.dylib
+GO_MK_GENERATE_OUTPUTS := internal/embed/shim internal/embed/clyde-inject.dylib shim/.make/osv-scanner.toml
 
 # Machine-local signing and release overrides live in untracked config.mk.
 -include config.mk
@@ -66,13 +66,13 @@ shim:
 	@$(MAKE) shim-build
 
 shim-build:
-	$(MAKE) -C $(REPO_ROOT)/shim build
+	SWIFT_MK_SKIP_FETCH= $(MAKE) -C $(REPO_ROOT)/shim build
 
 shim-test:
-	$(MAKE) -C $(REPO_ROOT)/shim test
+	SWIFT_MK_SKIP_FETCH= $(MAKE) -C $(REPO_ROOT)/shim test
 
 shim-fmt:
-	$(MAKE) -C $(REPO_ROOT)/shim fmt
+	SWIFT_MK_SKIP_FETCH= $(MAKE) -C $(REPO_ROOT)/shim fmt
 
 shim-clean:
 	$(MAKE) -C $(REPO_ROOT)/shim clean

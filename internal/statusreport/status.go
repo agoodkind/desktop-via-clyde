@@ -184,6 +184,10 @@ func buildTargetStatus(ctx context.Context, target targets.Target, multiState st
 			result.Notes += "; " + drift
 		}
 	}
+	if drift := providerTLSFailureNoteFn(target); drift != "" {
+		result.State = "drifted"
+		result.Notes += "; " + drift
+	}
 
 	currentVersion := readBundleVersionFn(target)
 	if !developmentSigned {
