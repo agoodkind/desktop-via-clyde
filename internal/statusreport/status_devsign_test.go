@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/devsign"
+	"goodkind.io/desktop-via-clyde/internal/spec"
 	"goodkind.io/desktop-via-clyde/internal/state"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
@@ -252,6 +253,145 @@ func TestBuildTargetStatusDevelopmentSigningDriftsWhenMITMTrustMissing(t *testin
 	}
 	if !strings.Contains(status.Notes, "launch policy CA is not trusted") {
 		t.Fatalf("notes = %q, want trust drift", status.Notes)
+	}
+}
+
+func TestBuildTargetStatusDriftsWhenProviderTLSFailedRecently(t *testing.T) {
+	appPath := filepath.Join(t.TempDir(), "Conductor.app")
+	if err := os.MkdirAll(filepath.Join(appPath, "Contents", "MacOS"), 0o755); err != nil {
+		t.Fatalf("MkdirAll app contents: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(appPath, "Contents", "MacOS", "Conductor.real"), []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile real binary: %v", err)
+	}
+
+	originalRuntimeBundleStatusesFn := runtimeBundleStatusesFn
+	originalReadBundleVersionFn := readBundleVersionFn
+	originalTrustedMITMCADriftFn := trustedMITMCADriftFn
+	originalProviderTLSFailureNoteFn := providerTLSFailureNoteFn
+	runtimeBundleStatusesFn = func(_ context.Context, _ targets.Target, expectLocalTeam bool) []RuntimeBundleStatus {
+		if !expectLocalTeam {
+			t.Fatal("shimmed bundle unexpectedly skipped local runtime team check")
+		}
+		return []RuntimeBundleStatus{
+			{BundleID: "com.conductor.app", Path: ".", TeamID: "H3BMXM4W7H", State: string(runtimeBundleStatePatched)},
+		}
+	}
+	readBundleVersionFn = func(target targets.Target) string {
+		if target.AppPath != appPath {
+			t.Fatalf("readBundleVersion target = %q, want %q", target.AppPath, appPath)
+		}
+		return "0.70.0"
+	}
+	trustedMITMCADriftFn = func(context.Context, targets.Target) string { return "" }
+	providerTLSFailureNoteFn = func(target targets.Target) string {
+		if target.ID != "conductor" {
+			t.Fatalf("providerTLSFailureNote target = %q, want conductor", target.ID)
+		}
+		return "provider-health=client-tls-failed host=api.conductor.build"
+	}
+	t.Cleanup(func() {
+		runtimeBundleStatusesFn = originalRuntimeBundleStatusesFn
+		readBundleVersionFn = originalReadBundleVersionFn
+		trustedMITMCADriftFn = originalTrustedMITMCADriftFn
+		providerTLSFailureNoteFn = originalProviderTLSFailureNoteFn
+	})
+
+	target := targets.Target{
+		ID:       "conductor",
+		AppPath:  appPath,
+		ExecName: "Conductor",
+		LaunchPolicy: spec.LaunchPolicySpec{
+			ProxyHost: "127.0.0.1",
+			ProxyPort: 48731,
+		},
+	}
+	multiState := state.MultiState{
+		Targets: map[string]state.TargetState{
+			"conductor": {
+				PatchedVersion: "0.70.0",
+				PatchedAt:      time.Unix(0, 0).UTC(),
+				SignIdentity:   "Developer ID Application: Alex Goodkind (H3BMXM4W7H)",
+			},
+		},
+	}
+
+	status, err := buildTargetStatus(context.Background(), target, multiState)
+	if err != nil {
+		t.Fatalf("buildTargetStatus: %v", err)
+	}
+	if status.State != "drifted" {
+		t.Fatalf("state = %q, want drifted", status.State)
+	}
+	if !strings.Contains(status.Notes, "provider-health=client-tls-failed") {
+		t.Fatalf("notes = %q, want provider TLS drift", status.Notes)
+	}
+}
+
+func TestBuildTargetStatusStaysPatchedWithoutProviderTLSFailure(t *testing.T) {
+	appPath := filepath.Join(t.TempDir(), "Conductor.app")
+	if err := os.MkdirAll(filepath.Join(appPath, "Contents", "MacOS"), 0o755); err != nil {
+		t.Fatalf("MkdirAll app contents: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(appPath, "Contents", "MacOS", "Conductor.real"), []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile real binary: %v", err)
+	}
+
+	originalRuntimeBundleStatusesFn := runtimeBundleStatusesFn
+	originalReadBundleVersionFn := readBundleVersionFn
+	originalTrustedMITMCADriftFn := trustedMITMCADriftFn
+	originalProviderTLSFailureNoteFn := providerTLSFailureNoteFn
+	runtimeBundleStatusesFn = func(_ context.Context, _ targets.Target, expectLocalTeam bool) []RuntimeBundleStatus {
+		if !expectLocalTeam {
+			t.Fatal("shimmed bundle unexpectedly skipped local runtime team check")
+		}
+		return []RuntimeBundleStatus{
+			{BundleID: "com.conductor.app", Path: ".", TeamID: "H3BMXM4W7H", State: string(runtimeBundleStatePatched)},
+		}
+	}
+	readBundleVersionFn = func(target targets.Target) string {
+		if target.AppPath != appPath {
+			t.Fatalf("readBundleVersion target = %q, want %q", target.AppPath, appPath)
+		}
+		return "0.70.0"
+	}
+	trustedMITMCADriftFn = func(context.Context, targets.Target) string { return "" }
+	providerTLSFailureNoteFn = func(targets.Target) string { return "" }
+	t.Cleanup(func() {
+		runtimeBundleStatusesFn = originalRuntimeBundleStatusesFn
+		readBundleVersionFn = originalReadBundleVersionFn
+		trustedMITMCADriftFn = originalTrustedMITMCADriftFn
+		providerTLSFailureNoteFn = originalProviderTLSFailureNoteFn
+	})
+
+	target := targets.Target{
+		ID:       "conductor",
+		AppPath:  appPath,
+		ExecName: "Conductor",
+		LaunchPolicy: spec.LaunchPolicySpec{
+			ProxyHost: "127.0.0.1",
+			ProxyPort: 48731,
+		},
+	}
+	multiState := state.MultiState{
+		Targets: map[string]state.TargetState{
+			"conductor": {
+				PatchedVersion: "0.70.0",
+				PatchedAt:      time.Unix(0, 0).UTC(),
+				SignIdentity:   "Developer ID Application: Alex Goodkind (H3BMXM4W7H)",
+			},
+		},
+	}
+
+	status, err := buildTargetStatus(context.Background(), target, multiState)
+	if err != nil {
+		t.Fatalf("buildTargetStatus: %v", err)
+	}
+	if status.State != "patched" {
+		t.Fatalf("state = %q, want patched", status.State)
+	}
+	if strings.Contains(status.Notes, "provider-health=client-tls-failed") {
+		t.Fatalf("notes = %q, want no provider TLS drift", status.Notes)
 	}
 }
 
