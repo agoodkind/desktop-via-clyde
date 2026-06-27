@@ -66,13 +66,13 @@ shim:
 	@$(MAKE) shim-build
 
 shim-build:
-	$(MAKE) -C $(REPO_ROOT)/shim build
+	SWIFT_MK_SKIP_FETCH= $(MAKE) -C $(REPO_ROOT)/shim build
 
 shim-test:
-	$(MAKE) -C $(REPO_ROOT)/shim test
+	SWIFT_MK_SKIP_FETCH= $(MAKE) -C $(REPO_ROOT)/shim test
 
 shim-fmt:
-	$(MAKE) -C $(REPO_ROOT)/shim fmt
+	SWIFT_MK_SKIP_FETCH= $(MAKE) -C $(REPO_ROOT)/shim fmt
 
 shim-clean:
 	$(MAKE) -C $(REPO_ROOT)/shim clean
