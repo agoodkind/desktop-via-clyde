@@ -8,12 +8,12 @@
 # desktop-via-clyde Makefile.
 # Project-local generated prerequisites live under internal/embed.
 
-# Identity.
+# Identity. DIST_DIR stays the default `dist`: the shared release workflow
+# attests and uploads dist/*.tar.gz, so an override would publish nothing.
 BINARY     := desktop-via-clyde
 CMD        := ./cmd/$(BINARY)
 VPKG       := goodkind.io/desktop-via-clyde/internal/version
 GKLOG_VPKG := goodkind.io/gklog/version
-DIST_DIR   := bin
 BUNDLE_ID  := io.goodkind.desktop-via-clyde
 
 GO_BUILD_TAGS        := gklog_stamped
