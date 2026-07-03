@@ -2,6 +2,10 @@
 package version
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"os"
 	"strings"
 
 	gklogversion "goodkind.io/gklog/version"
@@ -21,7 +25,28 @@ var BuildTime = "unknown"
 
 // BuildHash returns the gklog binary hash stamped by go-makefile.
 func BuildHash() string {
-	return strings.TrimSpace(gklogversion.BinHash)
+	stampedHash := strings.TrimSpace(gklogversion.BinHash)
+	if stampedHash != "" && stampedHash != "unknown" {
+		return stampedHash
+	}
+	return runtimeBuildHash()
+}
+
+func runtimeBuildHash() string {
+	executablePath, err := os.Executable()
+	if err != nil {
+		return "unknown"
+	}
+	file, err := os.Open(executablePath)
+	if err != nil {
+		return "unknown"
+	}
+	defer func() { _ = file.Close() }()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "unknown"
+	}
+	return hex.EncodeToString(hash.Sum(nil))[:12]
 }
 
 // String returns a concise human-readable build identifier for logging.
