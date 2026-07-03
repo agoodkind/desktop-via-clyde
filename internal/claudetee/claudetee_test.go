@@ -3,6 +3,7 @@ package claudetee
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,6 +169,73 @@ func TestInstallRefusesWhenRealExists(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("expected 'already exists' error, got: %v", err)
+	}
+}
+
+func TestInstallDefersWhenTerminateIsDisallowedAndMatchingProcessIsRunning(t *testing.T) {
+	opts, _ := setupFakeBundledCLI(t)
+	var out bytes.Buffer
+	opts.Out = &out
+	opts.AllowTerminate = false
+	opts.TerminateProcessNames = []string{"Claude"}
+
+	originalNameMatches := processNameMatches
+	originalKillName := killProcessName
+	processNameMatches = func(context.Context, string) (bool, error) {
+		return true, nil
+	}
+	killed := false
+	killProcessName = func(context.Context, string) error {
+		killed = true
+		return nil
+	}
+	t.Cleanup(func() {
+		processNameMatches = originalNameMatches
+		killProcessName = originalKillName
+	})
+
+	err := Install(context.Background(), opts)
+	if !errors.Is(err, ErrProcessesRunning) {
+		t.Fatalf("Install error = %v, want ErrProcessesRunning", err)
+	}
+	if killed {
+		t.Fatal("pkill ran even though termination was disallowed")
+	}
+}
+
+func TestStopConfiguredProcessesTerminatesMatchingProcessesWhenAllowed(t *testing.T) {
+	var out bytes.Buffer
+	opts := Options{
+		AllowTerminate:           true,
+		TerminateProcessNames:    []string{"Claude"},
+		TerminateProcessPatterns: []string{"claude-helper"},
+	}
+
+	originalKillName := killProcessName
+	originalKillPattern := killProcessPattern
+	killedName := false
+	killedPattern := false
+	killProcessName = func(context.Context, string) error {
+		killedName = true
+		return nil
+	}
+	killProcessPattern = func(context.Context, string) error {
+		killedPattern = true
+		return nil
+	}
+	t.Cleanup(func() {
+		killProcessName = originalKillName
+		killProcessPattern = originalKillPattern
+	})
+
+	if err := stopConfiguredProcesses(context.Background(), opts, &out); err != nil {
+		t.Fatalf("stopConfiguredProcesses: %v", err)
+	}
+	if !killedName {
+		t.Fatal("name-based kill did not run")
+	}
+	if !killedPattern {
+		t.Fatal("pattern-based kill did not run")
 	}
 }
 
