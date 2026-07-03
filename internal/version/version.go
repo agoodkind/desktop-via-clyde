@@ -1,7 +1,11 @@
 // Package version exposes build-time metadata for desktop-via-clyde.
 package version
 
-import "strings"
+import (
+	"strings"
+
+	gklogversion "goodkind.io/gklog/version"
+)
 
 // Commit is the git commit SHA stamped at build time.
 var Commit = "unknown"
@@ -14,6 +18,11 @@ var Dirty = "false"
 
 // BuildTime is the RFC3339 timestamp stamped at build time.
 var BuildTime = "unknown"
+
+// BuildHash returns the gklog binary hash stamped by go-makefile.
+func BuildHash() string {
+	return strings.TrimSpace(gklogversion.BinHash)
+}
 
 // String returns a concise human-readable build identifier for logging.
 func String() string {
