@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/appguard"
+	"goodkind.io/desktop-via-clyde/internal/bundlemutate"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/clock"
@@ -220,19 +221,13 @@ func Run(ctx context.Context, t targets.Target, opts Options) error {
 	if err != nil {
 		return err
 	}
-	if opts.CloseBeforeMutate {
-		if err := appguard.EnsureClosed(ctx, t, appguard.Options{
-			DryRun:  opts.DryRun,
-			Out:     opts.Out,
-			Timeout: 0,
-		}); err != nil {
-			return logUpgradeError(ctx, "upgrade.close_app_failed", fmt.Errorf("close app before bundle swap: %w", err))
+	if err := runStagedUpgrade(ctx, t, extractedApp, opts); err != nil {
+		if errors.Is(err, appguard.ErrAppRunning) {
+			message := fmt.Sprintf("deferred: target=%s app running at mutation time; retry when closed", t.ID)
+			notef(r, message)
+			patch.MarkSkipped(r, message)
+			return nil
 		}
-	}
-	if err := swapBundle(ctx, r, t, extractedApp, opts.DryRun); err != nil {
-		return err
-	}
-	if err := patchBundleAfterUpgrade(ctx, r, t, opts); err != nil {
 		return err
 	}
 
@@ -276,18 +271,58 @@ func CheckAvailable(ctx context.Context, t targets.Target, channelOverride strin
 	}, nil
 }
 
-func patchBundleAfterUpgrade(ctx context.Context, r *patch.Runner, t targets.Target, opts Options) error {
+func runStagedUpgrade(ctx context.Context, t targets.Target, extractedApp string, opts Options) error {
 	patchOpts := patch.Options{
 		DryRun:            opts.DryRun,
 		MigrateKeychain:   opts.MigrateKeychain,
 		Out:               opts.Out,
-		LogOut:            r.RawOut,
+		LogOut:            opts.LogOut,
 		Progress:          opts.Progress,
 		Trace:             nil,
-		CloseBeforeMutate: opts.CloseBeforeMutate,
+		CloseBeforeMutate: false,
+		AppPathOverride:   "",
+		FinalAppPath:      t.AppPath,
 	}
-	if err := patch.Patch(ctx, t, patchOpts); err != nil {
-		return logUpgradeError(ctx, "upgrade.repatch_failed", fmt.Errorf("re-patch after swap: %w", err))
+	mutateOpts := bundlemutate.Options{
+		DryRun:  opts.DryRun,
+		Out:     opts.Out,
+		Timeout: 0,
+	}
+	policy := mutationPolicy(opts)
+	var prepared patch.PreparedBundle
+	err := bundlemutate.Mutate(ctx, t, policy, mutateOpts, func(mutateCtx context.Context) error {
+		return bundlemutate.StagedSwap(mutateCtx, t, bundlemutate.SwapOptions{
+			AdoptPath: extractedApp,
+			PreCommit: func(preCommitCtx context.Context) error {
+				return bundlemutate.Mutate(preCommitCtx, t, policy, mutateOpts, func(context.Context) error {
+					return nil
+				})
+			},
+			Verify: func(verifyCtx context.Context) error {
+				if err := patch.FinalizeAfterSwap(verifyCtx, prepared, t, patchOpts); err != nil {
+					return logUpgradeError(verifyCtx, "upgrade.staged_finalize_failed", fmt.Errorf("finalize staged patch for %s: %w", t.ID, err))
+				}
+				return nil
+			},
+			Options: mutateOpts,
+		}, func(stagedAppPath string) error {
+			patchOpts.AppPathOverride = stagedAppPath
+			var prepareErr error
+			prepared, prepareErr = patch.PrepareForSwap(mutateCtx, t, patchOpts)
+			if prepareErr != nil {
+				return logUpgradeError(mutateCtx, "upgrade.staged_prepare_failed", fmt.Errorf("prepare staged patch for %s: %w", t.ID, prepareErr))
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return logUpgradeError(ctx, "upgrade.staged_mutation_failed", fmt.Errorf("run staged upgrade mutation for %s: %w", t.ID, err))
+	}
+	if opts.DryRun {
+		if err := patch.FinalizeAfterSwap(ctx, prepared, t, patchOpts); err != nil {
+			return logUpgradeError(ctx, "upgrade.staged_finalize_failed", fmt.Errorf("finalize staged patch for %s: %w", t.ID, err))
+		}
+		return nil
 	}
 	return nil
 }
@@ -579,15 +614,19 @@ func handleCurrentVersion(
 	}
 	if !patched {
 		notef(r, fmt.Sprintf("target=%s already on version %s; patching clean bundle", t.ID, currentVersion))
-		if err := patch.Patch(ctx, t, patch.Options{
+		patchOpts := patch.Options{
 			DryRun:            opts.DryRun,
 			MigrateKeychain:   opts.MigrateKeychain,
 			Out:               opts.Out,
 			LogOut:            r.RawOut,
 			Progress:          opts.Progress,
 			Trace:             nil,
-			CloseBeforeMutate: opts.CloseBeforeMutate,
-		}); err != nil {
+			CloseBeforeMutate: false,
+			AppPathOverride:   "",
+			FinalAppPath:      "",
+		}
+		patchOpts.CloseBeforeMutate = opts.CloseBeforeMutate
+		if err := patch.Patch(ctx, t, patchOpts); err != nil {
 			return logUpgradeError(ctx, "upgrade.current_version_patch_failed", fmt.Errorf("patch clean bundle after version check: %w", err))
 		}
 		return nil
@@ -606,6 +645,13 @@ func makeStagingDir(ctx context.Context, t targets.Target, version string) (stri
 		return "", logUpgradeError(ctx, "upgrade.staging_dir_create_failed", fmt.Errorf("create staging dir %s: %w", root, err))
 	}
 	return root, nil
+}
+
+func mutationPolicy(opts Options) bundlemutate.Policy {
+	if opts.CloseBeforeMutate {
+		return bundlemutate.PolicyClose
+	}
+	return bundlemutate.PolicyDefer
 }
 
 // downloadArchive streams the manifest URL to archivePath. It bypasses proxy
@@ -737,21 +783,4 @@ func singleExtractedAppRoot(extractDir string) (string, error) {
 		return "", fmt.Errorf("no .app bundle found under %s", extractDir)
 	}
 	return "", fmt.Errorf("multiple .app bundles found under %s: %s", extractDir, strings.Join(matches, ","))
-}
-
-// swapBundle removes the existing /Applications/<App>.app and installs the
-// freshly extracted upstream copy.
-func swapBundle(ctx context.Context, r *patch.Runner, t targets.Target, extractedApp string, dryRun bool) error {
-	upgradeLog.DebugContext(ctx, "upgrade.swap_bundle.boundary", "target", t.ID, "app_path", t.AppPath, "extracted_app", extractedApp, "dry_run", dryRun)
-	notef(r, "removing patched bundle "+t.AppPath)
-	if !dryRun {
-		if err := os.RemoveAll(t.AppPath); err != nil {
-			return logUpgradeError(ctx, "upgrade.remove_current_bundle_failed", fmt.Errorf("remove %s: %w", t.AppPath, err))
-		}
-	}
-	notef(r, fmt.Sprintf("installing fresh bundle %s -> %s", extractedApp, t.AppPath))
-	if err := r.Run(ctx, "/usr/bin/ditto", extractedApp, t.AppPath); err != nil {
-		return logUpgradeError(ctx, "upgrade.install_fresh_bundle_failed", fmt.Errorf("install fresh bundle %s -> %s: %w", extractedApp, t.AppPath, err))
-	}
-	return nil
 }
