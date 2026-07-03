@@ -47,6 +47,10 @@ type Process struct {
 	Command string
 }
 
+// ErrAppRunning reports that a bundle mutation was skipped because target
+// app processes are live.
+var ErrAppRunning = errors.New("target app is running; deferring bundle mutation")
+
 // Running reports whether any target process appears live.
 func Running(ctx context.Context, target targets.Target) bool {
 	processes, err := Processes(ctx, target)
