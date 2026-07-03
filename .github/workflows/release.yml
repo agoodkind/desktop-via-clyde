@@ -14,4 +14,9 @@ jobs:
       attestations: write
     with:
       binary: desktop-via-clyde
+      # The generated shim and injector payloads need native macOS tools
+      # (swiftc, lipo, xcrun clang), so darwin builds run on a macOS runner
+      # and the linux targets are skipped: this tool only runs on macOS.
+      platforms: "darwin/amd64 darwin/arm64"
+      darwin_runner: macos-26
     secrets: inherit
