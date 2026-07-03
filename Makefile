@@ -20,7 +20,7 @@ GO_BUILD_TAGS        := gklog_stamped
 GO_BUILD_EXTRA_FLAGS := -trimpath
 
 # Pipeline modules.
-GO_MK_MODULES := go-build.mk
+GO_MK_MODULES := go-build.mk go-release.mk
 GO_MK_DEV_DIR ?= $(HOME)/Sites/go-makefile
 
 # Codegen hook: go.mk runs go-generated-prereqs (proto plus the go:embed shim and

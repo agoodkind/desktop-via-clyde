@@ -8,3 +8,10 @@ internal/embed/dvc-stdio-tee-shim
 shim/.build/
 shim/.config/
 ~/
+go.work
+go.work.sum
+!.golangci-lint-baseline.txt
+!.gocyclo-baseline.txt
+!.deadcode-baseline.txt
+!.staticcheck-extra-baseline.txt
+!.go-mk-applied-notices
