@@ -43,6 +43,7 @@ func Run(ctx context.Context) error {
 		}()
 		newTicker(operationExecutor, state).loop(signalCtx)
 	}()
+	startSelfUpdateScheduler(signalCtx, stop)
 
 	serveErr := make(chan error, 1)
 	go func() {

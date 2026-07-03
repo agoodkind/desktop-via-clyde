@@ -60,6 +60,11 @@ func run() int {
 		"log_path", paths.ProcessLogPath(),
 		"args", os.Args[1:])
 
+	if code, ok := runConfigFreeCommand(ctx, os.Args[1:], os.Stdout, os.Stderr); ok {
+		_ = closer.Close()
+		return code
+	}
+
 	if err := composition.Register(); err != nil {
 		logger.ErrorContext(ctx, "cli.composition_register_failed", slog.Any("err", err))
 		writeRuntimeMessage(ctx, os.Stderr, outputFormat, "error: "+err.Error())
@@ -125,6 +130,8 @@ func newRootCmdWithRunners(
 	}
 	root.AddCommand(newProvisionCmd(out))
 	root.AddCommand(newUpdaterCmd())
+	root.AddCommand(newUpdateCmd(guardedCtx, out))
+	root.AddCommand(newVersionCmd(out))
 	return root
 }
 
