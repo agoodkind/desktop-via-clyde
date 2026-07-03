@@ -114,6 +114,16 @@ value = "--proxy-server=http://localhost:48700"
 action = "append"
 value = "--ignore-certificate-errors"
 
+# Redirect the app's direct QUIC/HTTP-3 sockets to the local clyde MITM
+# listener so HTTP/3 traffic is captured, not just proxied TCP. host-resolver
+# rules only touch DIRECT connections, so the proxied TCP path above is
+# unaffected. The wildcard is host-agnostic, so a new backend host reached over
+# QUIC is captured without a config change. Point the port at the same loopback
+# port as --proxy-server, since the clyde listener serves TCP and UDP together.
+[[apps.example.launch_policy.arguments]]
+action = "append"
+value = "--host-resolver-rules=MAP * [::1]:48700,EXCLUDE localhost"
+
 # Operations are the per-target subcommands the CLI renders. capability binds
 # each to its handler; see internal/composition.
 [apps.example.operations.patch]
