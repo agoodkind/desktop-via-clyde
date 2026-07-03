@@ -130,7 +130,7 @@ func newRootCmdWithRunners(
 	}
 	root.AddCommand(newProvisionCmd(out))
 	root.AddCommand(newUpdaterCmd())
-	root.AddCommand(newUpdateCmd(out))
+	root.AddCommand(newUpdateCmd(guardedCtx, out))
 	root.AddCommand(newVersionCmd(out))
 	return root
 }

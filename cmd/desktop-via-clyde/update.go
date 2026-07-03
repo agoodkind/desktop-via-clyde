@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -19,7 +20,7 @@ var (
 	selfUpdateLoadState = selfupdate.LoadState
 )
 
-func newUpdateCmd(out io.Writer) *cobra.Command {
+func newUpdateCmd(ctx context.Context, out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Manage desktop-via-clyde self-updates",
@@ -28,20 +29,21 @@ func newUpdateCmd(out io.Writer) *cobra.Command {
 			return cmd.Help()
 		},
 	}
-	cmd.AddCommand(newUpdateCheckCmd(out))
-	cmd.AddCommand(newUpdateApplyCmd(out))
-	cmd.AddCommand(newUpdateStatusCmd(out))
+	cmd.AddCommand(newUpdateCheckCmd(ctx, out))
+	cmd.AddCommand(newUpdateApplyCmd(ctx, out))
+	cmd.AddCommand(newUpdateStatusCmd(ctx, out))
 	return cmd
 }
 
-func newUpdateCheckCmd(out io.Writer) *cobra.Command {
+func newUpdateCheckCmd(ctx context.Context, out io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "check",
 		Short: "Check for a desktop-via-clyde release update",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			result, err := selfUpdateCheck(cmd.Context(), updateopts.Options(updateopts.Overrides{}))
+		RunE: func(_ *cobra.Command, _ []string) error {
+			result, err := selfUpdateCheck(ctx, updateopts.Options(updateOverrides(false)))
 			if err != nil {
+				slog.WarnContext(ctx, "cli.update.check_failed", slog.Any("err", err))
 				return fmt.Errorf("update check: %w", err)
 			}
 			printUpdateCheckResult(out, result)
@@ -50,21 +52,21 @@ func newUpdateCheckCmd(out io.Writer) *cobra.Command {
 	}
 }
 
-func newUpdateApplyCmd(out io.Writer) *cobra.Command {
+func newUpdateApplyCmd(ctx context.Context, out io.Writer) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "apply",
 		Short: "Download, verify, and install a desktop-via-clyde release update",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdateApply(cmd.Context(), out, dryRun)
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runUpdateApply(ctx, out, dryRun)
 		},
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "download and verify without installing")
 	return cmd
 }
 
-func newUpdateStatusCmd(out io.Writer) *cobra.Command {
+func newUpdateStatusCmd(ctx context.Context, out io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Show desktop-via-clyde self-update state",
@@ -73,6 +75,7 @@ func newUpdateStatusCmd(out io.Writer) *cobra.Command {
 			statePath := selfupdate.DefaultStatePath("desktop-via-clyde")
 			state, err := selfUpdateLoadState(statePath)
 			if err != nil {
+				slog.WarnContext(ctx, "cli.update.status_failed", slog.Any("err", err))
 				return fmt.Errorf("update status: %w", err)
 			}
 			printUpdateStatus(out, state)
@@ -82,8 +85,9 @@ func newUpdateStatusCmd(out io.Writer) *cobra.Command {
 }
 
 func runUpdateApply(ctx context.Context, out io.Writer, dryRun bool) error {
-	result, err := selfUpdateApply(ctx, updateopts.Options(updateopts.Overrides{DryRun: dryRun}))
+	result, err := selfUpdateApply(ctx, updateopts.Options(updateOverrides(dryRun)))
 	if err != nil {
+		slog.WarnContext(ctx, "cli.update.apply_failed", slog.Any("err", err))
 		return fmt.Errorf("update apply: %w", err)
 	}
 	if !result.UpdateAvailable {
@@ -100,6 +104,15 @@ func runUpdateApply(ctx context.Context, out io.Writer, dryRun bool) error {
 	}
 	_, _ = io.WriteString(out, "desktop-via-clyde: update verified but not applied\n")
 	return nil
+}
+
+func updateOverrides(dryRun bool) updateopts.Overrides {
+	return updateopts.Overrides{
+		Client:      nil,
+		InstallPath: "",
+		DryRun:      dryRun,
+		Log:         nil,
+	}
 }
 
 func printUpdateCheckResult(out io.Writer, result selfupdate.CheckResult) {

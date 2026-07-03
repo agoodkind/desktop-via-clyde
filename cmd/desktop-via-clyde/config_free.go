@@ -31,7 +31,7 @@ func runConfigFreeCommand(
 	case configFreeCommandVersion, configFreeCommandVersionLong, configFreeCommandVersionShort:
 		cmd = newVersionCmd(out)
 	case configFreeCommandUpdate:
-		cmd = newUpdateCmd(out)
+		cmd = newUpdateCmd(ctx, out)
 	default:
 		return 0, false
 	}
