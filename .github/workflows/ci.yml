@@ -21,3 +21,7 @@ jobs:
       attestations: write
     with:
       runs_on: macos-26
+      # Match release.yml: the generated shim and injector need native macOS
+      # tools, so the release-build gate builds darwin natively and skips linux.
+      release_platforms: "darwin/amd64 darwin/arm64"
+      darwin_runner: macos-26

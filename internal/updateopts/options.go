@@ -10,8 +10,10 @@ import (
 )
 
 const (
-	updateRepo   = "agoodkind/desktop-via-clyde"
-	updateBinary = "desktop-via-clyde"
+	updateRepo = "agoodkind/desktop-via-clyde"
+	// BinaryName is the release archive and installed binary name; callers
+	// that derive library paths (state, cache) key them by this same name.
+	BinaryName = "desktop-via-clyde"
 )
 
 // Overrides carries operation-specific update settings.
@@ -27,7 +29,7 @@ func Options(overrides Overrides) selfupdate.Options {
 	return selfupdate.Options{
 		Config: selfupdate.Config{
 			Repo:              updateRepo,
-			Binary:            updateBinary,
+			Binary:            BinaryName,
 			CurrentVersion:    version.Version,
 			CurrentCommit:     version.Commit,
 			CurrentBuildHash:  version.BuildHash(),

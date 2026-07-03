@@ -72,7 +72,7 @@ func newUpdateStatusCmd(ctx context.Context, out io.Writer) *cobra.Command {
 		Short: "Show desktop-via-clyde self-update state",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			statePath := selfupdate.DefaultStatePath("desktop-via-clyde")
+			statePath := selfupdate.DefaultStatePath(updateopts.BinaryName)
 			state, err := selfUpdateLoadState(statePath)
 			if err != nil {
 				slog.WarnContext(ctx, "cli.update.status_failed", slog.Any("err", err))

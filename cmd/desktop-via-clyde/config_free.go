@@ -38,6 +38,10 @@ func runConfigFreeCommand(
 	cmd.SetOut(out)
 	cmd.SetErr(errOut)
 	cmd.SetArgs(args[1:])
+	// The wrapper owns the single "error:" line; cobra would otherwise print
+	// the error and usage a second time.
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		_, _ = io.WriteString(errOut, "error: "+err.Error()+"\n")
 		return 1, true
