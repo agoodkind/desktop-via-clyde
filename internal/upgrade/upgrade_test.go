@@ -365,6 +365,8 @@ func TestRunMissingBundleDryRunInstallsFromUpdater(t *testing.T) {
 		"target=codex current version=0.0.0 updater=sparkle_appcast",
 		"target=codex app missing",
 		"target=codex manifest: name=3044",
+		"stage bundle",
+		"commit staged bundle",
 		"target=codex patch complete",
 	} {
 		if !strings.Contains(output, want) {

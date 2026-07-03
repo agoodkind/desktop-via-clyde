@@ -17,10 +17,10 @@ import (
 	"golang.org/x/sys/unix"
 	"goodkind.io/desktop-via-clyde/internal/appguard"
 	"goodkind.io/desktop-via-clyde/internal/bundleidentity"
+	"goodkind.io/desktop-via-clyde/internal/bundlemutate"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/clock"
-	"goodkind.io/desktop-via-clyde/internal/devpreflight"
 	"goodkind.io/desktop-via-clyde/internal/devsign"
 	shimembed "goodkind.io/desktop-via-clyde/internal/embed"
 	"goodkind.io/desktop-via-clyde/internal/operations"
@@ -31,6 +31,8 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/targets"
 	"goodkind.io/gklog"
 )
+
+var mutateTargetBundle = bundlemutate.Mutate
 
 const (
 	// AppPatchCapability is the operation capability for app patching.
@@ -82,6 +84,8 @@ type Options struct {
 	Progress          clioutput.Progress
 	Trace             *Trace
 	CloseBeforeMutate bool
+	AppPathOverride   string
+	FinalAppPath      string
 }
 
 // Operation runs the app patch operation for one configured target.
@@ -105,6 +109,8 @@ func Operation(ctx context.Context, req operations.Request) error {
 		Progress:          req.Progress,
 		Trace:             nil,
 		CloseBeforeMutate: !req.Flags.Bool("background"),
+		AppPathOverride:   "",
+		FinalAppPath:      "",
 	}); err != nil {
 		patchLog.ErrorContext(ctx, "patch.operation_failed", "err", err)
 		return fmt.Errorf("patch operation: %w",
@@ -168,6 +174,8 @@ func KeychainMigrateOperation(ctx context.Context, req operations.Request) error
 		Progress:          req.Progress,
 		Trace:             nil,
 		CloseBeforeMutate: false,
+		AppPathOverride:   "",
+		FinalAppPath:      "",
 	}); err != nil {
 		patchLog.ErrorContext(ctx, "patch.keychain_migrate_operation_failed", "err", err)
 		return fmt.Errorf("keychain migrate operation: %w",
@@ -186,6 +194,8 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	if opts.Out == nil {
 		opts.Out = os.Stdout
 	}
+	workTarget := workTargetForOptions(t, opts)
+	finalTarget := finalTargetForOptions(t, opts)
 	log := gklog.LoggerFromContext(ctx).With("subcomponent", "patch", "target", t.ID)
 	r := NewRunner(ctx, opts.DryRun, opts.Out)
 	if opts.LogOut != nil {
@@ -193,105 +203,31 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	}
 	r.Progress = opts.Progress
 	r.Trace = opts.Trace
-	log.InfoContext(ctx, "patch.start", "app_path", t.AppPath, "dry_run", opts.DryRun, "migrate_keychain", opts.MigrateKeychain)
+	log.InfoContext(ctx, "patch.start", "app_path", workTarget.AppPath, "dry_run", opts.DryRun, "migrate_keychain", opts.MigrateKeychain)
 
-	// Shared, non-blocking development-signing credential preflight. Both the
-	// direct patch path and the upgrade path (which re-patches through Patch after
-	// the bundle swap) reach this point, so wiring the check here covers both
-	// without a second call site. It never returns an error: a target without
-	// credentials continues on the standard shim plus Developer ID path.
-	devpreflight.Warn(ctx, r.Progress, opts.DryRun, t)
-
-	if !opts.DryRun {
-		if _, err := os.Stat(t.AppPath); err != nil {
-			return logPatchError(ctx, "patch.bundle_stat_failed", fmt.Errorf("bundle not found at %s: %w", t.AppPath, err))
-		}
-		if err := devsign.EnsureTrustedMITMCA(ctx, t); err != nil {
-			return logPatchError(ctx, "patch.mitm_trust_required", fmt.Errorf("verify MITM CA trust before patch: %w", err))
-		}
-	}
+	mutatePolicy := bundlemutate.PolicyDefer
 	if opts.CloseBeforeMutate {
-		if err := appguard.EnsureClosed(ctx, t, appguard.Options{
-			DryRun:  opts.DryRun,
-			Out:     opts.Out,
-			Timeout: 0,
-		}); err != nil {
-			return logPatchError(ctx, "patch.close_app_failed", fmt.Errorf("close app before mutation: %w", err))
-		}
+		mutatePolicy = bundlemutate.PolicyClose
 	}
-
-	info, err := loadInfoPlistOrPlaceholder(t, opts.DryRun)
-	if err != nil {
-		return err
-	}
-	notef(r, fmt.Sprintf("target=%s read Info.plist version=%s id=%s exec=%s",
-		t.ID, info.CFBundleVersion, info.CFBundleIdentifier, info.CFBundleExecutable))
-
-	originalDR, err := resolveOriginalDRForPatch(ctx, r, t)
-	if err != nil {
-		return err
-	}
-
-	var captured []KeychainItem
-	switch {
-	case !opts.MigrateKeychain:
-		notef(r, fmt.Sprintf("target=%s skipped keychain access repair (pass --migrate-keychain to run)", t.ID))
-	case opts.DryRun:
-		notef(r, fmt.Sprintf("target=%s would find keychain items for services=%v", t.ID, t.KeychainServices))
-	default:
-		captured, err = CaptureItems(ctx, t)
+	if err := mutateTargetBundle(ctx, finalTarget, mutatePolicy, bundlemutate.Options{
+		DryRun:  opts.DryRun,
+		Out:     opts.Out,
+		Timeout: 0,
+	}, func(mutateCtx context.Context) error {
+		prepared, err := preparePreparedBundle(mutateCtx, r, t, opts)
 		if err != nil {
-			return logPatchError(ctx, "patch.keychain_capture_failed", fmt.Errorf("keychain capture: %w", err))
+			return err
 		}
-		notef(r, fmt.Sprintf("target=%s found %d keychain items", t.ID, len(captured)))
-	}
-
-	devPlan, err := patchBundleSteps(ctx, r, &t, opts)
-	if err != nil {
-		return err
-	}
-	devSigned := devPlan != nil
-
-	if err := runPostBundleHooks(ctx, r, t, opts); err != nil {
-		return logPatchError(ctx, "patch.post_bundle_hook_failed", fmt.Errorf("run post-bundle hooks: %w", err))
-	}
-
-	restoreKeychainAccess(ctx, r, t, opts, captured)
-
-	if err := stepWriteState(ctx, r, t, info.CFBundleVersion, originalDR); err != nil {
-		return logPatchError(ctx, "patch.write_state_failed", fmt.Errorf("write state: %w", err))
-	}
-
-	// The standard shim path verifies before post-patch hooks. The
-	// development-signing path instead defers its top-bundle reseal until after
-	// every nested re-signing step (post-bundle hooks, post-patch hooks), so its
-	// verify must wait for that reseal below.
-	if !devSigned {
-		if err := stepVerify(ctx, r, t); err != nil {
-			return logPatchError(ctx, "patch.verify_failed", fmt.Errorf("verify: %w", err))
+		return finalizePreparedBundle(mutateCtx, r, prepared, finalTarget, opts)
+	}); err != nil {
+		if errors.Is(err, appguard.ErrAppRunning) {
+			message := fmt.Sprintf("deferred: target=%s app running at mutation time; retry when closed", t.ID)
+			Note(r, message)
+			MarkSkipped(r, message)
+			return nil
 		}
+		return logPatchError(ctx, "patch.mutate_bundle_failed", fmt.Errorf("mutate bundle for %s: %w", t.ID, err))
 	}
-
-	for _, capability := range t.PostPatchHookCapabilities() {
-		if err := runPostPatchHook(ctx, r, t, opts, capability); err != nil {
-			return logPatchError(ctx, "patch.post_patch_hook_failed", fmt.Errorf("run post-patch hook %q: %w", capability, err))
-		}
-	}
-
-	if devSigned {
-		// The --shallow top-bundle reseal records the cdhashes of every nested
-		// object, so it must be the last signing action: any earlier placement
-		// lets a later nested re-sign (post-bundle or post-patch hooks) invalidate
-		// the seal.
-		if err := devsign.Reseal(ctx, r, devsign.Options{DryRun: r.DryRun, Out: r.Out, Progress: r.Progress}, t, devPlan); err != nil {
-			return logPatchError(ctx, "patch.development_signing_reseal_failed", fmt.Errorf("reseal development-signed bundle: %w", err))
-		}
-		if err := stepVerifyDevelopmentSigned(ctx, r, t); err != nil {
-			return logPatchError(ctx, "patch.verify_failed", fmt.Errorf("verify: %w", err))
-		}
-	}
-
-	notef(r, fmt.Sprintf("target=%s patch complete", t.ID))
 	return nil
 }
 
@@ -338,6 +274,8 @@ func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Op
 		Progress:          r.Progress,
 		Trace:             r.Trace,
 		CloseBeforeMutate: false,
+		AppPathOverride:   "",
+		FinalAppPath:      opts.FinalAppPath,
 	}); err != nil {
 		return nil, logPatchError(ctx, "patch.pre_resign_hook_failed", fmt.Errorf("run pre-resign hooks: %w", err))
 	}

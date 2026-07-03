@@ -108,6 +108,33 @@ func TestPreLaunchPolicyHookInstallsWrapperAndAppendsResolvedEnvironment(t *test
 	requireEnv(t, target, EnvChatGPTBaseURL, "http://localhost:48730/backend-api")
 }
 
+func TestPreLaunchPolicyHookUsesFinalAppPathForRealCLIEnv(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	stagedAppPath := filepath.Join(t.TempDir(), "staged", "Codex.app")
+	finalAppPath := filepath.Join(t.TempDir(), "live", "Codex.app")
+	target := targets.Target{
+		ID:      "codex",
+		AppPath: stagedAppPath,
+		Extensions: extensions.Target{
+			CodexCLIShim: &extensions.CodexCLIShimSpec{
+				Capability:     HookCapability,
+				ChatGPTBaseURL: "http://localhost:48730/backend-api",
+			},
+		},
+	}
+	runner := patch.NewRunner(context.Background(), false, io.Discard)
+	err := PreLaunchPolicyHook(context.Background(), runner, &target, patch.Options{
+		DryRun:       false,
+		Out:          io.Discard,
+		FinalAppPath: finalAppPath,
+	})
+	if err != nil {
+		t.Fatalf("PreLaunchPolicyHook: %v", err)
+	}
+	requireEnv(t, target, EnvRealCLI, filepath.Join(finalAppPath, "Contents", "Resources", "codex"))
+}
+
 func equalStrings(left []string, right []string) bool {
 	if len(left) != len(right) {
 		return false

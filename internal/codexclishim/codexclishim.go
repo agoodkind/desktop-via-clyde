@@ -91,7 +91,11 @@ func PreLaunchPolicyHook(
 			return fmt.Errorf("install wrapper: %w", err)
 		}
 	}
-	realCLI := filepath.Join(target.AppPath, "Contents", "Resources", "codex")
+	finalAppPath := target.AppPath
+	if opts.FinalAppPath != "" {
+		finalAppPath = opts.FinalAppPath
+	}
+	realCLI := filepath.Join(finalAppPath, "Contents", "Resources", "codex")
 	target.LaunchPolicy.Environment = upsertEnv(target.LaunchPolicy.Environment, spec.EnvActionSpec{
 		Action: "set",
 		Key:    EnvCLIPath,
