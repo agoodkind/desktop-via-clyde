@@ -110,6 +110,17 @@ value = "--proxy-server=http://[::1]:48723"
 action = "append"
 value = "--ignore-certificate-errors"
 
+# host-resolver-rules rewrites only DIRECT connections, so proxied TCP resolves
+# at the proxy and is untouched, while Chromium's direct QUIC/HTTP-3 sockets are
+# redirected to the local clyde MITM listener. The wildcard is host-agnostic, so
+# any current or future backend reached over QUIC is captured with no per-host
+# entry. The target port matches the proxy port because the clyde listener
+# serves TCP h1/h2 and UDP h3 on the same loopback port. EXCLUDE localhost keeps
+# loopback resolution normal.
+[[apps.cursor.launch_policy.arguments]]
+action = "append"
+value = "--host-resolver-rules=MAP * [::1]:48723,EXCLUDE localhost"
+
 [apps.cursor.operations.patch]
 use = "patch"
 short = "Install the shim into one app bundle and re-sign it"
