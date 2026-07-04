@@ -341,6 +341,9 @@ func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Op
 	}); err != nil {
 		return nil, logPatchError(ctx, "patch.pre_resign_hook_failed", fmt.Errorf("run pre-resign hooks: %w", err))
 	}
+	if err := maybeApplyStandardProxyInjection(ctx, r, *t); err != nil {
+		return nil, err
+	}
 	if err := stepRestorePreservedNestedCode(ctx, r, *t, preservedRoot); err != nil {
 		return nil, logPatchError(ctx, "patch.restore_preserved_nested_code_failed", fmt.Errorf("restore preserved nested code: %w", err))
 	}
@@ -379,6 +382,17 @@ func maybeApplyDevelopmentSigning(ctx context.Context, r *Runner, t *targets.Tar
 		return nil, logPatchError(ctx, "patch.development_signing_failed", fmt.Errorf("apply development signing: %w", err))
 	}
 	return plan, nil
+}
+
+func maybeApplyStandardProxyInjection(ctx context.Context, r *Runner, t targets.Target) error {
+	if t.DevelopmentSigning == nil || !t.DevelopmentSigning.ProxyInjection || t.DevelopmentSigning.Enabled {
+		return nil
+	}
+	notef(r, fmt.Sprintf("target=%s proxy injection enabled; installing injector before Developer ID reseal", t.ID))
+	if err := devsign.ApplyProxyInjection(ctx, r, devsign.Options{DryRun: r.DryRun, Out: r.Out, Progress: r.Progress}, t); err != nil {
+		return logPatchError(ctx, "patch.proxy_injection_failed", fmt.Errorf("install proxy injector: %w", err))
+	}
+	return nil
 }
 
 // KeychainMigrate restores keychain access for an app that is already patched.
@@ -564,7 +578,7 @@ func stepResign(ctx context.Context, r *Runner, t targets.Target, entFile string
 	}
 	traceAction(r, actionSignBundle, t.ID, t.AppPath)
 	notef(r, fmt.Sprintf("target=%s re-sign with %q (sha1=%s)", t.ID, paths.SignIdentity(), id))
-	if err := stepResignNestedCode(ctx, r, t, id); err != nil {
+	if err := stepResignNestedCode(ctx, r, t, id, entFile); err != nil {
 		return err
 	}
 	if err := r.Run(ctx, "/usr/bin/codesign", codesignRuntimeEntitlementsArgs(id, entFile, paths.RealBinaryPath(t))...); err != nil {
@@ -587,7 +601,7 @@ func codesignRuntimeArgs(id string, codePath string) []string {
 	return signing.RuntimeArgs(id, codePath)
 }
 
-func stepResignNestedCode(ctx context.Context, r *Runner, t targets.Target, id string) error {
+func stepResignNestedCode(ctx context.Context, r *Runner, t targets.Target, id string, entFile string) error {
 	codePaths, err := nestedCodeSignPaths(ctx, r, t)
 	if err != nil {
 		return err
@@ -604,16 +618,7 @@ func stepResignNestedCode(ctx context.Context, r *Runner, t targets.Target, id s
 		}
 		traceAction(r, actionSignNestedCode, t.ID, codePath)
 		notef(r, fmt.Sprintf("target=%s re-sign nested code object %s", t.ID, codePath))
-		if err := r.Run(ctx,
-			"/usr/bin/codesign",
-			"--force",
-			"--sign",
-			id,
-			"--options",
-			"runtime",
-			"--preserve-metadata=entitlements",
-			codePath,
-		); err != nil {
+		if err := r.Run(ctx, "/usr/bin/codesign", nestedCodeSignArgs(id, entFile, codePath)...); err != nil {
 			return logPatchError(ctx, "patch.sign_nested_code_failed", fmt.Errorf("sign nested code object %s: %w", codePath, err))
 		}
 	}

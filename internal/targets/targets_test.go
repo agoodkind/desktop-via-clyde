@@ -57,6 +57,7 @@ func TestEntitlementsPolicyPerTarget(t *testing.T) {
 	wantRequired := map[string][]string{
 		"cursor": {
 			"com.apple.security.automation.apple-events",
+			"com.apple.security.cs.allow-dyld-environment-variables",
 			"com.apple.security.cs.disable-library-validation",
 		},
 		"codex": {
@@ -81,6 +82,23 @@ func TestEntitlementsPolicyPerTarget(t *testing.T) {
 		if !stringSlicesEqual(tg.Entitlements.RequiredBooleanEntitlements, wantRequired[tg.ID]) {
 			t.Errorf("target %s RequiredBooleanEntitlements mismatch: got %v want %v", tg.ID, tg.Entitlements.RequiredBooleanEntitlements, wantRequired[tg.ID])
 		}
+	}
+}
+
+func TestCursorProxyInjectionPolicy(t *testing.T) {
+	installFixture(t)
+	cursor, err := lookupTarget("cursor")
+	if err != nil {
+		t.Fatalf("lookup cursor: %v", err)
+	}
+	if cursor.DevelopmentSigning == nil {
+		t.Fatal("cursor must declare a development signing policy")
+	}
+	if cursor.DevelopmentSigning.Enabled {
+		t.Fatal("cursor proxy injection must keep the standard Developer ID path")
+	}
+	if !cursor.DevelopmentSigning.ProxyInjection {
+		t.Fatal("cursor must enable proxy injection")
 	}
 }
 
