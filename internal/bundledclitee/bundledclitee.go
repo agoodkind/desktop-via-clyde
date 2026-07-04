@@ -16,7 +16,10 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/targets"
 )
 
-var bundledCLITeeLog = slog.With("component", "desktop-via-clyde", "subcomponent", "bundled-cli-tee")
+var (
+	bundledCLITeeLog  = slog.With("component", "desktop-via-clyde", "subcomponent", "bundled-cli-tee")
+	installBundledCLI = claudetee.Install
+)
 
 // HookCapability is the config capability name for bundled CLI tee hooks.
 const HookCapability = "bundled-cli-tee"
@@ -51,6 +54,7 @@ type Options struct {
 	BundledCLIPath           string
 	TerminateProcessNames    []string
 	TerminateProcessPatterns []string
+	AllowTerminate           bool
 	CompletionSteps          []string
 	Out                      io.Writer
 	Trace                    *claudetee.Trace
@@ -64,15 +68,6 @@ func ResolvePath(opts Options) (string, error) {
 		return "", fmt.Errorf("resolve bundled cli tee path: %w", err)
 	}
 	return path, nil
-}
-
-// Install wraps the selected bundled CLI with the linked tee handler.
-func Install(ctx context.Context, opts Options) error {
-	if err := claudetee.Install(ctx, toClaudeOptions(opts)); err != nil {
-		bundledCLITeeLog.ErrorContext(ctx, "bundledclitee.install_failed", "err", err)
-		return fmt.Errorf("install bundled cli tee: %w", err)
-	}
-	return nil
 }
 
 // PostPatchHook installs the tee wrapper after a successful shared patch flow.
@@ -102,8 +97,15 @@ func PostPatchHook(ctx context.Context, runner *patch.Runner, target targets.Tar
 	if opts.DryRun {
 		return nil
 	}
-	if err := Install(ctx, teeOpts); err != nil {
-		return err
+	if err := installBundledCLI(ctx, toClaudeOptions(teeOpts)); err != nil {
+		if errors.Is(err, claudetee.ErrProcessesRunning) {
+			message := "deferred: bundled CLI processes still running; retry tee install after they exit"
+			patch.Note(runner, message)
+			patch.MarkSkipped(runner, message)
+			return nil
+		}
+		bundledCLITeeLog.ErrorContext(ctx, "bundledclitee.install_failed", "err", err)
+		return fmt.Errorf("install bundled cli tee: %w", err)
 	}
 	return nil
 }
@@ -122,6 +124,7 @@ func toClaudeOptions(opts Options) claudetee.Options {
 		BundledCLIPath:           opts.BundledCLIPath,
 		TerminateProcessNames:    append([]string(nil), opts.TerminateProcessNames...),
 		TerminateProcessPatterns: append([]string(nil), opts.TerminateProcessPatterns...),
+		AllowTerminate:           opts.AllowTerminate,
 		CompletionSteps:          append([]string(nil), opts.CompletionSteps...),
 		LogDir:                   "",
 		Out:                      opts.Out,
@@ -139,6 +142,7 @@ func targetOptions(target targets.Target, opts patch.Options) Options {
 		BundledCLIPath:           tee.BundledCLIPath,
 		TerminateProcessNames:    append([]string(nil), tee.TerminateProcessNames...),
 		TerminateProcessPatterns: append([]string(nil), tee.TerminateProcessPatterns...),
+		AllowTerminate:           opts.CloseBeforeMutate,
 		CompletionSteps:          append([]string(nil), tee.CompletionSteps...),
 		Out:                      opts.Out,
 		Trace:                    nil,

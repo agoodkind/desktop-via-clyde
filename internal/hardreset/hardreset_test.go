@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/appguard"
+	"goodkind.io/desktop-via-clyde/internal/bundlemutate"
 	"goodkind.io/desktop-via-clyde/internal/extensions"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/paths"
@@ -258,13 +259,13 @@ func stubRunCommand(t *testing.T, handler func(name string, args []string, stdin
 	return &calls
 }
 
-func stubEnsureAppClosed(t *testing.T, handler func(targets.Target, appguard.Options) error) {
+func stubMutateBundle(t *testing.T, handler func(targets.Target, Options, func(context.Context) error) error) {
 	t.Helper()
-	original := ensureAppClosed
-	ensureAppClosed = func(_ context.Context, target targets.Target, opts appguard.Options) error {
-		return handler(target, opts)
+	original := mutateBundle
+	mutateBundle = func(_ context.Context, target targets.Target, opts Options, fn func(context.Context) error) error {
+		return handler(target, opts, fn)
 	}
-	t.Cleanup(func() { ensureAppClosed = original })
+	t.Cleanup(func() { mutateBundle = original })
 }
 
 func setSystemTCCDatabasePath(t *testing.T, path string) {
@@ -512,10 +513,16 @@ func TestRunClosesAppBeforeTCCAndArtifactRemoval(t *testing.T) {
 	})
 
 	closeCalls := 0
-	stubEnsureAppClosed(t, func(target targets.Target, opts appguard.Options) error {
+	stubMutateBundle(t, func(target targets.Target, opts Options, fn func(context.Context) error) error {
 		closeCalls++
+		if !opts.CloseBeforeMutate {
+			t.Fatal("CloseBeforeMutate = false, want true")
+		}
 		_, writeErr := opts.Out.Write([]byte("hardreset_app_closed target=" + target.ID + "\n"))
-		return writeErr
+		if writeErr != nil {
+			return writeErr
+		}
+		return fn(context.Background())
 	})
 
 	appPath := writeTestCodexBundle(t)
@@ -564,10 +571,13 @@ func TestOperationClosesBeforeMutateByDefault(t *testing.T) {
 
 	closeCalls := 0
 	var closeDryRun bool
-	stubEnsureAppClosed(t, func(_ targets.Target, opts appguard.Options) error {
+	stubMutateBundle(t, func(_ targets.Target, opts Options, fn func(context.Context) error) error {
 		closeCalls++
 		closeDryRun = opts.DryRun
-		return nil
+		if !opts.CloseBeforeMutate {
+			t.Fatal("CloseBeforeMutate = false, want true")
+		}
+		return fn(context.Background())
 	})
 
 	var out bytes.Buffer
@@ -585,6 +595,73 @@ func TestOperationClosesBeforeMutateByDefault(t *testing.T) {
 	}
 	if !closeDryRun {
 		t.Fatal("close gate did not inherit dry-run flag")
+	}
+}
+
+func TestRunDefersWhenMutationGateReportsAppRunning(t *testing.T) {
+	appPath := writeTestCodexBundle(t)
+	target := targets.Target{
+		ID:       "codex",
+		AppPath:  appPath,
+		BundleID: "com.openai.codex.beta",
+	}
+
+	originalRunBundleMutate := runBundleMutate
+	runBundleMutate = func(
+		context.Context,
+		targets.Target,
+		bundlemutate.Policy,
+		bundlemutate.Options,
+		func(context.Context) error,
+	) error {
+		return appguard.ErrAppRunning
+	}
+	t.Cleanup(func() {
+		runBundleMutate = originalRunBundleMutate
+	})
+
+	var out bytes.Buffer
+	err := Run(context.Background(), target, Options{Out: &out})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out.String(), "deferred: target=codex app running at mutation time; retry when closed") {
+		t.Fatalf("output missing deferred note\n%s", out.String())
+	}
+}
+
+func TestRunReturnsErrAppRunningWhenCloseModeCannotCloseTarget(t *testing.T) {
+	appPath := writeTestCodexBundle(t)
+	target := targets.Target{
+		ID:       "codex",
+		AppPath:  appPath,
+		BundleID: "com.openai.codex.beta",
+	}
+
+	originalRunBundleMutate := runBundleMutate
+	runBundleMutate = func(
+		context.Context,
+		targets.Target,
+		bundlemutate.Policy,
+		bundlemutate.Options,
+		func(context.Context) error,
+	) error {
+		return appguard.ErrAppRunning
+	}
+	t.Cleanup(func() {
+		runBundleMutate = originalRunBundleMutate
+	})
+
+	var out bytes.Buffer
+	err := Run(context.Background(), target, Options{
+		Out:               &out,
+		CloseBeforeMutate: true,
+	})
+	if !errors.Is(err, appguard.ErrAppRunning) {
+		t.Fatalf("Run error = %v, want ErrAppRunning", err)
+	}
+	if strings.Contains(out.String(), "deferred:") {
+		t.Fatalf("output unexpectedly contains deferred note\n%s", out.String())
 	}
 }
 

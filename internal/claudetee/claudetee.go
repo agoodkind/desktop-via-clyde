@@ -46,6 +46,8 @@ type Options struct {
 	TerminateProcessNames []string
 	// TerminateProcessPatterns lists full-command patterns to stop before mutation.
 	TerminateProcessPatterns []string
+	// AllowTerminate permits pkill when matching processes are live.
+	AllowTerminate bool
 	// CompletionSteps lists operator follow-up lines to print after install.
 	CompletionSteps []string
 	// LogDir overrides the default log directory shown in status output.
@@ -90,6 +92,17 @@ type versionPart struct {
 	text     string
 	isNumber bool
 }
+
+// ErrProcessesRunning reports that installation was deferred because matching
+// processes are still live and termination is disallowed.
+var ErrProcessesRunning = errors.New("configured processes are running; deferring tee install")
+
+var (
+	processNameMatches    = defaultProcessNameMatches
+	processPatternMatches = defaultProcessPatternMatches
+	killProcessName       = defaultKillProcessName
+	killProcessPattern    = defaultKillProcessPattern
+)
 
 func (o Options) writer() io.Writer {
 	if o.Out != nil {
@@ -295,6 +308,10 @@ func rollbackInstall(ctx context.Context, log *slog.Logger, bundled, realPath st
 
 func performInstall(ctx context.Context, opts Options, out io.Writer, bundled, realPath string, log *slog.Logger) error {
 	if err := stopConfiguredProcesses(ctx, opts, out); err != nil {
+		if errors.Is(err, ErrProcessesRunning) {
+			log.InfoContext(ctx, "claudetee.install.deferred_processes_running", "bundled", bundled)
+			return err
+		}
 		log.ErrorContext(ctx, "claudetee.install.stop_failed", "err", err)
 		return err
 	}
@@ -414,8 +431,9 @@ func traceEvent(opts Options, event TraceEvent) {
 	opts.Trace.Events = append(opts.Trace.Events, event)
 }
 
-// stopConfiguredProcesses sends best-effort SIGTERM to declared processes so
-// they release file locks on the binary we are about to rename.
+// stopConfiguredProcesses records configured process-stop intent and, when
+// termination is allowed, sends best-effort SIGTERM to processes so they
+// release file locks on the binary we are about to rename.
 func stopConfiguredProcesses(ctx context.Context, opts Options, out io.Writer) error {
 	claudeteeLog.DebugContext(ctx, "claudetee.stop_desktop_and_bundled_cli")
 	traceConfiguredProcessStops(opts)
@@ -423,16 +441,98 @@ func stopConfiguredProcesses(ctx context.Context, opts Options, out io.Writer) e
 		fmt.Fprintln(out, "no configured processes to stop")
 		return nil
 	}
+	if !opts.AllowTerminate {
+		running, err := configuredProcessesRunning(ctx, opts)
+		if err != nil {
+			return err
+		}
+		if running {
+			return ErrProcessesRunning
+		}
+		return nil
+	}
 	fmt.Fprintln(out, "stopping configured processes that hold the bundled binary open")
 	for _, name := range opts.TerminateProcessNames {
-		_ = exec.CommandContext(ctx, "/usr/bin/pkill", "-x", name).Run()
+		if err := killProcessName(ctx, name); err != nil {
+			return err
+		}
 	}
 	for _, pattern := range opts.TerminateProcessPatterns {
-		_ = exec.CommandContext(ctx, "/usr/bin/pkill", "-f", pattern).Run()
+		if err := killProcessPattern(ctx, pattern); err != nil {
+			return err
+		}
 	}
-	// pkill is best-effort and returns nonzero when no processes matched,
-	// which is fine here.
 	return nil
+}
+
+func configuredProcessesRunning(ctx context.Context, opts Options) (bool, error) {
+	for _, name := range opts.TerminateProcessNames {
+		matched, err := processNameMatches(ctx, name)
+		if err != nil {
+			return false, err
+		}
+		if matched {
+			return true, nil
+		}
+	}
+	for _, pattern := range opts.TerminateProcessPatterns {
+		matched, err := processPatternMatches(ctx, pattern)
+		if err != nil {
+			return false, err
+		}
+		if matched {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func defaultProcessNameMatches(ctx context.Context, name string) (bool, error) {
+	return processMatches(ctx, "/usr/bin/pgrep", "-x", name)
+}
+
+func defaultProcessPatternMatches(ctx context.Context, pattern string) (bool, error) {
+	return processMatches(ctx, "/usr/bin/pgrep", "-f", pattern)
+}
+
+func processMatches(ctx context.Context, command string, args ...string) (bool, error) {
+	claudeteeLog.DebugContext(ctx, "claudetee.process_matches.boundary", "command", command, "args", args)
+	cmd := exec.CommandContext(ctx, command, args...)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	wrappedErr := fmt.Errorf("run %s %s: %w (output: %s)", command, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	claudeteeLog.WarnContext(ctx, "claudetee.process_matches.failed", "command", command, "args", args, "err", wrappedErr)
+	return false, wrappedErr
+}
+
+func defaultKillProcessName(ctx context.Context, name string) error {
+	return killConfiguredProcess(ctx, "/usr/bin/pkill", "-x", name)
+}
+
+func defaultKillProcessPattern(ctx context.Context, pattern string) error {
+	return killConfiguredProcess(ctx, "/usr/bin/pkill", "-f", pattern)
+}
+
+func killConfiguredProcess(ctx context.Context, command string, args ...string) error {
+	claudeteeLog.DebugContext(ctx, "claudetee.kill_configured_process.boundary", "command", command, "args", args)
+	cmd := exec.CommandContext(ctx, command, args...)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return nil
+	}
+	wrappedErr := fmt.Errorf("run %s %s: %w (output: %s)", command, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	claudeteeLog.WarnContext(ctx, "claudetee.kill_configured_process.failed", "command", command, "args", args, "err", wrappedErr)
+	return wrappedErr
 }
 
 func traceConfiguredProcessStops(opts Options) {

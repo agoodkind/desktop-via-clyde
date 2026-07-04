@@ -3,6 +3,7 @@ package hardreset
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 
 	"goodkind.io/desktop-via-clyde/internal/appguard"
 	"goodkind.io/desktop-via-clyde/internal/bundleidentity"
+	"goodkind.io/desktop-via-clyde/internal/bundlemutate"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/paths"
@@ -46,13 +48,12 @@ var systemTCCDatabasePath = "/Library/Application Support/com.apple.TCC/TCC.db"
 // (sqlite3, sudo, tccutil, killall) without executing them against the host.
 type commandRunner func(ctx context.Context, name string, args []string, stdin string) ([]byte, error)
 
-// closeAppFunc asks a foreground target app to quit before mutating bundle
-// artifacts.
-type closeAppFunc func(ctx context.Context, target targets.Target, opts appguard.Options) error
+type mutateBundleFunc func(ctx context.Context, target targets.Target, opts Options, fn func(context.Context) error) error
 
 var (
-	runCommand      commandRunner = execCommand
-	ensureAppClosed closeAppFunc  = appguard.EnsureClosed
+	runCommand      commandRunner    = execCommand
+	mutateBundle    mutateBundleFunc = defaultMutateBundle
+	runBundleMutate                  = bundlemutate.Mutate
 )
 
 func execCommand(ctx context.Context, name string, args []string, stdin string) ([]byte, error) {
@@ -184,16 +185,12 @@ func Run(ctx context.Context, target targets.Target, opts Options) error {
 			return fmt.Errorf("write hard-reset artifact: %w", err)
 		}
 	}
-	if opts.CloseBeforeMutate {
-		if err := ensureAppClosed(ctx, target, appguard.Options{
-			DryRun:  opts.DryRun,
-			Out:     opts.Out,
-			Timeout: 0,
-		}); err != nil {
-			hardResetLog.ErrorContext(ctx, "hardreset.close_app_failed", "target", target.ID, "err", err)
-			return fmt.Errorf("close app before hard reset: %w", err)
-		}
-	}
+	return mutateBundle(ctx, target, opts, func(mutateCtx context.Context) error {
+		return executePlan(mutateCtx, target, opts, plan, out)
+	})
+}
+
+func executePlan(ctx context.Context, target targets.Target, opts Options, plan Plan, out io.Writer) error {
 	if err := resetTCCUtilAll(ctx, opts, plan.TCCUtilBundleIDs); err != nil {
 		hardResetLog.ErrorContext(ctx, "hardreset.tccutil_reset_all_failed", "target", target.ID, "err", err)
 		return err
@@ -226,18 +223,38 @@ func Run(ctx context.Context, target targets.Target, opts Options) error {
 		hardResetLog.ErrorContext(ctx, "hardreset.remove_patch_state_failed", "target", target.ID, "err", err)
 		return err
 	}
-	if opts.DryRun {
-		_, err := fmt.Fprintln(out, "aftercare=report-only")
-		if err != nil {
-			return fmt.Errorf("write hard-reset aftercare: %w", err)
-		}
-		return nil
-	}
-	_, err = fmt.Fprintln(out, "aftercare=report-only")
+	_, err := fmt.Fprintln(out, "aftercare=report-only")
 	if err != nil {
 		return fmt.Errorf("write hard-reset aftercare: %w", err)
 	}
 	return nil
+}
+
+func defaultMutateBundle(
+	ctx context.Context,
+	target targets.Target,
+	opts Options,
+	fn func(context.Context) error,
+) error {
+	policy := bundlemutate.PolicyDefer
+	if opts.CloseBeforeMutate {
+		policy = bundlemutate.PolicyClose
+	}
+	err := runBundleMutate(ctx, target, policy, bundlemutate.Options{
+		DryRun:  opts.DryRun,
+		Out:     opts.Out,
+		Timeout: 0,
+	}, fn)
+	if errors.Is(err, appguard.ErrAppRunning) {
+		if opts.CloseBeforeMutate {
+			return err
+		}
+		if opts.Out != nil {
+			_, _ = fmt.Fprintf(opts.Out, "deferred: target=%s app running at mutation time; retry when closed\n", target.ID)
+		}
+		return nil
+	}
+	return err
 }
 
 func identitySets(ctx context.Context, target targets.Target) ([]string, []string, error) {

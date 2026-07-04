@@ -51,8 +51,9 @@ func TestSweepDefersRunningTargetAndUpgradesClosed(t *testing.T) {
 		appRunning: func(_ context.Context, target targets.Target) bool {
 			return target.ID == "running"
 		},
-		runUpgrade: func(_ context.Context, targetID string) {
+		runUpgrade: func(_ context.Context, targetID string) bool {
 			upgraded[targetID] = true
+			return false
 		},
 	}
 
@@ -93,7 +94,7 @@ func TestSweepUpgradesCLITargetWithoutRunningGate(t *testing.T) {
 			return upgrade.UpdateCheck{}, nil
 		},
 		appRunning: func(_ context.Context, _ targets.Target) bool { return true },
-		runUpgrade: func(_ context.Context, _ string) {},
+		runUpgrade: func(_ context.Context, _ string) bool { return false },
 		runCLIUpgrade: func(_ context.Context, program targets.CLIProgram, _ spec.OperationSpec) {
 			upgradedCLIs = append(upgradedCLIs, program.ID)
 		},
@@ -115,7 +116,10 @@ func TestSweepNoUpdatesDoesNotDeferOrUpgrade(t *testing.T) {
 			return upgrade.UpdateCheck{CurrentVersion: "1.0", AvailableVersion: "", UpdateAvailable: false}, nil
 		},
 		appRunning: func(_ context.Context, _ targets.Target) bool { return true },
-		runUpgrade: func(_ context.Context, targetID string) { upgraded[targetID] = true },
+		runUpgrade: func(_ context.Context, targetID string) bool {
+			upgraded[targetID] = true
+			return false
+		},
 	}
 
 	if tick.sweep(context.Background()) {
@@ -123,5 +127,28 @@ func TestSweepNoUpdatesDoesNotDeferOrUpgrade(t *testing.T) {
 	}
 	if len(upgraded) != 0 {
 		t.Fatalf("upgraded targets with no update available: %v", upgraded)
+	}
+}
+
+func TestSweepTreatsInJobDeferralAsDeferredAppRunning(t *testing.T) {
+	setupTwoApps(t)
+	tick := &ticker{
+		exec:  newExecutor(),
+		state: newUpdaterState(),
+		checkUpdate: func(_ context.Context, _ targets.Target) (upgrade.UpdateCheck, error) {
+			return upgrade.UpdateCheck{CurrentVersion: "1.0", AvailableVersion: "2.0", UpdateAvailable: true}, nil
+		},
+		appRunning: func(_ context.Context, _ targets.Target) bool { return false },
+		runUpgrade: func(_ context.Context, targetID string) bool {
+			return targetID == "running"
+		},
+	}
+
+	if !tick.sweep(context.Background()) {
+		t.Fatal("sweep did not report in-job deferral")
+	}
+	snapshot := tick.state.snapshot()
+	if snapshot.checks["running"].outcome != "deferred-app-running" {
+		t.Fatalf("running outcome = %q, want deferred-app-running", snapshot.checks["running"].outcome)
 	}
 }

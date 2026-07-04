@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
 	desktopviaclydev1 "goodkind.io/desktop-via-clyde/api/desktopviaclyde/v1"
 	"goodkind.io/desktop-via-clyde/internal/appguard"
+	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/clock"
 	"goodkind.io/desktop-via-clyde/internal/cmdflags"
 	"goodkind.io/desktop-via-clyde/internal/spec"
@@ -97,7 +99,7 @@ type ticker struct {
 	state         *updaterState
 	checkUpdate   func(ctx context.Context, target targets.Target) (upgrade.UpdateCheck, error)
 	appRunning    func(ctx context.Context, target targets.Target) bool
-	runUpgrade    func(ctx context.Context, targetID string)
+	runUpgrade    func(ctx context.Context, targetID string) bool
 	runCLIUpgrade func(ctx context.Context, program targets.CLIProgram, op spec.OperationSpec)
 }
 
@@ -167,8 +169,13 @@ func (t *ticker) sweep(ctx context.Context) bool {
 			entry.outcome = "deferred-app-running"
 			deferred = true
 		default:
-			entry.outcome = "upgrading"
-			t.runUpgrade(ctx, target.ID)
+			if t.runUpgrade(ctx, target.ID) {
+				entry.outcome = "deferred-app-running"
+				entry.appRunning = true
+				deferred = true
+			} else {
+				entry.outcome = "upgrading"
+			}
 		}
 		t.state.recordCheck(target.ID, entry)
 	}
@@ -202,7 +209,7 @@ func (t *ticker) sweepCLIs(ctx context.Context) {
 // runUpgradeThroughExecutor runs an upgrade for one target through the shared
 // executor and waits for it to finish, so a duplicate upgrade request for the
 // same target attaches instead of starting a second run.
-func (t *ticker) runUpgradeThroughExecutor(ctx context.Context, targetID string) {
+func (t *ticker) runUpgradeThroughExecutor(ctx context.Context, targetID string) bool {
 	flags := &desktopviaclydev1.OperationFlags{
 		Strings: map[string]string{},
 		Bools:   map[string]bool{"background": true},
@@ -211,9 +218,19 @@ func (t *ticker) runUpgradeThroughExecutor(ctx context.Context, targetID string)
 	run, err := t.exec.startOrAttach(ctx, "upgrade", targetID, job)
 	if err != nil {
 		daemonLog.WarnContext(ctx, "daemon.tick.run_upgrade_conflict", "err", err, "target", targetID)
-		return
+		return false
 	}
-	_ = run.broadcaster.stream(ctx, func(*desktopviaclydev1.ProgressEvent) error { return nil })
+	deferred := false
+	_ = run.broadcaster.stream(ctx, func(event *desktopviaclydev1.ProgressEvent) error {
+		if event.GetType() == string(clioutput.EventTargetDone) &&
+			event.GetTarget() == targetID &&
+			event.GetStatus() == string(clioutput.OutcomeSkipped) &&
+			strings.HasPrefix(strings.TrimSpace(event.GetDetail()), "deferred:") {
+			deferred = true
+		}
+		return nil
+	})
+	return deferred
 }
 
 // runCLIUpgradeThroughExecutor runs a CLI target's upgrade through the shared
