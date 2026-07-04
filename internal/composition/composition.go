@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"goodkind.io/desktop-via-clyde/internal/bundledclitee"
+	"goodkind.io/desktop-via-clyde/internal/bundlemutate"
 	"goodkind.io/desktop-via-clyde/internal/catalog"
 	"goodkind.io/desktop-via-clyde/internal/codexcli"
 	"goodkind.io/desktop-via-clyde/internal/codexclishim"
@@ -23,6 +24,15 @@ var compositionLog = slog.With("component", "desktop-via-clyde", "subcomponent",
 var (
 	registerOnce sync.Once
 	errRegister  error
+)
+
+// Keep the staged-mutation entry points reachable in the base stack slice
+// without paying runtime startup cost during composition registration.
+var (
+	_ = bundlemutate.Mutate
+	_ = bundlemutate.StagingRoot
+	_ = bundlemutate.StagedSwap
+	_ = bundlemutate.CommitSwap
 )
 
 // Register links every extension and core capability compiled into this binary.
