@@ -539,30 +539,6 @@ func codesignRuntimeArgs(id string, codePath string) []string {
 	return signing.RuntimeArgs(id, codePath)
 }
 
-func stepResignNestedCode(ctx context.Context, r *Runner, t targets.Target, id string, entFile string) error {
-	codePaths, err := nestedCodeSignPaths(ctx, r, t)
-	if err != nil {
-		return err
-	}
-	for _, codePath := range codePaths {
-		if !r.DryRun {
-			if _, err := os.Stat(codePath); err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					notef(r, fmt.Sprintf("target=%s nested code object missing, skipping %s", t.ID, codePath))
-					continue
-				}
-				return logPatchError(ctx, "patch.nested_code_stat_failed", fmt.Errorf("stat nested code object %s: %w", codePath, err))
-			}
-		}
-		traceAction(r, actionSignNestedCode, t.ID, codePath)
-		notef(r, fmt.Sprintf("target=%s re-sign nested code object %s", t.ID, codePath))
-		if err := r.Run(ctx, "/usr/bin/codesign", nestedCodeSignArgs(id, entFile, codePath)...); err != nil {
-			return logPatchError(ctx, "patch.sign_nested_code_failed", fmt.Errorf("sign nested code object %s: %w", codePath, err))
-		}
-	}
-	return nil
-}
-
 func nestedCodeSignPaths(ctx context.Context, r *Runner, t targets.Target) ([]string, error) {
 	items := make([]nestedCodeSignPath, 0, len(t.NestedSignPaths))
 	for _, relPath := range t.NestedSignPaths {
