@@ -38,8 +38,8 @@ int main(void) {
     char **argv = *_NSGetArgv();
     int found_arg = 0;
 
-    if (inserted != NULL) {
-        fprintf(stderr, "DYLD_INSERT_LIBRARIES still set\n");
+    if (inserted == NULL) {
+        fprintf(stderr, "DYLD_INSERT_LIBRARIES missing\n");
         return 10;
     }
     if (set_value == NULL || strcmp(set_value, "ok") != 0) {

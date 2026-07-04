@@ -34,6 +34,39 @@ func TestCodesignRuntimeArgs(t *testing.T) {
 	}
 }
 
+func TestNestedAppCodesignArgsUseTargetEntitlements(t *testing.T) {
+	args := nestedCodeSignArgs("SIGN-ID", "/tmp/entitlements.plist", "/Applications/Cursor.app/Contents/Helpers/Cursor Helper (Plugin).app")
+	want := []string{
+		"--force",
+		"--sign",
+		"SIGN-ID",
+		"--options",
+		"runtime",
+		"--entitlements",
+		"/tmp/entitlements.plist",
+		"/Applications/Cursor.app/Contents/Helpers/Cursor Helper (Plugin).app",
+	}
+	if !stringSlicesEqual(args, want) {
+		t.Fatalf("nested app codesign args mismatch: got %v want %v", args, want)
+	}
+}
+
+func TestNestedNonAppCodesignArgsPreserveEntitlements(t *testing.T) {
+	args := nestedCodeSignArgs("SIGN-ID", "/tmp/entitlements.plist", "/Applications/Cursor.app/Contents/Frameworks/Electron Framework.framework")
+	want := []string{
+		"--force",
+		"--sign",
+		"SIGN-ID",
+		"--options",
+		"runtime",
+		"--preserve-metadata=entitlements",
+		"/Applications/Cursor.app/Contents/Frameworks/Electron Framework.framework",
+	}
+	if !stringSlicesEqual(args, want) {
+		t.Fatalf("nested non-app codesign args mismatch: got %v want %v", args, want)
+	}
+}
+
 func stringSlicesEqual(a []string, b []string) bool {
 	if len(a) != len(b) {
 		return false

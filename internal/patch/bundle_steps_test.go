@@ -160,6 +160,35 @@ func TestCodexDevelopmentSigningResealIsLastSigningAction(t *testing.T) {
 	requireExternalInjectorDryRun(t, trace, tg)
 }
 
+func TestCursorProxyInjectionKeepsDeveloperIDReseal(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	tg, err := lookupTarget(t, "cursor")
+	if err != nil {
+		t.Fatalf("Lookup(cursor): %v", err)
+	}
+	tg.AppPath = filepath.Join(t.TempDir(), "Cursor.app")
+	tg.DevelopmentSigning = &targets.DevelopmentSigningPolicy{
+		Enabled:        false,
+		ProxyInjection: true,
+	}
+
+	trace := &patch.Trace{}
+	if err := patch.Patch(context.Background(), tg, patch.Options{
+		DryRun:          true,
+		MigrateKeychain: false,
+		Out:             io.Discard,
+		Trace:           trace,
+	}); err != nil {
+		t.Fatalf("Patch dry-run (cursor proxy injection): %v", err)
+	}
+
+	requireExternalInjectorDryRun(t, trace, tg)
+	if hasDevResealCommand(trace, tg.AppPath) {
+		t.Fatalf("cursor proxy injection used development-signing rcodesign reseal: %#v", trace.Events)
+	}
+	requireDeveloperIDBundleReseal(t, trace, tg.AppPath)
+}
+
 func requireExternalInjectorDryRun(t *testing.T, trace *patch.Trace, tg targets.Target) {
 	t.Helper()
 	appLocalInjector := devsign.AppLocalInjectorPath(tg)
@@ -225,6 +254,15 @@ func isDevResealCommand(event patch.TraceEvent, appPath string) bool {
 	return hasShallow && sealsApp
 }
 
+func hasDevResealCommand(trace *patch.Trace, appPath string) bool {
+	for _, event := range trace.Events {
+		if isDevResealCommand(event, appPath) {
+			return true
+		}
+	}
+	return false
+}
+
 func hasNestedCodesignBefore(trace *patch.Trace, resealIndex int) bool {
 	for i, event := range trace.Events {
 		if i >= resealIndex {
@@ -235,6 +273,29 @@ func hasNestedCodesignBefore(trace *patch.Trace, resealIndex int) bool {
 		}
 	}
 	return false
+}
+
+func requireDeveloperIDBundleReseal(t *testing.T, trace *patch.Trace, appPath string) {
+	t.Helper()
+	for _, event := range trace.Events {
+		if event.Action != "run_command" || event.Command != "/usr/bin/codesign" {
+			continue
+		}
+		if !containsString(event.Args, "--entitlements") {
+			continue
+		}
+		if !containsString(event.Args, appPath) {
+			continue
+		}
+		if !containsString(event.Args, paths.SignIdentity()) {
+			t.Fatalf("bundle reseal missing Developer ID identity: %#v", event)
+		}
+		if !containsString(event.Args, "runtime") {
+			t.Fatalf("bundle reseal missing runtime option: %#v", event)
+		}
+		return
+	}
+	t.Fatalf("trace missing Developer ID bundle reseal for %s: %#v", appPath, trace.Events)
 }
 
 func TestClaudePatchRestoresSquirrelInsteadOfResigningIt(t *testing.T) {

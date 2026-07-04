@@ -46,12 +46,16 @@ strip = [
     "keychain-access-groups",
     "com.apple.security.application-groups",
 ]
-required_boolean = ["com.apple.security.cs.disable-library-validation"]
+required_boolean = [
+    "com.apple.security.cs.allow-dyld-environment-variables",
+    "com.apple.security.cs.disable-library-validation",
+]
 
 # Optional development-profile signing overlay. This is only for targets that
 # need a local Apple Development profile for restricted entitlements. When
-# proxy_injection is true, the built-in injector is installed under the XDG state
-# root. Set injector_dylib_path only to override that embedded injector.
+# proxy_injection is true while enabled is false, the built-in injector is
+# installed under the XDG state root and the bundle keeps the standard Developer
+# ID reseal. Set injector_dylib_path only to override that embedded injector.
 # [apps.example.development_signing]
 # enabled = false
 # profile_path = "<STATE_ROOT>/dev-signing/dev.provisionprofile"

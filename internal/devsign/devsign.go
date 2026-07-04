@@ -3,8 +3,8 @@
 // failure). It keeps the real Electron binary as the LaunchServices
 // CFBundleExecutable, embeds a wildcard MAC_APP_DEVELOPMENT provisioning profile,
 // applies Apple Development entitlements, and re-seals the bundle with
-// keychain-free rcodesign. When proxy injection is enabled, it installs a
-// separate signed injector dylib under XDG state and points LSEnvironment at it.
+// keychain-free rcodesign. The shared proxy-injection helper installs a separate
+// signed injector dylib under XDG state and points LSEnvironment at it.
 package devsign
 
 import (
@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -39,7 +40,10 @@ const (
 	DyldInsertLibrariesKey = "DYLD_INSERT_LIBRARIES"
 	// InjectorPolicyEnvKey is the LSEnvironment key that points the injector
 	// at its policy.
-	InjectorPolicyEnvKey    = "DVC_CLYDE_INJECT_POLICY"
+	InjectorPolicyEnvKey = "DVC_CLYDE_INJECT_POLICY"
+	// RedirectPortEnvKey is the injector policy key that enables connect
+	// redirection to the target's Clyde listener port.
+	RedirectPortEnvKey      = "DVC_CLYDE_REDIRECT_PORT"
 	dyldInsertLibrariesPath = ":LSEnvironment:" + DyldInsertLibrariesKey
 	injectorPolicyPlistPath = ":LSEnvironment:" + InjectorPolicyEnvKey
 )
@@ -144,6 +148,15 @@ func AppLocalInjectorPath(t targets.Target) string {
 	return filepath.Join(paths.MacOSDir(t), injectorDylibName)
 }
 
+// ApplyProxyInjection installs and signs the injector without changing the
+// caller's bundle signing strategy.
+func ApplyProxyInjection(ctx context.Context, cmd Commander, opts Options, t targets.Target) error {
+	if t.DevelopmentSigning == nil || !t.DevelopmentSigning.ProxyInjection {
+		return nil
+	}
+	return installInjector(ctx, cmd, opts, t, paths.InfoPlistPath(t))
+}
+
 // ApplyNestedMutations runs every development-signing mutation except the final
 // --shallow top-bundle reseal.
 func ApplyNestedMutations(ctx context.Context, cmd Commander, opts Options, t targets.Target) (*Plan, error) {
@@ -170,7 +183,7 @@ func ApplyNestedMutations(ctx context.Context, cmd Commander, opts Options, t ta
 		return nil, err
 	}
 	if policy.ProxyInjection {
-		if _, err := installInjector(ctx, cmd, opts, t, infoPlist); err != nil {
+		if err := installInjector(ctx, cmd, opts, t, infoPlist); err != nil {
 			return nil, err
 		}
 	}
@@ -210,12 +223,7 @@ func embedProvisioningProfile(ctx context.Context, cmd Commander, opts Options, 
 	return nil
 }
 
-type injectorInstall struct {
-	injectorPath string
-	policyPath   string
-}
-
-func installInjector(ctx context.Context, cmd Commander, opts Options, t targets.Target, infoPlist string) (injectorInstall, error) {
+func installInjector(ctx context.Context, cmd Commander, opts Options, t targets.Target, infoPlist string) error {
 	dylibDest := InjectorPath(t)
 	policyPath := InjectorPolicyPath(t)
 	tempDylib := dylibDest + ".tmp"
@@ -226,30 +234,30 @@ func installInjector(ctx context.Context, cmd Commander, opts Options, t targets
 		"dry_run", opts.DryRun)
 
 	if err := writeInjectorPolicy(ctx, opts, t, policyPath); err != nil {
-		return injectorInstall{}, err
+		return err
 	}
 	if err := stageInjectorDylib(ctx, cmd, opts, t, tempDylib); err != nil {
-		return injectorInstall{}, err
+		return err
 	}
 	if err := signInjector(ctx, cmd, opts, t, tempDylib); err != nil {
-		return injectorInstall{}, err
+		return err
 	}
 	if err := verifyInjector(ctx, cmd, opts, t, tempDylib, policyPath); err != nil {
-		return injectorInstall{}, err
+		return err
 	}
 	note(opts, fmt.Sprintf("target=%s development signing: install external injector %s -> %s", t.ID, tempDylib, dylibDest))
 	if !opts.DryRun {
 		if err := os.Rename(tempDylib, dylibDest); err != nil {
-			return injectorInstall{}, logDevsignError(ctx, "devsign.install_external_injector_failed", fmt.Errorf("rename injector into place: %w", err))
+			return logDevsignError(ctx, "devsign.install_external_injector_failed", fmt.Errorf("rename injector into place: %w", err))
 		}
 	}
 	if err := removeAppLocalInjector(ctx, cmd, opts, t); err != nil {
-		return injectorInstall{}, err
+		return err
 	}
 	if err := setInjectorEnvironment(ctx, cmd, opts, t, infoPlist, dylibDest, policyPath); err != nil {
-		return injectorInstall{}, err
+		return err
 	}
-	return injectorInstall{injectorPath: dylibDest, policyPath: policyPath}, nil
+	return nil
 }
 
 func writeInjectorPolicy(ctx context.Context, opts Options, t targets.Target, policyPath string) error {
@@ -419,23 +427,31 @@ func stripQuarantine(ctx context.Context, cmd Commander, opts Options, t targets
 // C injector.
 func EncodeInjectorPolicy(policy spec.LaunchPolicySpec) ([]byte, error) {
 	var buffer bytes.Buffer
+	hasRedirectPortAction := false
 	for _, envAction := range policy.Environment {
+		key := strings.TrimSpace(envAction.Key)
+		if key == RedirectPortEnvKey {
+			hasRedirectPortAction = true
+		}
 		switch policyAction(strings.ToLower(strings.TrimSpace(envAction.Action))) {
 		case policyActionSet:
-			if envAction.Key == "" {
+			if key == "" {
 				return nil, fmt.Errorf("injector policy set action has empty key")
 			}
-			writePolicyRecord(&buffer, string(policyActionSet), envAction.Key, envAction.Value)
+			writePolicyRecord(&buffer, string(policyActionSet), key, envAction.Value)
 		case policyActionUnset:
-			if envAction.Key == "" {
+			if key == "" {
 				return nil, fmt.Errorf("injector policy unset action has empty key")
 			}
-			writePolicyRecord(&buffer, string(policyActionUnset), envAction.Key)
+			writePolicyRecord(&buffer, string(policyActionUnset), key)
 		case policyActionAppend, policyActionAppendArgv:
 			return nil, fmt.Errorf("unsupported injector env action %q", envAction.Action)
 		default:
 			return nil, fmt.Errorf("unsupported injector env action %q", envAction.Action)
 		}
+	}
+	if policy.ProxyPort > 0 && !hasRedirectPortAction {
+		writePolicyRecord(&buffer, string(policyActionSet), RedirectPortEnvKey, strconv.Itoa(policy.ProxyPort))
 	}
 	for _, argAction := range policy.Arguments {
 		switch policyAction(strings.ToLower(strings.TrimSpace(argAction.Action))) {
@@ -460,8 +476,8 @@ func writePolicyRecord(buffer *bytes.Buffer, values ...string) {
 	}
 }
 
-// SmokeTestInjector proves dyld can load the injector, the constructor clears
-// DYLD_INSERT_LIBRARIES before main runs, and policy actions are applied.
+// SmokeTestInjector proves dyld can load the injector, keeps DYLD propagation
+// enabled for child processes, and applies policy actions.
 func SmokeTestInjector(ctx context.Context, dylibPath string, policyPath string) error {
 	devsignLog.DebugContext(ctx, "devsign.smoke_injector.boundary",
 		"dylib", dylibPath,
@@ -486,8 +502,8 @@ int main(void) {
     char **argv = *_NSGetArgv();
     int found_arg = 0;
 
-    if (inserted != NULL) {
-        fprintf(stderr, "DYLD_INSERT_LIBRARIES still set\n");
+    if (inserted == NULL) {
+        fprintf(stderr, "DYLD_INSERT_LIBRARIES missing\n");
         return 42;
     }
     if (mode == NULL || strcmp(mode, "sentinel") != 0) {

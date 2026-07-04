@@ -23,8 +23,12 @@ short = "Operate on /Applications/Cursor.app"
 [apps.cursor.entitlements]
 required_boolean = [
     "com.apple.security.automation.apple-events",
+    "com.apple.security.cs.allow-dyld-environment-variables",
     "com.apple.security.cs.disable-library-validation",
 ]
+
+[apps.cursor.development_signing]
+proxy_injection = true
 
 [apps.cursor.updater]
 kind = "http_path_json_manifest"
