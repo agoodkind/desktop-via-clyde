@@ -28,12 +28,18 @@ func stepResignNestedCode(ctx context.Context, r *Runner, t targets.Target, id s
 		}
 		traceAction(r, actionSignNestedCode, t.ID, codePath)
 		notef(r, fmt.Sprintf("target=%s re-sign nested code object %s", t.ID, codePath))
-		args, err := resolveNestedCodeSignArgs(ctx, r, t, id, entFile, codePath, propagateEntitlements)
+		args, nestedEntFile, err := resolveNestedCodeSignArgs(ctx, r, t, id, entFile, codePath, propagateEntitlements)
 		if err != nil {
 			return err
 		}
-		if err := r.Run(ctx, "/usr/bin/codesign", args...); err != nil {
-			return logPatchError(ctx, "patch.sign_nested_code_failed", fmt.Errorf("sign nested code object %s: %w", codePath, err))
+		runErr := r.Run(ctx, "/usr/bin/codesign", args...)
+		if nestedEntFile != "" && !r.DryRun {
+			if removeErr := os.Remove(nestedEntFile); removeErr != nil {
+				patchLog.DebugContext(ctx, "patch.nested_entitlements_cleanup_failed", "path", nestedEntFile, "err", removeErr)
+			}
+		}
+		if runErr != nil {
+			return logPatchError(ctx, "patch.sign_nested_code_failed", fmt.Errorf("sign nested code object %s: %w", codePath, runErr))
 		}
 	}
 	return nil
@@ -44,21 +50,38 @@ func stepResignNestedCode(ctx context.Context, r *Runner, t targets.Target, id s
 // child processes, the object is re-signed with its own entitlements augmented
 // by the target policy so an inserted dylib survives hardened runtime into the
 // extension host; otherwise it keeps the previous preserve-metadata behavior.
-func resolveNestedCodeSignArgs(ctx context.Context, r *Runner, t targets.Target, id string, entFile string, codePath string, propagateEntitlements bool) ([]string, error) {
+// The second return value is the temporary augmented entitlements file the
+// caller must remove after codesign consumes it, or "" when the preserve path
+// wrote no file. Removing it keeps the propagation path from leaving one temp
+// plist per nested object behind on every patch run.
+func resolveNestedCodeSignArgs(ctx context.Context, r *Runner, t targets.Target, id string, entFile string, codePath string, propagateEntitlements bool) ([]string, string, error) {
 	if !propagateEntitlements {
-		return nestedCodeSignArgs(id, entFile, codePath), nil
+		return nestedCodeSignArgs(id, entFile, codePath), "", nil
 	}
 	nestedEntFile, err := writeAugmentedEntitlementsFileAllowEmpty(
 		ctx,
 		r,
 		"target="+t.ID+" nested "+filepath.Base(codePath),
 		codePath,
-		*t.Entitlements,
+		nestedEntitlementsPolicy(t),
 	)
 	if err != nil {
-		return nil, logPatchError(ctx, "patch.nested_entitlements_failed", fmt.Errorf("nested entitlements for %s: %w", codePath, err))
+		return nil, "", logPatchError(ctx, "patch.nested_entitlements_failed", fmt.Errorf("nested entitlements for %s: %w", codePath, err))
 	}
-	return codesignRuntimeEntitlementsArgs(id, nestedEntFile, codePath), nil
+	return codesignRuntimeEntitlementsArgs(id, nestedEntFile, codePath), nestedEntFile, nil
+}
+
+// nestedEntitlementsPolicy returns the entitlement policy applied to one nested
+// helper: the target's required booleans with an empty Strip. Helpers keep
+// their own entitlements and only gain the required booleans. The target's
+// Strip policy is intentionally not applied to helpers, because stripping keys
+// a helper needs would break it and contradicts the preserve-then-add intent.
+// The main binary is signed with the full target policy elsewhere.
+func nestedEntitlementsPolicy(t targets.Target) targets.EntitlementsPolicy {
+	return targets.EntitlementsPolicy{
+		Strip:                       nil,
+		RequiredBooleanEntitlements: t.Entitlements.RequiredBooleanEntitlements,
+	}
 }
 
 func nestedCodeSignArgs(id string, entFile string, codePath string) []string {
