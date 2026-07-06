@@ -25,6 +25,12 @@ desktop-via-clyde --help
 desktop-via-clyde status
 ```
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/agoodkind/desktop-via-clyde/main/install.sh | bash
+```
+
 ## Source Owners
 
 `config.example.toml` documents the config shape. The schema lives in
