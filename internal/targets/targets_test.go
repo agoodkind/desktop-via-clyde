@@ -154,6 +154,28 @@ func TestUpdaterMetadataPerTarget(t *testing.T) {
 	}
 }
 
+func TestCLIDaemonDeferralPolicy(t *testing.T) {
+	installFixture(t)
+	cli, err := lookupCLI("codex-cli")
+	if err != nil {
+		t.Fatalf("lookupCLI(codex-cli): %v", err)
+	}
+	policy := cli.DaemonDeferral
+	if !policy.Enabled {
+		t.Fatal("codex-cli daemon deferral is disabled")
+	}
+	if policy.LoadThresholdPerCPU != 1.0 {
+		t.Fatalf("load threshold = %v, want 1.0", policy.LoadThresholdPerCPU)
+	}
+	if policy.WorkHoursLoadThresholdPerCPU != 0.30 {
+		t.Fatalf("work-hours load threshold = %v, want 0.30", policy.WorkHoursLoadThresholdPerCPU)
+	}
+	wantWeekdays := []string{"monday", "tuesday", "wednesday", "thursday", "friday"}
+	if !stringSlicesEqual(policy.WorkHoursWeekdays, wantWeekdays) {
+		t.Fatalf("work-hours weekdays = %v, want %v", policy.WorkHoursWeekdays, wantWeekdays)
+	}
+}
+
 func TestNestedSignPathsPerTarget(t *testing.T) {
 	installFixture(t)
 	want := map[string][]string{
@@ -369,6 +391,15 @@ func lookupTarget(id string) (Target, error) {
 		}
 	}
 	return Target{}, fmt.Errorf("unknown target %q", id)
+}
+
+func lookupCLI(id string) (CLIProgram, error) {
+	for _, program := range AllCLIs() {
+		if program.ID == id {
+			return program, nil
+		}
+	}
+	return CLIProgram{}, fmt.Errorf("unknown cli %q", id)
 }
 
 func installFixture(t *testing.T) {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -101,6 +103,7 @@ type ticker struct {
 	appRunning    func(ctx context.Context, target targets.Target) bool
 	runUpgrade    func(ctx context.Context, targetID string) bool
 	runCLIUpgrade func(ctx context.Context, program targets.CLIProgram, op spec.OperationSpec)
+	checkCLILoad  func(ctx context.Context, program targets.CLIProgram) cliLoadDecision
 }
 
 func newTicker(operationExecutor *executor, state *updaterState) *ticker {
@@ -111,6 +114,7 @@ func newTicker(operationExecutor *executor, state *updaterState) *ticker {
 		appRunning:    appRunning,
 		runUpgrade:    nil,
 		runCLIUpgrade: nil,
+		checkCLILoad:  defaultCLILoadDecision,
 	}
 	tick.runUpgrade = tick.runUpgradeThroughExecutor
 	tick.runCLIUpgrade = tick.runCLIUpgradeThroughExecutor
@@ -179,19 +183,46 @@ func (t *ticker) sweep(ctx context.Context) bool {
 		}
 		t.state.recordCheck(target.ID, entry)
 	}
-	t.sweepCLIs(ctx)
+	if t.sweepCLIs(ctx) {
+		deferred = true
+	}
 	return deferred
 }
 
 // sweepCLIs upgrades every configured CLI target that declares an upgrade
-// operation. CLI targets (codex-cli) have no long-lived process, so there is no
-// running-process gate: a new binary is picked up on the next invocation, and
-// the upgrade runs every sweep at the base cadence. It never contributes to the
-// fast-cadence deferral.
-func (t *ticker) sweepCLIs(ctx context.Context) {
+// operation. Manual CLI upgrades are not routed through this path, so daemon
+// load deferral only affects background maintenance.
+func (t *ticker) sweepCLIs(ctx context.Context) bool {
+	deferred := false
 	for _, program := range targets.AllCLIs() {
 		op, ok := program.Operations["upgrade"]
 		if !ok {
+			continue
+		}
+		decision := t.checkCLILoad(ctx, program)
+		if decision.err != nil {
+			daemonLog.WarnContext(ctx, "daemon.tick.cli_load_check_failed", "err", decision.err, "target", program.ID)
+		}
+		if decision.deferUpgrade {
+			daemonLog.DebugContext(
+				ctx,
+				"daemon.tick.cli_upgrade_deferred_system_load",
+				"target", program.ID,
+				"load_average_1m", decision.loadAverage,
+				"load_per_cpu", decision.loadPerCPU,
+				"threshold_per_cpu", decision.thresholdPerCPU,
+				"work_hours", decision.workHours,
+				"reason", decision.reason,
+			)
+			t.state.recordCheck(program.ID, targetCheck{
+				currentVersion:   "",
+				availableVersion: "",
+				updateAvailable:  false,
+				appRunning:       false,
+				outcome:          "deferred-system-load",
+				checkedAtUnix:    clock.Now().Unix(),
+			})
+			deferred = true
 			continue
 		}
 		t.runCLIUpgrade(ctx, program, op)
@@ -204,6 +235,104 @@ func (t *ticker) sweepCLIs(ctx context.Context) {
 			checkedAtUnix:    clock.Now().Unix(),
 		})
 	}
+	return deferred
+}
+
+type cliLoadDecision struct {
+	deferUpgrade    bool
+	reason          string
+	loadAverage     float64
+	loadPerCPU      float64
+	thresholdPerCPU float64
+	workHours       bool
+	err             error
+}
+
+func defaultCLILoadDecision(ctx context.Context, program targets.CLIProgram) cliLoadDecision {
+	policy := program.DaemonDeferral
+	if !policy.Enabled {
+		return cliLoadDecision{
+			deferUpgrade:    false,
+			reason:          "",
+			loadAverage:     0,
+			loadPerCPU:      0,
+			thresholdPerCPU: 0,
+			workHours:       false,
+			err:             nil,
+		}
+	}
+	loadAverage, err := readOneMinuteLoadAverage(ctx)
+	if err != nil {
+		return cliLoadDecision{
+			deferUpgrade:    false,
+			reason:          "",
+			loadAverage:     0,
+			loadPerCPU:      0,
+			thresholdPerCPU: 0,
+			workHours:       false,
+			err:             err,
+		}
+	}
+	return buildCLILoadDecision(clock.Now(), policy, loadAverage, runtime.NumCPU())
+}
+
+func buildCLILoadDecision(
+	now time.Time,
+	policy targets.CLIDaemonDeferralPolicy,
+	loadAverage float64,
+	cpuCount int,
+) cliLoadDecision {
+	if cpuCount < 1 {
+		cpuCount = 1
+	}
+	loadPerCPU := loadAverage / float64(cpuCount)
+	workHours := inCLIWorkHours(now, policy)
+	threshold := policy.LoadThresholdPerCPU
+	if workHours {
+		threshold = policy.WorkHoursLoadThresholdPerCPU
+	}
+	decision := cliLoadDecision{
+		deferUpgrade:    loadPerCPU >= threshold,
+		reason:          fmt.Sprintf("load %.2f per cpu >= threshold %.2f", loadPerCPU, threshold),
+		loadAverage:     loadAverage,
+		loadPerCPU:      loadPerCPU,
+		thresholdPerCPU: threshold,
+		workHours:       workHours,
+		err:             nil,
+	}
+	if !decision.deferUpgrade {
+		decision.reason = fmt.Sprintf("load %.2f per cpu < threshold %.2f", loadPerCPU, threshold)
+	}
+	return decision
+}
+
+func inCLIWorkHours(now time.Time, policy targets.CLIDaemonDeferralPolicy) bool {
+	if !weekdayMatches(now.Weekday(), policy.WorkHoursWeekdays) {
+		return false
+	}
+	startMinute, startOK := parseClockMinute(policy.WorkHoursStart)
+	endMinute, endOK := parseClockMinute(policy.WorkHoursEnd)
+	if !startOK || !endOK || startMinute == endMinute {
+		return false
+	}
+	nowMinute := now.Hour()*60 + now.Minute()
+	if startMinute < endMinute {
+		return nowMinute >= startMinute && nowMinute < endMinute
+	}
+	return nowMinute >= startMinute || nowMinute < endMinute
+}
+
+func weekdayMatches(day time.Weekday, weekdays []string) bool {
+	current := strings.ToLower(day.String())
+	return slices.Contains(weekdays, current)
+}
+
+func parseClockMinute(value string) (int, bool) {
+	parsed, err := time.Parse("15:04", value)
+	if err != nil {
+		return 0, false
+	}
+	return parsed.Hour()*60 + parsed.Minute(), true
 }
 
 // runUpgradeThroughExecutor runs an upgrade for one target through the shared

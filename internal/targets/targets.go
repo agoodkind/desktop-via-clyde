@@ -134,9 +134,20 @@ type Target struct {
 
 // CLIProgram is the runtime non-app CLI declaration derived from config.
 type CLIProgram struct {
-	ID         string
-	Command    spec.CommandSpec
-	Operations map[string]spec.OperationSpec
+	ID             string
+	Command        spec.CommandSpec
+	Operations     map[string]spec.OperationSpec
+	DaemonDeferral CLIDaemonDeferralPolicy
+}
+
+// CLIDaemonDeferralPolicy is the runtime daemon-only CLI upgrade deferral policy.
+type CLIDaemonDeferralPolicy struct {
+	Enabled                      bool
+	LoadThresholdPerCPU          float64
+	WorkHoursLoadThresholdPerCPU float64
+	WorkHoursStart               string
+	WorkHoursEnd                 string
+	WorkHoursWeekdays            []string
 }
 
 // All returns all configured app targets in stable command order.
@@ -165,9 +176,10 @@ func AllCLIs() []CLIProgram {
 	results := make([]CLIProgram, 0, len(ids))
 	for _, id := range ids {
 		results = append(results, CLIProgram{
-			ID:         cfg.CLIs[id].ID,
-			Command:    cfg.CLIs[id].Command,
-			Operations: cloneOperations(cfg.CLIs[id].Operations),
+			ID:             cfg.CLIs[id].ID,
+			Command:        cfg.CLIs[id].Command,
+			Operations:     cloneOperations(cfg.CLIs[id].Operations),
+			DaemonDeferral: buildCLIDaemonDeferral(cfg.CLIs[id].DaemonDeferral),
 		})
 	}
 	return results
@@ -242,6 +254,17 @@ func buildDevelopmentSigning(ds spec.DevelopmentSigningSpec) *DevelopmentSigning
 		InjectorDylibPath: ds.InjectorDylibPath,
 		ProxyInjection:    ds.ProxyInjection,
 		AutoGenerate:      ds.AutoGenerate,
+	}
+}
+
+func buildCLIDaemonDeferral(deferral spec.CLIDaemonDeferralSpec) CLIDaemonDeferralPolicy {
+	return CLIDaemonDeferralPolicy{
+		Enabled:                      deferral.Enabled,
+		LoadThresholdPerCPU:          deferral.LoadThresholdPerCPU,
+		WorkHoursLoadThresholdPerCPU: deferral.WorkHoursLoadThresholdPerCPU,
+		WorkHoursStart:               deferral.WorkHoursStart,
+		WorkHoursEnd:                 deferral.WorkHoursEnd,
+		WorkHoursWeekdays:            cloneStrings(deferral.WorkHoursWeekdays),
 	}
 }
 

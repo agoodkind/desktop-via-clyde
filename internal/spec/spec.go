@@ -145,9 +145,20 @@ type DevelopmentSigningSpec struct {
 
 // CLISpec configures one non-app CLI surface and its operations.
 type CLISpec struct {
-	ID         string                   `toml:"-"`
-	Command    CommandSpec              `toml:"command"`
-	Operations map[string]OperationSpec `toml:"operations"`
+	ID             string                   `toml:"-"`
+	Command        CommandSpec              `toml:"command"`
+	Operations     map[string]OperationSpec `toml:"operations"`
+	DaemonDeferral CLIDaemonDeferralSpec    `toml:"daemon_deferral"`
+}
+
+// CLIDaemonDeferralSpec configures daemon-only CLI upgrade deferral.
+type CLIDaemonDeferralSpec struct {
+	Enabled                      bool     `toml:"enabled"`
+	LoadThresholdPerCPU          float64  `toml:"load_threshold_per_cpu"`
+	WorkHoursLoadThresholdPerCPU float64  `toml:"work_hours_load_threshold_per_cpu"`
+	WorkHoursStart               string   `toml:"work_hours_start"`
+	WorkHoursEnd                 string   `toml:"work_hours_end"`
+	WorkHoursWeekdays            []string `toml:"work_hours_weekdays"`
 }
 
 // EntitlementsSpec declares strip and required boolean entitlement lists.
@@ -249,6 +260,7 @@ func cloneCLI(cli CLISpec) CLISpec {
 	cloned := cli
 	cloned.Command = cloneCommand(cli.Command)
 	cloned.Operations = cloneOperations(cli.Operations)
+	cloned.DaemonDeferral.WorkHoursWeekdays = cloneStrings(cli.DaemonDeferral.WorkHoursWeekdays)
 	return cloned
 }
 

@@ -802,6 +802,14 @@ usage = "print reset commands without changing privacy grants"
 use = "codex-cli"
 short = "Build, sign, install, and inspect the local Codex CLI"
 
+[clis.codex-cli.daemon_deferral]
+enabled = true
+load_threshold_per_cpu = 1.0
+work_hours_load_threshold_per_cpu = 0.30
+work_hours_start = "09:00"
+work_hours_end = "17:00"
+work_hours_weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday"]
+
 [clis.codex-cli.operations.upgrade]
 use = "upgrade"
 aliases = ["install"]
