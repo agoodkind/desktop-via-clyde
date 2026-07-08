@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
 
@@ -17,6 +18,18 @@ import (
 )
 
 var configLog = slog.With("component", "desktop-via-clyde", "subcomponent", "config")
+
+type weekdayName string
+
+const (
+	weekdayNameSunday    weekdayName = "sunday"
+	weekdayNameMonday    weekdayName = "monday"
+	weekdayNameTuesday   weekdayName = "tuesday"
+	weekdayNameWednesday weekdayName = "wednesday"
+	weekdayNameThursday  weekdayName = "thursday"
+	weekdayNameFriday    weekdayName = "friday"
+	weekdayNameSaturday  weekdayName = "saturday"
+)
 
 type decodedConfig struct {
 	Signing spec.SigningSpec          `toml:"signing"`
@@ -196,7 +209,81 @@ func normalizeAndValidateCLI(id string, cli *spec.CLISpec) error {
 	if strings.TrimSpace(cli.Command.Use) == "" {
 		return fmt.Errorf("clis.%s.command.use is required", cli.ID)
 	}
-	return normalizeAndValidateOperations("clis."+cli.ID+".operations", cli.Operations)
+	if err := normalizeAndValidateOperations("clis."+cli.ID+".operations", cli.Operations); err != nil {
+		return err
+	}
+	return normalizeAndValidateCLIDaemonDeferral("clis."+cli.ID+".daemon_deferral", &cli.DaemonDeferral)
+}
+
+func normalizeAndValidateCLIDaemonDeferral(path string, deferral *spec.CLIDaemonDeferralSpec) error {
+	deferral.WorkHoursStart = strings.TrimSpace(deferral.WorkHoursStart)
+	deferral.WorkHoursEnd = strings.TrimSpace(deferral.WorkHoursEnd)
+	deferral.WorkHoursWeekdays = normalizeWeekdays(deferral.WorkHoursWeekdays)
+	if !deferral.Enabled {
+		return nil
+	}
+	if deferral.LoadThresholdPerCPU <= 0 {
+		return fmt.Errorf("%s.load_threshold_per_cpu must be positive", path)
+	}
+	if deferral.WorkHoursLoadThresholdPerCPU <= 0 {
+		return fmt.Errorf("%s.work_hours_load_threshold_per_cpu must be positive", path)
+	}
+	if deferral.WorkHoursLoadThresholdPerCPU > deferral.LoadThresholdPerCPU {
+		return fmt.Errorf("%s.work_hours_load_threshold_per_cpu must be less than or equal to %s.load_threshold_per_cpu", path, path)
+	}
+	if !validCLIDeferralTime(deferral.WorkHoursStart) {
+		return fmt.Errorf("%s.work_hours_start must use HH:MM", path)
+	}
+	if !validCLIDeferralTime(deferral.WorkHoursEnd) {
+		return fmt.Errorf("%s.work_hours_end must use HH:MM", path)
+	}
+	if deferral.WorkHoursStart == deferral.WorkHoursEnd {
+		return fmt.Errorf("%s.work_hours_start must differ from %s.work_hours_end", path, path)
+	}
+	if len(deferral.WorkHoursWeekdays) == 0 {
+		return fmt.Errorf("%s.work_hours_weekdays must declare at least one weekday", path)
+	}
+	for _, weekday := range deferral.WorkHoursWeekdays {
+		if !isWeekdayName(weekday) {
+			return fmt.Errorf("%s.work_hours_weekdays contains unknown weekday %q", path, weekday)
+		}
+	}
+	return nil
+}
+
+func normalizeWeekdays(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.ToLower(strings.TrimSpace(value))
+		if trimmed == "" {
+			continue
+		}
+		normalized = append(normalized, trimmed)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func validCLIDeferralTime(value string) bool {
+	_, err := time.Parse("15:04", value)
+	return err == nil
+}
+
+func isWeekdayName(value string) bool {
+	switch weekdayName(value) {
+	case weekdayNameSunday,
+		weekdayNameMonday,
+		weekdayNameTuesday,
+		weekdayNameWednesday,
+		weekdayNameThursday,
+		weekdayNameFriday,
+		weekdayNameSaturday:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeAndValidateOperations(path string, operations map[string]spec.OperationSpec) error {

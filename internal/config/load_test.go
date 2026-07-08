@@ -60,6 +60,12 @@ func TestLoadPathLoadsDeclaredConfig(t *testing.T) {
 	if codexCLI.Command.Use != "codex-cli" {
 		t.Fatalf("codex-cli command use = %q", codexCLI.Command.Use)
 	}
+	if !codexCLI.DaemonDeferral.Enabled {
+		t.Fatal("fixture codex-cli daemon deferral is disabled")
+	}
+	if codexCLI.DaemonDeferral.WorkHoursLoadThresholdPerCPU != 0.30 {
+		t.Fatalf("codex-cli work-hours threshold = %v, want 0.30", codexCLI.DaemonDeferral.WorkHoursLoadThresholdPerCPU)
+	}
 	requireFlagBinding(t, codexCLI.Operations["upgrade"].Flags, "codex-home", "package-home")
 	requireFlagBinding(t, codexCLI.Operations["status"].Flags, "codex-home", "package-home")
 }
@@ -218,6 +224,121 @@ default_string = "summary"
 	}
 	flags := cfg.CLIs["fake"].Operations["status"].Flags
 	requireFlagBinding(t, flags, "mode", "mode")
+}
+
+func TestLoadPathAcceptsCLIDaemonDeferral(t *testing.T) {
+	path := writeConfigForTest(t, validFakeConfig(`
+[clis.fake.daemon_deferral]
+enabled = true
+load_threshold_per_cpu = 1.0
+work_hours_load_threshold_per_cpu = 0.30
+work_hours_start = "09:00"
+work_hours_end = "17:00"
+work_hours_weekdays = ["Monday", " tuesday "]
+`))
+
+	cfg, err := config.LoadPath(path)
+	if err != nil {
+		t.Fatalf("LoadPath(%s): %v", path, err)
+	}
+	deferral := cfg.CLIs["fake"].DaemonDeferral
+	if !deferral.Enabled {
+		t.Fatal("daemon deferral is disabled")
+	}
+	if deferral.LoadThresholdPerCPU != 1.0 {
+		t.Fatalf("load threshold = %v, want 1.0", deferral.LoadThresholdPerCPU)
+	}
+	if deferral.WorkHoursLoadThresholdPerCPU != 0.30 {
+		t.Fatalf("work-hours load threshold = %v, want 0.30", deferral.WorkHoursLoadThresholdPerCPU)
+	}
+	if got := strings.Join(deferral.WorkHoursWeekdays, ","); got != "monday,tuesday" {
+		t.Fatalf("work-hours weekdays = %q, want monday,tuesday", got)
+	}
+}
+
+func TestLoadPathRejectsCLIDaemonDeferralThreshold(t *testing.T) {
+	path := writeConfigForTest(t, validFakeConfig(`
+[clis.fake.daemon_deferral]
+enabled = true
+load_threshold_per_cpu = 0
+work_hours_load_threshold_per_cpu = 0.30
+work_hours_start = "09:00"
+work_hours_end = "17:00"
+work_hours_weekdays = ["monday"]
+`))
+
+	_, err := config.LoadPath(path)
+	if err == nil || !strings.Contains(err.Error(), "load_threshold_per_cpu must be positive") {
+		t.Fatalf("LoadPath should reject invalid load threshold, err=%v", err)
+	}
+}
+
+func TestLoadPathRejectsCLIDaemonDeferralInvertedWorkHoursThreshold(t *testing.T) {
+	path := writeConfigForTest(t, validFakeConfig(`
+[clis.fake.daemon_deferral]
+enabled = true
+load_threshold_per_cpu = 1.0
+work_hours_load_threshold_per_cpu = 1.5
+work_hours_start = "09:00"
+work_hours_end = "17:00"
+work_hours_weekdays = ["monday"]
+`))
+
+	_, err := config.LoadPath(path)
+	if err == nil || !strings.Contains(err.Error(), "work_hours_load_threshold_per_cpu must be less than or equal to") {
+		t.Fatalf("LoadPath should reject inverted work-hours threshold, err=%v", err)
+	}
+}
+
+func TestLoadPathRejectsCLIDaemonDeferralWeekday(t *testing.T) {
+	path := writeConfigForTest(t, validFakeConfig(`
+[clis.fake.daemon_deferral]
+enabled = true
+load_threshold_per_cpu = 1.0
+work_hours_load_threshold_per_cpu = 0.30
+work_hours_start = "09:00"
+work_hours_end = "17:00"
+work_hours_weekdays = ["funday"]
+`))
+
+	_, err := config.LoadPath(path)
+	if err == nil || !strings.Contains(err.Error(), `unknown weekday "funday"`) {
+		t.Fatalf("LoadPath should reject invalid weekday, err=%v", err)
+	}
+}
+
+func TestLoadPathRejectsCLIDaemonDeferralTime(t *testing.T) {
+	path := writeConfigForTest(t, validFakeConfig(`
+[clis.fake.daemon_deferral]
+enabled = true
+load_threshold_per_cpu = 1.0
+work_hours_load_threshold_per_cpu = 0.30
+work_hours_start = "9am"
+work_hours_end = "17:00"
+work_hours_weekdays = ["monday"]
+`))
+
+	_, err := config.LoadPath(path)
+	if err == nil || !strings.Contains(err.Error(), "work_hours_start must use HH:MM") {
+		t.Fatalf("LoadPath should reject invalid time, err=%v", err)
+	}
+}
+
+func TestLoadPathRejectsCLIDaemonDeferralMatchingWorkHoursTimes(t *testing.T) {
+	path := writeConfigForTest(t, validFakeConfig(`
+[clis.fake.daemon_deferral]
+enabled = true
+load_threshold_per_cpu = 1.0
+work_hours_load_threshold_per_cpu = 0.30
+work_hours_start = "09:00"
+work_hours_end = "09:00"
+work_hours_weekdays = ["monday"]
+`))
+
+	_, err := config.LoadPath(path)
+	if err == nil || !strings.Contains(err.Error(), "work_hours_start must differ from") {
+		t.Fatalf("LoadPath should reject matching work-hours times, err=%v", err)
+	}
 }
 
 func requireFlagBinding(t *testing.T, flags []spec.FlagSpec, name string, binding string) {

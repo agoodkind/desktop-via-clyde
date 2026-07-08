@@ -160,6 +160,18 @@ capability = "app.hard-reset"
 use = "example-cli"
 short = "Build, sign, and install a local CLI"
 
+# Optional daemon-only guard for expensive background CLI upgrades. Manual
+# commands ignore this block. The updater daemon defers the CLI upgrade when the
+# one-minute load average per logical CPU reaches the active threshold. Work
+# hours use the stricter threshold below, in local time.
+[clis.example-cli.daemon_deferral]
+enabled = true
+load_threshold_per_cpu = 1.0
+work_hours_load_threshold_per_cpu = 0.30
+work_hours_start = "09:00"
+work_hours_end = "17:00"
+work_hours_weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday"]
+
 [clis.example-cli.operations.status]
 use = "status"
 short = "Print local CLI state"
