@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	desktopviaclydev1 "goodkind.io/desktop-via-clyde/api/desktopviaclyde/v1"
+	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/config"
 	"goodkind.io/desktop-via-clyde/internal/spec"
 	"goodkind.io/desktop-via-clyde/internal/targets"
@@ -81,8 +83,9 @@ func TestSweepUpgradesCLITargetWhenLoadIsIdle(t *testing.T) {
 		},
 		appRunning: func(_ context.Context, _ targets.Target) bool { return true },
 		runUpgrade: func(_ context.Context, _ string) bool { return false },
-		runCLIUpgrade: func(_ context.Context, program targets.CLIProgram, _ spec.OperationSpec) {
+		runCLIUpgrade: func(_ context.Context, program targets.CLIProgram, _ spec.OperationSpec) bool {
 			upgradedCLIs = append(upgradedCLIs, program.ID)
+			return true
 		},
 		checkCLILoad: func(_ context.Context, program targets.CLIProgram) cliLoadDecision {
 			now := time.Date(2026, time.July, 6, 10, 0, 0, 0, time.Local)
@@ -107,9 +110,12 @@ func TestSweepDefersCLITargetWhenLoadIsHighOutsideWorkHours(t *testing.T) {
 		checkUpdate: func(_ context.Context, _ targets.Target) (upgrade.UpdateCheck, error) {
 			return upgrade.UpdateCheck{}, nil
 		},
-		appRunning:    func(_ context.Context, _ targets.Target) bool { return true },
-		runUpgrade:    func(_ context.Context, _ string) bool { return false },
-		runCLIUpgrade: func(_ context.Context, _ targets.CLIProgram, _ spec.OperationSpec) { upgraded = true },
+		appRunning: func(_ context.Context, _ targets.Target) bool { return true },
+		runUpgrade: func(_ context.Context, _ string) bool { return false },
+		runCLIUpgrade: func(_ context.Context, _ targets.CLIProgram, _ spec.OperationSpec) bool {
+			upgraded = true
+			return true
+		},
 		checkCLILoad: func(_ context.Context, program targets.CLIProgram) cliLoadDecision {
 			now := time.Date(2026, time.July, 5, 10, 0, 0, 0, time.Local)
 			return buildCLILoadDecision(now, program.DaemonDeferral, 4.0, 4)
@@ -137,9 +143,12 @@ func TestSweepDefersCLITargetAtWorkHoursThreshold(t *testing.T) {
 		checkUpdate: func(_ context.Context, _ targets.Target) (upgrade.UpdateCheck, error) {
 			return upgrade.UpdateCheck{}, nil
 		},
-		appRunning:    func(_ context.Context, _ targets.Target) bool { return true },
-		runUpgrade:    func(_ context.Context, _ string) bool { return false },
-		runCLIUpgrade: func(_ context.Context, _ targets.CLIProgram, _ spec.OperationSpec) { upgraded = true },
+		appRunning: func(_ context.Context, _ targets.Target) bool { return true },
+		runUpgrade: func(_ context.Context, _ string) bool { return false },
+		runCLIUpgrade: func(_ context.Context, _ targets.CLIProgram, _ spec.OperationSpec) bool {
+			upgraded = true
+			return true
+		},
 		checkCLILoad: func(_ context.Context, program targets.CLIProgram) cliLoadDecision {
 			now := time.Date(2026, time.July, 6, 10, 0, 0, 0, time.Local)
 			return buildCLILoadDecision(now, program.DaemonDeferral, 1.2, 4)
@@ -165,8 +174,9 @@ func TestSweepUpgradesCLITargetWhenDeferralDisabled(t *testing.T) {
 		},
 		appRunning: func(_ context.Context, _ targets.Target) bool { return true },
 		runUpgrade: func(_ context.Context, _ string) bool { return false },
-		runCLIUpgrade: func(_ context.Context, program targets.CLIProgram, _ spec.OperationSpec) {
+		runCLIUpgrade: func(_ context.Context, program targets.CLIProgram, _ spec.OperationSpec) bool {
 			upgradedCLIs = append(upgradedCLIs, program.ID)
+			return true
 		},
 		checkCLILoad: defaultCLILoadDecision,
 	}
@@ -190,8 +200,9 @@ func TestSweepUpgradesCLITargetWhenLoadReaderFails(t *testing.T) {
 		},
 		appRunning: func(_ context.Context, _ targets.Target) bool { return true },
 		runUpgrade: func(_ context.Context, _ string) bool { return false },
-		runCLIUpgrade: func(_ context.Context, program targets.CLIProgram, _ spec.OperationSpec) {
+		runCLIUpgrade: func(_ context.Context, program targets.CLIProgram, _ spec.OperationSpec) bool {
 			upgradedCLIs = append(upgradedCLIs, program.ID)
+			return true
 		},
 		checkCLILoad: func(context.Context, targets.CLIProgram) cliLoadDecision {
 			return cliLoadDecision{err: errors.New("load unavailable")}
@@ -203,6 +214,153 @@ func TestSweepUpgradesCLITargetWhenLoadReaderFails(t *testing.T) {
 	}
 	if len(upgradedCLIs) != 1 || upgradedCLIs[0] != "codex-cli" {
 		t.Fatalf("CLI upgrades = %v, want [codex-cli]", upgradedCLIs)
+	}
+}
+
+func TestSweepDefersRunningCLIUpgradeWhenLoadRises(t *testing.T) {
+	setupCLITarget(t, enabledCLIDaemonDeferral())
+	loadChecks := 0
+	ctxCancelled := make(chan struct{})
+	tick := &ticker{
+		exec:  newExecutor(),
+		state: newUpdaterState(),
+		checkUpdate: func(_ context.Context, _ targets.Target) (upgrade.UpdateCheck, error) {
+			return upgrade.UpdateCheck{}, nil
+		},
+		appRunning: func(_ context.Context, _ targets.Target) bool { return true },
+		runUpgrade: func(_ context.Context, _ string) bool { return false },
+		runCLIUpgrade: func(ctx context.Context, _ targets.CLIProgram, _ spec.OperationSpec) bool {
+			<-ctx.Done()
+			close(ctxCancelled)
+			return false
+		},
+		checkCLILoad: func(_ context.Context, program targets.CLIProgram) cliLoadDecision {
+			loadChecks++
+			if loadChecks == 1 {
+				now := time.Date(2026, time.July, 5, 10, 0, 0, 0, time.Local)
+				return buildCLILoadDecision(now, program.DaemonDeferral, 1.0, 4)
+			}
+			now := time.Date(2026, time.July, 5, 10, 0, 0, 0, time.Local)
+			return buildCLILoadDecision(now, program.DaemonDeferral, 4.0, 4)
+		},
+		cliLoadMonitorInterval: time.Millisecond,
+	}
+
+	if !tick.sweep(context.Background()) {
+		t.Fatal("sweep did not defer after in-flight CLI load rose")
+	}
+	select {
+	case <-ctxCancelled:
+	default:
+		t.Fatal("CLI upgrade context was not cancelled")
+	}
+	snapshot := tick.state.snapshot()
+	if snapshot.checks["codex-cli"].outcome != "deferred-system-load" {
+		t.Fatalf("codex-cli outcome = %q, want deferred-system-load", snapshot.checks["codex-cli"].outcome)
+	}
+}
+
+func TestSweepDoesNotRecordCLIUpgradeWhenContextCancelled(t *testing.T) {
+	setupCLITarget(t, enabledCLIDaemonDeferral())
+	ctx, cancel := context.WithCancel(context.Background())
+	tick := &ticker{
+		exec:  newExecutor(),
+		state: newUpdaterState(),
+		checkUpdate: func(_ context.Context, _ targets.Target) (upgrade.UpdateCheck, error) {
+			return upgrade.UpdateCheck{}, nil
+		},
+		appRunning: func(_ context.Context, _ targets.Target) bool { return true },
+		runUpgrade: func(_ context.Context, _ string) bool { return false },
+		runCLIUpgrade: func(_ context.Context, _ targets.CLIProgram, _ spec.OperationSpec) bool {
+			cancel()
+			return true
+		},
+		checkCLILoad: func(_ context.Context, program targets.CLIProgram) cliLoadDecision {
+			now := time.Date(2026, time.July, 5, 10, 0, 0, 0, time.Local)
+			return buildCLILoadDecision(now, program.DaemonDeferral, 1.0, 4)
+		},
+	}
+
+	if tick.sweep(ctx) {
+		t.Fatal("sweep deferred after context cancellation")
+	}
+	snapshot := tick.state.snapshot()
+	if _, ok := snapshot.checks["codex-cli"]; ok {
+		t.Fatal("recorded codex-cli check after context cancellation")
+	}
+}
+
+func TestSweepDoesNotRecordCLIUpgradeWhenUpgradeDoesNotStart(t *testing.T) {
+	setupCLITarget(t, enabledCLIDaemonDeferral())
+	tick := &ticker{
+		exec:  newExecutor(),
+		state: newUpdaterState(),
+		checkUpdate: func(_ context.Context, _ targets.Target) (upgrade.UpdateCheck, error) {
+			return upgrade.UpdateCheck{}, nil
+		},
+		appRunning: func(_ context.Context, _ targets.Target) bool { return true },
+		runUpgrade: func(_ context.Context, _ string) bool { return false },
+		runCLIUpgrade: func(_ context.Context, _ targets.CLIProgram, _ spec.OperationSpec) bool {
+			return false
+		},
+		checkCLILoad: func(_ context.Context, program targets.CLIProgram) cliLoadDecision {
+			now := time.Date(2026, time.July, 5, 10, 0, 0, 0, time.Local)
+			return buildCLILoadDecision(now, program.DaemonDeferral, 1.0, 4)
+		},
+	}
+
+	if tick.sweep(context.Background()) {
+		t.Fatal("sweep deferred after CLI upgrade did not start")
+	}
+	snapshot := tick.state.snapshot()
+	if _, ok := snapshot.checks["codex-cli"]; ok {
+		t.Fatal("recorded codex-cli check after CLI upgrade did not start")
+	}
+}
+
+func TestDaemonCLIUpgradeFlagsDisableSccache(t *testing.T) {
+	falseValue := false
+	op := spec.OperationSpec{
+		Flags: []spec.FlagSpec{
+			{Name: "no-sccache", Binding: "no-sccache", Type: spec.FlagTypeBool, DefaultBool: &falseValue},
+		},
+	}
+
+	flags := daemonCLIUpgradeFlags(op)
+	if !flags.Bool("no-sccache") {
+		t.Fatal("daemon CLI upgrade flags did not enable no-sccache")
+	}
+}
+
+func TestRunCLIUpgradeThroughExecutorReturnsFalseOnFailedTerminalEvent(t *testing.T) {
+	exec := newExecutor()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	_, err := exec.startOrAttachCancelable(context.Background(), "codex-cli", func(_ context.Context, emit func(*desktopviaclydev1.ProgressEvent)) error {
+		close(started)
+		<-release
+		emit(&desktopviaclydev1.ProgressEvent{
+			Type:   string(clioutput.EventTargetDone),
+			Target: "codex-cli",
+			Status: string(clioutput.OutcomeFailed),
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("startOrAttachCancelable: %v", err)
+	}
+	<-started
+
+	tick := &ticker{exec: exec}
+	program := targets.CLIProgram{ID: "codex-cli"}
+	done := make(chan bool)
+	go func() {
+		done <- tick.runCLIUpgradeThroughExecutor(context.Background(), program, spec.OperationSpec{})
+	}()
+	close(release)
+
+	if <-done {
+		t.Fatal("runCLIUpgradeThroughExecutor returned true after failed terminal event")
 	}
 }
 

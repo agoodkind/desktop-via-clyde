@@ -15,6 +15,7 @@ import (
 	"goodkind.io/desktop-via-clyde/internal/clioutput"
 	"goodkind.io/desktop-via-clyde/internal/clock"
 	"goodkind.io/desktop-via-clyde/internal/cmdflags"
+	"goodkind.io/desktop-via-clyde/internal/operations"
 	"goodkind.io/desktop-via-clyde/internal/spec"
 	"goodkind.io/desktop-via-clyde/internal/targets"
 	"goodkind.io/desktop-via-clyde/internal/upgrade"
@@ -27,6 +28,9 @@ const (
 	// fastTickInterval is the cadence used after a sweep deferred a target whose
 	// app was open, so the updater catches the app shortly after it closes.
 	fastTickInterval = 30 * time.Minute
+	// cliLoadMonitorInterval is the cadence used to stop daemon-only CLI
+	// upgrades when system load rises after the upgrade has started.
+	cliLoadMonitorInterval = 30 * time.Second
 )
 
 // targetCheck is the last upgrade-check result for one target.
@@ -97,24 +101,26 @@ func (s *updaterState) snapshot() updaterSnapshot {
 // runUpgrade seams are fields so tests can drive the decision logic without
 // network, processes, or real upgrades.
 type ticker struct {
-	exec          *executor
-	state         *updaterState
-	checkUpdate   func(ctx context.Context, target targets.Target) (upgrade.UpdateCheck, error)
-	appRunning    func(ctx context.Context, target targets.Target) bool
-	runUpgrade    func(ctx context.Context, targetID string) bool
-	runCLIUpgrade func(ctx context.Context, program targets.CLIProgram, op spec.OperationSpec)
-	checkCLILoad  func(ctx context.Context, program targets.CLIProgram) cliLoadDecision
+	exec                   *executor
+	state                  *updaterState
+	checkUpdate            func(ctx context.Context, target targets.Target) (upgrade.UpdateCheck, error)
+	appRunning             func(ctx context.Context, target targets.Target) bool
+	runUpgrade             func(ctx context.Context, targetID string) bool
+	runCLIUpgrade          func(ctx context.Context, program targets.CLIProgram, op spec.OperationSpec) bool
+	checkCLILoad           func(ctx context.Context, program targets.CLIProgram) cliLoadDecision
+	cliLoadMonitorInterval time.Duration
 }
 
 func newTicker(operationExecutor *executor, state *updaterState) *ticker {
 	tick := &ticker{
-		exec:          operationExecutor,
-		state:         state,
-		checkUpdate:   defaultCheckUpdate,
-		appRunning:    appRunning,
-		runUpgrade:    nil,
-		runCLIUpgrade: nil,
-		checkCLILoad:  defaultCLILoadDecision,
+		exec:                   operationExecutor,
+		state:                  state,
+		checkUpdate:            defaultCheckUpdate,
+		appRunning:             appRunning,
+		runUpgrade:             nil,
+		runCLIUpgrade:          nil,
+		checkCLILoad:           defaultCLILoadDecision,
+		cliLoadMonitorInterval: cliLoadMonitorInterval,
 	}
 	tick.runUpgrade = tick.runUpgradeThroughExecutor
 	tick.runCLIUpgrade = tick.runCLIUpgradeThroughExecutor
@@ -204,38 +210,139 @@ func (t *ticker) sweepCLIs(ctx context.Context) bool {
 			daemonLog.WarnContext(ctx, "daemon.tick.cli_load_check_failed", "err", decision.err, "target", program.ID)
 		}
 		if decision.deferUpgrade {
-			daemonLog.DebugContext(
-				ctx,
-				"daemon.tick.cli_upgrade_deferred_system_load",
-				"target", program.ID,
-				"load_average_1m", decision.loadAverage,
-				"load_per_cpu", decision.loadPerCPU,
-				"threshold_per_cpu", decision.thresholdPerCPU,
-				"work_hours", decision.workHours,
-				"reason", decision.reason,
-			)
-			t.state.recordCheck(program.ID, targetCheck{
-				currentVersion:   "",
-				availableVersion: "",
-				updateAvailable:  false,
-				appRunning:       false,
-				outcome:          "deferred-system-load",
-				checkedAtUnix:    clock.Now().Unix(),
-			})
+			logCLIUpgradeDeferred(ctx, program, decision, false)
+			t.state.recordCheck(program.ID, cliTargetCheck("deferred-system-load"))
 			deferred = true
 			continue
 		}
-		t.runCLIUpgrade(ctx, program, op)
-		t.state.recordCheck(program.ID, targetCheck{
-			currentVersion:   "",
-			availableVersion: "",
-			updateAvailable:  false,
-			appRunning:       false,
-			outcome:          "upgraded",
-			checkedAtUnix:    clock.Now().Unix(),
-		})
+		switch t.runCLIUpgradeWithLoadMonitor(ctx, program, op) {
+		case cliUpgradeDeferred:
+			t.state.recordCheck(program.ID, cliTargetCheck("deferred-system-load"))
+			deferred = true
+			continue
+		case cliUpgradeAborted:
+			continue
+		case cliUpgradeCompleted:
+		}
+		t.state.recordCheck(program.ID, cliTargetCheck("upgraded"))
 	}
 	return deferred
+}
+
+func cliTargetCheck(outcome string) targetCheck {
+	return targetCheck{
+		currentVersion:   "",
+		availableVersion: "",
+		updateAvailable:  false,
+		appRunning:       false,
+		outcome:          outcome,
+		checkedAtUnix:    clock.Now().Unix(),
+	}
+}
+
+type cliUpgradeOutcome int
+
+const (
+	cliUpgradeCompleted cliUpgradeOutcome = iota
+	cliUpgradeDeferred
+	cliUpgradeAborted
+)
+
+func (t *ticker) runCLIUpgradeWithLoadMonitor(
+	ctx context.Context,
+	program targets.CLIProgram,
+	op spec.OperationSpec,
+) cliUpgradeOutcome {
+	if !program.DaemonDeferral.Enabled {
+		if !t.runCLIUpgrade(ctx, program, op) {
+			return cliUpgradeAborted
+		}
+		if ctx.Err() != nil {
+			return cliUpgradeAborted
+		}
+		return cliUpgradeCompleted
+	}
+	upgradeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	deferredCh := make(chan cliLoadDecision, 1)
+	doneCh := make(chan struct{})
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				daemonLog.ErrorContext(ctx, "daemon.tick.cli_load_monitor_panic", "err", fmt.Sprintf("panic: %v", recovered), "target", program.ID)
+			}
+		}()
+		t.monitorCLIUpgradeLoad(upgradeCtx, program, cancel, doneCh, deferredCh)
+	}()
+
+	attempted := t.runCLIUpgrade(upgradeCtx, program, op)
+	close(doneCh)
+	select {
+	case decision := <-deferredCh:
+		logCLIUpgradeDeferred(ctx, program, decision, true)
+		return cliUpgradeDeferred
+	default:
+		if !attempted {
+			return cliUpgradeAborted
+		}
+		if upgradeCtx.Err() != nil {
+			return cliUpgradeAborted
+		}
+		return cliUpgradeCompleted
+	}
+}
+
+func (t *ticker) monitorCLIUpgradeLoad(
+	ctx context.Context,
+	program targets.CLIProgram,
+	cancel context.CancelFunc,
+	doneCh <-chan struct{},
+	deferredCh chan<- cliLoadDecision,
+) {
+	interval := t.cliLoadMonitorInterval
+	if interval <= 0 {
+		interval = cliLoadMonitorInterval
+	}
+	loadTicker := time.NewTicker(interval)
+	defer loadTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-doneCh:
+			return
+		case <-loadTicker.C:
+			decision := t.checkCLILoad(ctx, program)
+			if decision.err != nil {
+				daemonLog.WarnContext(ctx, "daemon.tick.cli_load_check_failed", "err", decision.err, "target", program.ID)
+				continue
+			}
+			if !decision.deferUpgrade {
+				continue
+			}
+			select {
+			case deferredCh <- decision:
+			default:
+			}
+			cancel()
+			return
+		}
+	}
+}
+
+func logCLIUpgradeDeferred(ctx context.Context, program targets.CLIProgram, decision cliLoadDecision, inFlight bool) {
+	daemonLog.DebugContext(
+		ctx,
+		"daemon.tick.cli_upgrade_deferred_system_load",
+		"target", program.ID,
+		"load_average_1m", decision.loadAverage,
+		"load_per_cpu", decision.loadPerCPU,
+		"threshold_per_cpu", decision.thresholdPerCPU,
+		"work_hours", decision.workHours,
+		"in_flight", inFlight,
+		"reason", decision.reason,
+	)
 }
 
 type cliLoadDecision struct {
@@ -365,14 +472,32 @@ func (t *ticker) runUpgradeThroughExecutor(ctx context.Context, targetID string)
 // runCLIUpgradeThroughExecutor runs a CLI target's upgrade through the shared
 // executor using the operation's default flags, which match what
 // `upgrade <cli>` runs today including the fast compile build mode.
-func (t *ticker) runCLIUpgradeThroughExecutor(ctx context.Context, program targets.CLIProgram, op spec.OperationSpec) {
-	job := newCLIUpgradeJob(program, op.Capability, cmdflags.Defaults(op.Flags))
-	run, err := t.exec.startOrAttach(ctx, "upgrade", program.ID, job)
+func (t *ticker) runCLIUpgradeThroughExecutor(ctx context.Context, program targets.CLIProgram, op spec.OperationSpec) bool {
+	job := newCLIUpgradeJob(program, op.Capability, daemonCLIUpgradeFlags(op))
+	run, err := t.exec.startOrAttachCancelable(ctx, program.ID, job)
 	if err != nil {
 		daemonLog.WarnContext(ctx, "daemon.tick.run_cli_upgrade_conflict", "err", err, "target", program.ID)
-		return
+		return false
 	}
-	_ = run.broadcaster.stream(ctx, func(*desktopviaclydev1.ProgressEvent) error { return nil })
+	completed := false
+	failed := false
+	if err := run.broadcaster.stream(ctx, func(event *desktopviaclydev1.ProgressEvent) error {
+		if event.GetType() == string(clioutput.EventTargetDone) && event.GetTarget() == program.ID {
+			completed = true
+			failed = event.GetStatus() == string(clioutput.OutcomeFailed)
+		}
+		return nil
+	}); err != nil {
+		daemonLog.WarnContext(ctx, "daemon.tick.run_cli_upgrade_stream_failed", "err", err, "target", program.ID)
+		return false
+	}
+	return completed && !failed
+}
+
+func daemonCLIUpgradeFlags(op spec.OperationSpec) operations.FlagValues {
+	flags := cmdflags.Defaults(op.Flags)
+	flags.SetBool("no-sccache", true)
+	return flags
 }
 
 func defaultCheckUpdate(ctx context.Context, target targets.Target) (upgrade.UpdateCheck, error) {
