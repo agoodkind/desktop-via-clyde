@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"goodkind.io/desktop-via-clyde/internal/clioutput"
@@ -37,6 +38,8 @@ const (
 	actionRunCommand                   Action = "run_command"
 	actionRunCommandWithCapturedStdout Action = "run_command_with_captured_stdout"
 )
+
+const commandCancelGrace = 5 * time.Second
 
 // Trace records structured workflow events for tests.
 type Trace struct {
@@ -88,6 +91,7 @@ func (r *Runner) Run(ctx context.Context, name string, args ...string) error {
 		return nil
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
+	setCommandProcessGroup(cmd)
 	cmd.Stdout = r.rawOut()
 	cmd.Stderr = r.rawOut()
 	if err := cmd.Run(); err != nil {
@@ -165,6 +169,8 @@ func (r *Runner) RunWithHeartbeat(ctx context.Context, label string, interval ti
 				slog.String("label", label),
 				slog.String("command", name),
 				slog.String("elapsed", elapsed.String()))
+		case <-ctx.Done():
+			return r.cancelStartedCommand(ctx, cmd, done, label, name, args)
 		}
 	}
 }
@@ -219,6 +225,7 @@ func (r *Runner) runEnvInDirWithHeartbeat(
 		return nil
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
+	setCommandProcessGroup(cmd)
 	cmd.Dir = workDir
 	cmd.Env = mergedEnv(env)
 	cmd.Stdout = r.rawOut()
@@ -269,6 +276,8 @@ func (r *Runner) runEnvInDirWithHeartbeat(
 				slog.String("label", label),
 				slog.String("command", name),
 				slog.String("elapsed", elapsed.String()))
+		case <-ctx.Done():
+			return r.cancelStartedCommand(ctx, cmd, done, label, name, args)
 		}
 	}
 }
@@ -341,6 +350,62 @@ func (r *Runner) rawOut() io.Writer {
 		return r.Out
 	}
 	return os.Stdout
+}
+
+func setCommandProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
+
+func (r *Runner) cancelStartedCommand(
+	ctx context.Context,
+	cmd *exec.Cmd,
+	done <-chan error,
+	label string,
+	name string,
+	args []string,
+) error {
+	r.signalCommandProcessGroup(ctx, cmd, syscall.SIGTERM, label, name)
+
+	select {
+	case waitErr := <-done:
+		if waitErr != nil {
+			r.logError(ctx, "runner.command.failed", waitErr,
+				slog.String("label", label),
+				slog.String("command", name),
+				slog.Any("args", args))
+		}
+		return r.canceledCommandError(ctx, label, name)
+	case <-time.After(commandCancelGrace):
+		r.signalCommandProcessGroup(ctx, cmd, syscall.SIGKILL, label, name)
+		waitErr := <-done
+		if waitErr != nil {
+			r.logError(ctx, "runner.command.failed", waitErr,
+				slog.String("label", label),
+				slog.String("command", name),
+				slog.Any("args", args))
+		}
+		return r.canceledCommandError(ctx, label, name)
+	}
+}
+
+func (r *Runner) canceledCommandError(ctx context.Context, label string, name string) error {
+	err := fmt.Errorf("wait %s after cancellation: %w", name, ctx.Err())
+	r.Log.WarnContext(ctx, "runner.command.cancelled", "err", err, "label", label, "command", name)
+	return err
+}
+
+func (r *Runner) signalCommandProcessGroup(ctx context.Context, cmd *exec.Cmd, signal syscall.Signal, label string, name string) {
+	if cmd.Process == nil {
+		return
+	}
+	err := syscall.Kill(-cmd.Process.Pid, signal)
+	if err == syscall.ESRCH {
+		return
+	}
+	if err != nil {
+		wrapped := fmt.Errorf("signal process group %d: %w", -cmd.Process.Pid, err)
+		r.Log.WarnContext(ctx, "runner.command.signal_process_group_failed", "err", wrapped, "label", label, "command", name)
+	}
 }
 
 func (r *Runner) context() context.Context {

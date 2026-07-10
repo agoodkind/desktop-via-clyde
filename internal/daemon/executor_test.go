@@ -105,6 +105,92 @@ func TestExecutorIdleAfterRunCompletes(t *testing.T) {
 	}
 }
 
+func TestExecutorCancelableRunReceivesContextCancellation(t *testing.T) {
+	exec := newExecutor()
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	run, err := exec.startOrAttachCancelable(ctx, "codex-cli", func(ctx context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("startOrAttachCancelable: %v", err)
+	}
+	<-started
+	cancel()
+	collectStream(t, run)
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("cancelable job did not receive context cancellation")
+	}
+}
+
+func TestExecutorCancelableAttachRejectsNonCancelableRun(t *testing.T) {
+	exec := newExecutor()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	_, err := exec.startOrAttach(context.Background(), "upgrade", "codex-cli", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
+		close(started)
+		<-release
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("startOrAttach: %v", err)
+	}
+	<-started
+
+	_, err = exec.startOrAttachCancelable(context.Background(), "codex-cli", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
+		t.Fatal("cancelable attach must not start a second job")
+		return nil
+	})
+	var conflictErr *runCancellationConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("startOrAttachCancelable err = %v, want runCancellationConflictError", err)
+	}
+	if conflictErr.ActiveCancelable {
+		t.Fatalf("conflict active cancelable = %t, want false", conflictErr.ActiveCancelable)
+	}
+	if !conflictErr.RequestedCancelable {
+		t.Fatalf("conflict requested cancelable = %t, want true", conflictErr.RequestedCancelable)
+	}
+	close(release)
+}
+
+func TestExecutorNonCancelableAttachRejectsCancelableRun(t *testing.T) {
+	exec := newExecutor()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	_, err := exec.startOrAttachCancelable(context.Background(), "codex-cli", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
+		close(started)
+		<-release
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("startOrAttachCancelable: %v", err)
+	}
+	<-started
+
+	_, err = exec.startOrAttach(context.Background(), "upgrade", "codex-cli", func(_ context.Context, _ func(*desktopviaclydev1.ProgressEvent)) error {
+		t.Fatal("non-cancelable attach must not start a second job")
+		return nil
+	})
+	var conflictErr *runCancellationConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("startOrAttach err = %v, want runCancellationConflictError", err)
+	}
+	if !conflictErr.ActiveCancelable {
+		t.Fatalf("conflict active cancelable = %t, want true", conflictErr.ActiveCancelable)
+	}
+	if conflictErr.RequestedCancelable {
+		t.Fatalf("conflict requested cancelable = %t, want false", conflictErr.RequestedCancelable)
+	}
+	close(release)
+}
+
 func TestExecutorDistinctTargetsRunConcurrently(t *testing.T) {
 	exec := newExecutor()
 	firstStarted := make(chan struct{})
