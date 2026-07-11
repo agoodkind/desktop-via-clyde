@@ -35,6 +35,10 @@ const (
 	actionRestorePreservedNestedCode   Action = "restore_preserved_nested_code"
 	actionSignBundle                   Action = "sign_bundle"
 	actionSignNestedCode               Action = "sign_nested_code"
+	actionPrepareSigningStrategy       Action = "prepare_signing_strategy"
+	actionSealSigningStrategy          Action = "seal_signing_strategy"
+	actionVerifySigningStrategy        Action = "verify_signing_strategy"
+	actionWritePatchState              Action = "write_patch_state"
 	actionRunCommand                   Action = "run_command"
 	actionRunCommandWithCapturedStdout Action = "run_command_with_captured_stdout"
 )

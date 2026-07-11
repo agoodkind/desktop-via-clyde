@@ -231,40 +231,25 @@ func Patch(ctx context.Context, t targets.Target, opts Options) error {
 	return nil
 }
 
-// patchBundleSteps runs the bundle-mutation steps (2 through 7) on the bundle at
-// t.AppPath using the supplied Runner. A non-nil returned plan signals the
-// development-signing path: its nested mutations have run, but the final
-// top-bundle reseal is deferred to Patch so it lands after all nested re-signing.
-func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Options) (*devsign.Plan, error) {
+// patchBundleSteps prepares one signing strategy, runs shared in-bundle hooks,
+// and performs seals that belong before finalization.
+func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Options) (*bundleSigningPlan, error) {
 	if t.Entitlements == nil {
 		return nil, logPatchError(ctx, "patch.entitlement_policy_missing", fmt.Errorf("target %s has no entitlement policy", t.ID))
 	}
-	plan, err := maybeApplyDevelopmentSigning(ctx, r, t)
-	if err != nil {
+	plan := selectBundleSigningPlanForPatch(*t)
+	return patchBundleStepsWithPlan(ctx, r, t, opts, plan)
+}
+
+func patchBundleStepsWithPlan(
+	ctx context.Context,
+	r *Runner,
+	t *targets.Target,
+	opts Options,
+	plan bundleSigningPlan,
+) (*bundleSigningPlan, error) {
+	if err := prepareBundleSigning(ctx, r, t, opts, &plan); err != nil {
 		return nil, err
-	}
-	if plan != nil {
-		return plan, nil
-	}
-	preservedRoot, cleanupPreserved, err := stagePreservedNestedCode(ctx, r, *t)
-	if err != nil {
-		return nil, logPatchError(ctx, "patch.stage_preserved_nested_code_failed", fmt.Errorf("stage preserved nested code: %w", err))
-	}
-	defer cleanupPreserved()
-	entFile, err := stepExtractEntitlements(ctx, r, *t)
-	if err != nil {
-		return nil, logPatchError(ctx, "patch.extract_entitlements_failed", fmt.Errorf("extract entitlements: %w", err))
-	}
-	notef(r, fmt.Sprintf("target=%s augment entitlements (strip=%v required=%v)",
-		t.ID, t.Entitlements.Strip, t.Entitlements.RequiredBooleanEntitlements))
-	if err := stepMoveToReal(ctx, r, *t); err != nil {
-		return nil, logPatchError(ctx, "patch.move_binary_failed", fmt.Errorf("move binary to .real: %w", err))
-	}
-	if err := stepPreLaunchPolicy(ctx, r, t, opts); err != nil {
-		return nil, logPatchError(ctx, "patch.pre_launch_policy_hook_failed", fmt.Errorf("run pre-launch-policy hooks: %w", err))
-	}
-	if err := stepInstallShim(ctx, r, *t); err != nil {
-		return nil, logPatchError(ctx, "patch.install_shim_failed", fmt.Errorf("install shim: %w", err))
 	}
 	if err := runPreResignHooks(ctx, r, *t, Options{
 		DryRun:            r.DryRun,
@@ -279,47 +264,12 @@ func patchBundleSteps(ctx context.Context, r *Runner, t *targets.Target, opts Op
 	}); err != nil {
 		return nil, logPatchError(ctx, "patch.pre_resign_hook_failed", fmt.Errorf("run pre-resign hooks: %w", err))
 	}
-	if err := maybeApplyStandardProxyInjection(ctx, r, *t); err != nil {
-		return nil, err
-	}
-	if err := stepRestorePreservedNestedCode(ctx, r, *t, preservedRoot); err != nil {
-		return nil, logPatchError(ctx, "patch.restore_preserved_nested_code_failed", fmt.Errorf("restore preserved nested code: %w", err))
-	}
-	if err := stepEmbedProvisioningProfile(ctx, r, *t); err != nil {
-		return nil, logPatchError(ctx, "patch.embed_provisioning_profile_failed", fmt.Errorf("embed provisioning profile: %w", err))
-	}
-	if err := stepResign(ctx, r, *t, entFile); err != nil {
-		return nil, logPatchError(ctx, "patch.resign_failed", fmt.Errorf("re-sign: %w", err))
-	}
-	stepStripQuarantine(ctx, r, *t)
-	return nil, nil
-}
-
-// maybeApplyDevelopmentSigning runs the opt-in development-profile overlay in
-// place of the shim plus Developer ID path when the target enables it and every
-// required asset is present. On success it returns a non-nil plan whose final
-// top-bundle reseal the caller must run last; a nil plan means the target did not
-// take this path. A missing asset is non-blocking (criterion #8): it emits a
-// warning naming the exact file to provide and returns a nil plan so the caller
-// continues with the standard shim path.
-func maybeApplyDevelopmentSigning(ctx context.Context, r *Runner, t *targets.Target) (*devsign.Plan, error) {
-	if t.DevelopmentSigning == nil || !t.DevelopmentSigning.Enabled {
-		return nil, nil
-	}
-	missing := devsign.MissingAssets(*t.DevelopmentSigning)
-	if len(missing) > 0 {
-		for _, asset := range missing {
-			notef(r, fmt.Sprintf("target=%s development signing requested but %s is missing at %s; provide it to enable the enrollment fix, continuing with the shim + Developer ID path",
-				t.ID, asset.Label, asset.Path))
+	if plan.sealPhase == bundleSealBeforeFinalize {
+		if err := sealBundleSigningPlan(ctx, r, *t, &plan); err != nil {
+			return nil, err
 		}
-		return nil, nil
 	}
-	notef(r, fmt.Sprintf("target=%s development signing enabled; applying enrollment-fix overlay (skipping shim, move-to-real, and Developer ID re-sign)", t.ID))
-	plan, err := devsign.ApplyNestedMutations(ctx, r, devsign.Options{DryRun: r.DryRun, Out: r.Out, Progress: r.Progress}, *t)
-	if err != nil {
-		return nil, logPatchError(ctx, "patch.development_signing_failed", fmt.Errorf("apply development signing: %w", err))
-	}
-	return plan, nil
+	return &plan, nil
 }
 
 func maybeApplyStandardProxyInjection(ctx context.Context, r *Runner, t targets.Target) error {
@@ -620,6 +570,7 @@ func stepStripQuarantine(ctx context.Context, r *Runner, t targets.Target) {
 }
 
 func stepWriteState(ctx context.Context, r *Runner, t targets.Target, version string, originalDR string) error {
+	traceAction(r, actionWritePatchState, t.ID, t.AppPath)
 	notef(r, fmt.Sprintf("target=%s write patch state version=%s -> %s", t.ID, version, paths.StateFile()))
 	if r.DryRun {
 		return nil
