@@ -12,11 +12,11 @@ import (
 
 // PreparedBundle carries the state that must survive the staged swap boundary.
 type PreparedBundle struct {
-	WorkTarget targets.Target
-	Captured   []KeychainItem
-	Version    string
-	OriginalDR string
-	DevPlan    *devsign.Plan
+	WorkTarget  targets.Target
+	Captured    []KeychainItem
+	Version     string
+	OriginalDR  string
+	signingPlan *bundleSigningPlan
 }
 
 // PrepareForSwap performs the in-bundle mutations that are safe to run against a
@@ -86,30 +86,27 @@ func preparePreparedBundle(ctx context.Context, r *Runner, t targets.Target, opt
 		notef(r, fmt.Sprintf("target=%s found %d keychain items", workTarget.ID, len(captured)))
 	}
 
-	devPlan, err := patchBundleSteps(ctx, r, &workTarget, opts)
+	signingPlan, err := patchBundleSteps(ctx, r, &workTarget, opts)
 	if err != nil {
 		return PreparedBundle{}, err
 	}
 	return PreparedBundle{
-		WorkTarget: workTarget,
-		Captured:   captured,
-		Version:    info.CFBundleVersion,
-		OriginalDR: originalDR,
-		DevPlan:    devPlan,
+		WorkTarget:  workTarget,
+		Captured:    captured,
+		Version:     info.CFBundleVersion,
+		OriginalDR:  originalDR,
+		signingPlan: signingPlan,
 	}, nil
 }
 
 func finalizePreparedBundle(ctx context.Context, r *Runner, prepared PreparedBundle, t targets.Target, opts Options) error {
-	devSigned := prepared.DevPlan != nil
+	signingPlan := prepared.signingPlan
+	if signingPlan == nil {
+		signingPlan = defaultStandardSigningPlan()
+	}
 
 	if err := runPostBundleHooks(ctx, r, t, opts); err != nil {
 		return logPatchError(ctx, "patch.post_bundle_hook_failed", fmt.Errorf("run post-bundle hooks: %w", err))
-	}
-
-	if !devSigned {
-		if err := stepVerify(ctx, r, t); err != nil {
-			return logPatchError(ctx, "patch.verify_failed", fmt.Errorf("verify: %w", err))
-		}
 	}
 
 	for _, capability := range t.PostPatchHookCapabilities() {
@@ -118,13 +115,13 @@ func finalizePreparedBundle(ctx context.Context, r *Runner, prepared PreparedBun
 		}
 	}
 
-	if devSigned {
-		if err := devsign.Reseal(ctx, r, devsign.Options{DryRun: r.DryRun, Out: r.Out, Progress: r.Progress}, t, prepared.DevPlan); err != nil {
-			return logPatchError(ctx, "patch.development_signing_reseal_failed", fmt.Errorf("reseal development-signed bundle: %w", err))
+	if signingPlan.sealPhase == bundleSealAfterFinalize {
+		if err := sealBundleSigningPlan(ctx, r, t, signingPlan); err != nil {
+			return err
 		}
-		if err := stepVerifyDevelopmentSigned(ctx, r, t); err != nil {
-			return logPatchError(ctx, "patch.verify_failed", fmt.Errorf("verify: %w", err))
-		}
+	}
+	if err := verifyBundleSigningPlan(ctx, r, t, signingPlan); err != nil {
+		return logPatchError(ctx, "patch.verify_failed", fmt.Errorf("verify: %w", err))
 	}
 
 	if err := stepWriteState(ctx, r, t, prepared.Version, prepared.OriginalDR); err != nil {
