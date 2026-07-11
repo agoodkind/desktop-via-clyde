@@ -39,6 +39,18 @@ const (
 	ActionScanComputerUseCache patch.Action = "scan_computer_use_cache"
 	// ActionSignComputerUseHelper records Computer Use helper signing.
 	ActionSignComputerUseHelper patch.Action = "sign_computer_use_helper"
+	// ActionVerifyComputerUseHelper records Computer Use helper identity verification.
+	ActionVerifyComputerUseHelper patch.Action = "verify_computer_use_helper"
+	// ActionVerifyComputerUseTrustedTeam records trusted team verification.
+	ActionVerifyComputerUseTrustedTeam patch.Action = "verify_computer_use_trusted_team"
+	// ActionVerifyComputerUseRequirement records parent requirement verification.
+	ActionVerifyComputerUseRequirement patch.Action = "verify_computer_use_requirement"
+	// ActionPreviewVerifyComputerUseHelper records planned helper identity verification.
+	ActionPreviewVerifyComputerUseHelper patch.Action = "preview_verify_computer_use_helper"
+	// ActionPreviewVerifyComputerUseTrustedTeam records planned trusted team verification.
+	ActionPreviewVerifyComputerUseTrustedTeam patch.Action = "preview_verify_computer_use_trusted_team"
+	// ActionPreviewVerifyComputerUseRequirement records planned parent requirement verification.
+	ActionPreviewVerifyComputerUseRequirement patch.Action = "preview_verify_computer_use_requirement"
 )
 
 type teamRequirementPlist struct {
@@ -56,7 +68,17 @@ func LifecycleHook(
 	ctx context.Context,
 	r *patch.Runner,
 	t targets.Target,
+	opts patch.Options,
+) error {
+	return lifecycleHookWithDependencies(ctx, r, t, opts, defaultComputerUseLifecycleDependencies())
+}
+
+func lifecycleHookWithDependencies(
+	ctx context.Context,
+	r *patch.Runner,
+	t targets.Target,
 	_ patch.Options,
+	dependencies computerUseLifecycleDependencies,
 ) error {
 	if t.Extensions.ComputerUse == nil {
 		return nil
@@ -74,32 +96,32 @@ func LifecycleHook(
 	patch.RecordTrace(r, ActionRepairBundledComputerUse, t.ID, appPath)
 	patch.Note(r, fmt.Sprintf("target=%s repair Computer Use helper at %s", t.ID, appPath))
 	if r.DryRun {
-		if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID); err != nil {
+		if err := dependencies.patchBundle(ctx, r, t, appPath, policy, localTeamID); err != nil {
 			return err
 		}
-		if err := patchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
+		if err := patchComputerUseCache(ctx, r, t, policy, localTeamID, dependencies.patchBundle); err != nil {
 			return err
 		}
-		return patchComputerUseAuthPluginStep(ctx, r, t, policy, localTeamID)
+		return dependencies.patchAuthPlugin(ctx, r, t, policy, localTeamID)
 	}
 
 	if err := ensureComputerUseAppPath(appPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			patch.Note(r, fmt.Sprintf("target=%s helper bundle not found, skipping", t.ID))
-			if err := patchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
+			if err := patchComputerUseCache(ctx, r, t, policy, localTeamID, dependencies.patchBundle); err != nil {
 				return err
 			}
-			return patchComputerUseAuthPluginStep(ctx, r, t, policy, localTeamID)
+			return dependencies.patchAuthPlugin(ctx, r, t, policy, localTeamID)
 		}
 		return err
 	}
-	if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID); err != nil {
+	if err := dependencies.patchBundle(ctx, r, t, appPath, policy, localTeamID); err != nil {
 		return err
 	}
-	if err := patchComputerUseCache(ctx, r, t, policy, localTeamID); err != nil {
+	if err := patchComputerUseCache(ctx, r, t, policy, localTeamID, dependencies.patchBundle); err != nil {
 		return err
 	}
-	return patchComputerUseAuthPluginStep(ctx, r, t, policy, localTeamID)
+	return dependencies.patchAuthPlugin(ctx, r, t, policy, localTeamID)
 }
 
 func validateComputerUsePolicy(policy targets.ComputerUsePolicy) (string, error) {
@@ -139,6 +161,7 @@ func patchComputerUseCache(
 	t targets.Target,
 	policy targets.ComputerUsePolicy,
 	localTeamID string,
+	patchBundle computerUseBundlePatcher,
 ) error {
 	for _, relGlob := range policy.CacheAppGlobsFromHome {
 		pattern := filepath.Join(paths.Home(), filepath.FromSlash(relGlob))
@@ -162,7 +185,7 @@ func patchComputerUseCache(
 			if err := ensureComputerUseAppPath(appPath); err != nil {
 				return err
 			}
-			if err := patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID); err != nil {
+			if err := patchBundle(ctx, r, t, appPath, policy, localTeamID); err != nil {
 				return err
 			}
 		}
@@ -622,65 +645,6 @@ func computerUseSignTargetPath(appPath string, relPath string) string {
 		return appPath
 	}
 	return filepath.Join(appPath, filepath.FromSlash(relPath))
-}
-
-func verifyComputerUseHelper(
-	ctx context.Context,
-	r *patch.Runner,
-	appPath string,
-	policy targets.ComputerUsePolicy,
-	localTeamID string,
-) error {
-	if r.DryRun {
-		return nil
-	}
-	patch.Note(r, "computer-use: verify helper signature")
-	if err := r.Run(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", appPath); err != nil {
-		return logComputerUsePatchError(ctx, "patch.computer_use_verify_bundle_failed", fmt.Errorf("verify helper bundle: %w", err))
-	}
-	for _, target := range policy.SignTargets {
-		if target.Entitlements == nil {
-			continue
-		}
-		codePath := computerUseSignTargetPath(appPath, target.Path)
-		if err := patch.VerifyBooleanEntitlements(ctx, r, codePath, target.Entitlements.RequiredBooleanEntitlements); err != nil {
-			return logComputerUsePatchError(ctx, "patch.computer_use_verify_required_entitlements_failed",
-				fmt.Errorf("verify required entitlements %s: %w", codePath, err))
-		}
-		if err := patch.VerifyAbsentEntitlements(ctx, r, codePath, target.Entitlements.Strip); err != nil {
-			return logComputerUsePatchError(ctx, "patch.computer_use_verify_absent_entitlements_failed",
-				fmt.Errorf("verify absent entitlements %s: %w", codePath, err))
-		}
-	}
-	for _, relPath := range policy.TeamPatchBinaries {
-		binaryPath := filepath.Join(appPath, filepath.FromSlash(relPath))
-		data, err := os.ReadFile(binaryPath)
-		if err != nil {
-			return logComputerUsePatchError(ctx, "patch.computer_use_verify_binary_read_failed",
-				fmt.Errorf("read helper binary %s: %w", binaryPath, err))
-		}
-		if countStandaloneToken(data, policy.UpstreamTrustedTeamID) > 0 {
-			return fmt.Errorf("%s still contains upstream trusted team %s", binaryPath, policy.UpstreamTrustedTeamID)
-		}
-		if countStandaloneToken(data, localTeamID) == 0 {
-			return fmt.Errorf("%s does not contain local trusted team %s", binaryPath, localTeamID)
-		}
-	}
-	for _, relPath := range policy.TeamRequirementPlists {
-		plistPath := filepath.Join(appPath, filepath.FromSlash(relPath))
-		data, err := os.ReadFile(plistPath)
-		if err != nil {
-			return logComputerUsePatchError(ctx, "patch.computer_use_verify_requirement_plist_read_failed", fmt.Errorf("read helper requirement plist %s: %w", plistPath, err))
-		}
-		teamID, err := teamRequirementPlistTeamID(data)
-		if err != nil {
-			return logComputerUsePatchError(ctx, "patch.computer_use_verify_requirement_team_read_failed", fmt.Errorf("read helper requirement plist team %s: %w", plistPath, err))
-		}
-		if teamID != localTeamID {
-			return fmt.Errorf("%s trusts parent team %s, want %s", plistPath, teamID, localTeamID)
-		}
-	}
-	return nil
 }
 
 func teamIDFromSignIdentity(identity string) (string, error) {

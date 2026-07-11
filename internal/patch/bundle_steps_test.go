@@ -54,13 +54,33 @@ func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
 		t.Fatalf("VerifyBundledComputerUse dry-run: %v", err)
 	}
 	bundledHelperPath := filepath.Join(tg.AppPath, filepath.FromSlash(tg.Extensions.ComputerUse.BundledAppPath))
-	senderPath := filepath.Join(bundledHelperPath, "Contents/MacOS/SkyComputerUseService")
-	requirementPath := filepath.Join(bundledHelperPath, "Contents/SharedSupport/SkyComputerUseClient.app/Contents/Resources/SkyComputerUseClient_Parent.coderequirement")
+	trustedTeamPaths := make([]string, 0, len(tg.Extensions.ComputerUse.TeamPatchBinaries))
+	for _, relativePath := range tg.Extensions.ComputerUse.TeamPatchBinaries {
+		trustedTeamPaths = append(trustedTeamPaths, filepath.Join(bundledHelperPath, filepath.FromSlash(relativePath)))
+	}
+	requirementPaths := make([]string, 0, len(tg.Extensions.ComputerUse.TeamRequirementPlists))
+	for _, relativePath := range tg.Extensions.ComputerUse.TeamRequirementPlists {
+		requirementPaths = append(requirementPaths, filepath.Join(bundledHelperPath, filepath.FromSlash(relativePath)))
+	}
+	signTargetPaths := make([]string, 0, len(tg.Extensions.ComputerUse.SignTargets))
+	for _, target := range tg.Extensions.ComputerUse.SignTargets {
+		targetPath := bundledHelperPath
+		if target.Path != "." && target.Path != "" {
+			targetPath = filepath.Join(bundledHelperPath, filepath.FromSlash(target.Path))
+		}
+		signTargetPaths = append(signTargetPaths, targetPath)
+	}
 
 	requireTraceAction(t, trace, computeruseext.ActionRepairBundledComputerUse, bundledHelperPath)
-	requireTraceAction(t, trace, computeruseext.ActionRepairComputerUseTrustedTeam, senderPath)
-	requireTraceAction(t, trace, computeruseext.ActionRepairComputerUseRequirement, requirementPath)
-	requireTraceAction(t, trace, computeruseext.ActionSignComputerUseHelper, bundledHelperPath)
+	requireExactTraceActionPaths(t, trace, computeruseext.ActionRepairComputerUseTrustedTeam, trustedTeamPaths)
+	requireExactTraceActionPaths(t, trace, computeruseext.ActionRepairComputerUseRequirement, requirementPaths)
+	requireExactTraceActionPaths(t, trace, computeruseext.ActionSignComputerUseHelper, signTargetPaths)
+	requireExactTraceActionPaths(t, trace, computeruseext.ActionPreviewVerifyComputerUseHelper, signTargetPaths)
+	requireExactTraceActionPaths(t, trace, computeruseext.ActionPreviewVerifyComputerUseTrustedTeam, trustedTeamPaths)
+	requireExactTraceActionPaths(t, trace, computeruseext.ActionPreviewVerifyComputerUseRequirement, requirementPaths)
+	requireExactTraceActionPaths(t, trace, computeruseext.ActionVerifyComputerUseHelper, nil)
+	requireExactTraceActionPaths(t, trace, computeruseext.ActionVerifyComputerUseTrustedTeam, nil)
+	requireExactTraceActionPaths(t, trace, computeruseext.ActionVerifyComputerUseRequirement, nil)
 }
 
 func TestPatchDryRunScansComputerUseCacheHelpers(t *testing.T) {
@@ -162,8 +182,57 @@ func TestCodexDevelopmentSigningResealIsLastSigningAction(t *testing.T) {
 		t.Fatalf("development-signing reseal at index %d is not the last signing command (last signing index=%d): %#v",
 			resealIndex, lastSigningIndex, trace.Events)
 	}
-	if !hasNestedCodesignBefore(trace, resealIndex) {
-		t.Fatalf("no nested codesign signing command precedes the development-signing reseal; the computer-use hooks must run before the seal: %#v", trace.Events)
+	bundledHelperPath := filepath.Join(appPath, filepath.FromSlash(tg.Extensions.ComputerUse.BundledAppPath))
+	signTargetPaths := make([]string, 0, len(tg.Extensions.ComputerUse.SignTargets))
+	for _, target := range tg.Extensions.ComputerUse.SignTargets {
+		targetPath := bundledHelperPath
+		if target.Path != "." && target.Path != "" {
+			targetPath = filepath.Join(bundledHelperPath, filepath.FromSlash(target.Path))
+		}
+		signTargetPaths = append(signTargetPaths, targetPath)
+	}
+	previousSignIndex := -1
+	for _, targetPath := range signTargetPaths {
+		signIndex := requireSingleTraceActionIndex(t, trace, computeruseext.ActionSignComputerUseHelper, targetPath)
+		if signIndex <= previousSignIndex || signIndex >= resealIndex {
+			t.Fatalf("bundled Computer Use sign action for %s at index %d, want dependency order before reseal index %d: %#v",
+				targetPath, signIndex, resealIndex, trace.Events)
+		}
+		previousSignIndex = signIndex
+	}
+	previousVerifyIndex := resealIndex
+	for _, targetPath := range signTargetPaths {
+		verifyIndex := requireSingleTraceActionIndex(t, trace, computeruseext.ActionPreviewVerifyComputerUseHelper, targetPath)
+		if verifyIndex <= previousVerifyIndex {
+			t.Fatalf("bundled Computer Use verification for %s at index %d, want dependency order after reseal index %d: %#v",
+				targetPath, verifyIndex, resealIndex, trace.Events)
+		}
+		previousVerifyIndex = verifyIndex
+	}
+	for _, relativePath := range tg.Extensions.ComputerUse.TeamPatchBinaries {
+		verificationPath := filepath.Join(bundledHelperPath, filepath.FromSlash(relativePath))
+		verifyIndex := requireSingleTraceActionIndex(t, trace, computeruseext.ActionPreviewVerifyComputerUseTrustedTeam, verificationPath)
+		if verifyIndex <= resealIndex {
+			t.Fatalf("trusted team verification for %s at index %d, want after reseal index %d: %#v",
+				verificationPath, verifyIndex, resealIndex, trace.Events)
+		}
+	}
+	for _, relativePath := range tg.Extensions.ComputerUse.TeamRequirementPlists {
+		verificationPath := filepath.Join(bundledHelperPath, filepath.FromSlash(relativePath))
+		verifyIndex := requireSingleTraceActionIndex(t, trace, computeruseext.ActionPreviewVerifyComputerUseRequirement, verificationPath)
+		if verifyIndex <= resealIndex {
+			t.Fatalf("parent requirement verification for %s at index %d, want after reseal index %d: %#v",
+				verificationPath, verifyIndex, resealIndex, trace.Events)
+		}
+	}
+	bundledMutationIndex := requireSingleTraceActionIndex(t, trace, computeruseext.ActionRepairBundledComputerUse, bundledHelperPath)
+	installedHelperPath := filepath.Join(paths.Home(), filepath.FromSlash(tg.Extensions.ComputerUse.AppPathFromHome))
+	installedMutationIndex := requireSingleTraceActionIndex(t, trace, computeruseext.ActionRepairBundledComputerUse, installedHelperPath)
+	cachePattern := filepath.Join(paths.Home(), filepath.FromSlash(tg.Extensions.ComputerUse.CacheAppGlobsFromHome[0]))
+	cacheScanIndex := requireSingleTraceActionIndex(t, trace, computeruseext.ActionScanComputerUseCache, cachePattern)
+	if bundledMutationIndex >= installedMutationIndex || installedMutationIndex >= cacheScanIndex {
+		t.Fatalf("Computer Use bundled, installed, and cache actions out of order: bundled=%d installed=%d cache=%d events=%#v",
+			bundledMutationIndex, installedMutationIndex, cacheScanIndex, trace.Events)
 	}
 	requireExternalInjectorDryRun(t, trace, tg)
 }
@@ -195,6 +264,48 @@ func TestCursorProxyInjectionKeepsDeveloperIDReseal(t *testing.T) {
 		t.Fatalf("cursor proxy injection used development-signing rcodesign reseal: %#v", trace.Events)
 	}
 	requireDeveloperIDBundleReseal(t, trace, tg.AppPath)
+}
+
+func TestStandardSigningCompatibilityAcrossConfiguredApps(t *testing.T) {
+	for _, targetID := range []string{"codex", "claude", "cursor", "conductor"} {
+		t.Run(targetID, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			tg, err := lookupTarget(t, targetID)
+			if err != nil {
+				t.Fatalf("Lookup(%s): %v", targetID, err)
+			}
+			tg.AppPath = filepath.Join(t.TempDir(), targetID+".app")
+			tg.DevelopmentSigning = nil
+			if tg.Extensions.ComputerUse != nil {
+				tg.Extensions.ComputerUse.HostAppPath = tg.AppPath
+			}
+
+			trace := &patch.Trace{}
+			if err := patch.Patch(context.Background(), tg, patch.Options{
+				DryRun:          true,
+				MigrateKeychain: false,
+				Out:             io.Discard,
+				Trace:           trace,
+			}); err != nil {
+				t.Fatalf("Patch dry-run (%s standard signing): %v", targetID, err)
+			}
+
+			if hasDevResealCommand(trace, tg.AppPath) {
+				t.Fatalf("%s standard signing used development reseal: %#v", targetID, trace.Events)
+			}
+			requireDeveloperIDBundleReseal(t, trace, tg.AppPath)
+			if tg.Extensions.ComputerUse != nil {
+				bundledHelperPath := filepath.Join(tg.AppPath, filepath.FromSlash(tg.Extensions.ComputerUse.BundledAppPath))
+				outerSignIndex := requireSingleTraceActionIndex(t, trace, computeruseext.ActionSignComputerUseHelper, bundledHelperPath)
+				bundleSealIndex := requireSingleTraceActionIndex(t, trace, patch.ActionSignBundle, tg.AppPath)
+				outerVerifyIndex := requireSingleTraceActionIndex(t, trace, computeruseext.ActionPreviewVerifyComputerUseHelper, bundledHelperPath)
+				if outerSignIndex >= bundleSealIndex || bundleSealIndex >= outerVerifyIndex {
+					t.Fatalf("standard Computer Use signing order: helper sign=%d bundle seal=%d helper verify=%d events=%#v",
+						outerSignIndex, bundleSealIndex, outerVerifyIndex, trace.Events)
+				}
+			}
+		})
+	}
 }
 
 func requireExternalInjectorDryRun(t *testing.T, trace *patch.Trace, tg targets.Target) {
@@ -265,18 +376,6 @@ func isDevResealCommand(event patch.TraceEvent, appPath string) bool {
 func hasDevResealCommand(trace *patch.Trace, appPath string) bool {
 	for _, event := range trace.Events {
 		if isDevResealCommand(event, appPath) {
-			return true
-		}
-	}
-	return false
-}
-
-func hasNestedCodesignBefore(trace *patch.Trace, resealIndex int) bool {
-	for i, event := range trace.Events {
-		if i >= resealIndex {
-			return false
-		}
-		if isSigningCommand(event) && filepath.Base(event.Command) == "codesign" {
 			return true
 		}
 	}
@@ -391,6 +490,36 @@ func traceActionIndex(trace *patch.Trace, action patch.Action, path string) int 
 		}
 	}
 	return -1
+}
+
+func requireSingleTraceActionIndex(t *testing.T, trace *patch.Trace, action patch.Action, path string) int {
+	t.Helper()
+	index := -1
+	count := 0
+	for eventIndex, event := range trace.Events {
+		if event.Action != action || event.Path != path {
+			continue
+		}
+		index = eventIndex
+		count++
+	}
+	if count != 1 {
+		t.Fatalf("trace action=%s path=%s count=%d, want 1; events=%#v", action, path, count, trace.Events)
+	}
+	return index
+}
+
+func requireExactTraceActionPaths(t *testing.T, trace *patch.Trace, action patch.Action, want []string) {
+	t.Helper()
+	got := make([]string, 0, len(want))
+	for _, event := range trace.Events {
+		if event.Action == action {
+			got = append(got, event.Path)
+		}
+	}
+	if !equalStrings(got, want) {
+		t.Fatalf("trace action=%s paths=%v, want %v; events=%#v", action, got, want, trace.Events)
+	}
 }
 
 func requireTraceCommand(t *testing.T, trace *patch.Trace, command string, args []string) {
