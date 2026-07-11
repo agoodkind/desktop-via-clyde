@@ -13,13 +13,19 @@ import (
 // LifecycleHook runs optional extension behavior at one lifecycle point.
 type LifecycleHook func(context.Context, *Runner, targets.Target, Options) error
 
+// BundleExtension owns paired in-bundle mutation and post-seal verification behavior.
+type BundleExtension struct {
+	MutateBeforeSeal LifecycleHook
+	VerifyAfterSeal  LifecycleHook
+}
+
 // PreLaunchPolicyHook runs extension behavior that can mutate launch policy before serialization.
 type PreLaunchPolicyHook func(context.Context, *Runner, *targets.Target, Options) error
 
 var (
 	hooksMu              sync.RWMutex
 	postPatchHooks       = map[string]LifecycleHook{}
-	preResignHooks       = map[string]LifecycleHook{}
+	bundleExtensions     = map[string]BundleExtension{}
 	postBundleHooks      = map[string]LifecycleHook{}
 	preLaunchPolicyHooks = map[string]PreLaunchPolicyHook{}
 )
@@ -63,9 +69,24 @@ func RegisteredPreLaunchPolicyHooks() []string {
 	return names
 }
 
-// RegisterPreResignHook links extension behavior before shared re-signing.
-func RegisterPreResignHook(name string, hook LifecycleHook) error {
-	return registerNamedHook(name, hook, preResignHooks)
+// RegisterBundleExtension links paired mutation and verification behavior.
+func RegisterBundleExtension(name string, extension BundleExtension) error {
+	if name == "" {
+		return fmt.Errorf("bundle extension name is required")
+	}
+	if extension.MutateBeforeSeal == nil {
+		return fmt.Errorf("bundle extension %q mutation handler is required", name)
+	}
+	if extension.VerifyAfterSeal == nil {
+		return fmt.Errorf("bundle extension %q verification handler is required", name)
+	}
+	hooksMu.Lock()
+	defer hooksMu.Unlock()
+	if _, ok := bundleExtensions[name]; ok {
+		return fmt.Errorf("bundle extension %q is already registered", name)
+	}
+	bundleExtensions[name] = extension
+	return nil
 }
 
 // RegisterPostBundleHook links extension behavior after shared bundle mutation.
@@ -103,13 +124,26 @@ func runPreLaunchPolicyHook(
 	return hook(ctx, r, t, opts)
 }
 
-func runPreResignHooks(
+func runBundleExtensionMutations(
 	ctx context.Context,
 	r *Runner,
 	t targets.Target,
 	opts Options,
 ) error {
-	return runNamedHooks(ctx, r, t, opts, preResignHooks)
+	return runBundleExtensions(ctx, r, t, opts, func(extension BundleExtension) LifecycleHook {
+		return extension.MutateBeforeSeal
+	})
+}
+
+func runBundleExtensionVerifications(
+	ctx context.Context,
+	r *Runner,
+	t targets.Target,
+	opts Options,
+) error {
+	return runBundleExtensions(ctx, r, t, opts, func(extension BundleExtension) LifecycleHook {
+		return extension.VerifyAfterSeal
+	})
 }
 
 func runPostBundleHooks(
@@ -199,6 +233,34 @@ func runNamedHooks(
 	for _, name := range names {
 		if err := hooks[name](ctx, r, t, opts); err != nil {
 			patchLog.ErrorContext(ctx, "patch.lifecycle_hook_failed", "hook", name, "err", err)
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func runBundleExtensions(
+	ctx context.Context,
+	r *Runner,
+	t targets.Target,
+	opts Options,
+	selectHook func(BundleExtension) LifecycleHook,
+) error {
+	hooksMu.RLock()
+	names := make([]string, 0, len(bundleExtensions))
+	for name := range bundleExtensions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	hooks := make([]LifecycleHook, 0, len(names))
+	for _, name := range names {
+		hooks = append(hooks, selectHook(bundleExtensions[name]))
+	}
+	hooksMu.RUnlock()
+	for index, hook := range hooks {
+		if err := hook(ctx, r, t, opts); err != nil {
+			name := names[index]
+			patchLog.ErrorContext(ctx, "patch.bundle_extension_failed", "extension", name, "err", err)
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}

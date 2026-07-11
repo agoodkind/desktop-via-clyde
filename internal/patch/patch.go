@@ -251,7 +251,7 @@ func patchBundleStepsWithPlan(
 	if err := prepareBundleSigning(ctx, r, t, opts, &plan); err != nil {
 		return nil, err
 	}
-	if err := runPreResignHooks(ctx, r, *t, Options{
+	if err := runBundleExtensionMutations(ctx, r, *t, Options{
 		DryRun:            r.DryRun,
 		MigrateKeychain:   opts.MigrateKeychain,
 		Out:               r.Out,
@@ -262,7 +262,7 @@ func patchBundleStepsWithPlan(
 		AppPathOverride:   "",
 		FinalAppPath:      opts.FinalAppPath,
 	}); err != nil {
-		return nil, logPatchError(ctx, "patch.pre_resign_hook_failed", fmt.Errorf("run pre-resign hooks: %w", err))
+		return nil, logPatchError(ctx, "patch.bundle_extension_mutation_failed", fmt.Errorf("run bundle extension mutations: %w", err))
 	}
 	if plan.sealPhase == bundleSealBeforeFinalize {
 		if err := sealBundleSigningPlan(ctx, r, *t, &plan); err != nil {

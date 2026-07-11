@@ -120,6 +120,9 @@ func finalizePreparedBundle(ctx context.Context, r *Runner, prepared PreparedBun
 			return err
 		}
 	}
+	if err := runBundleExtensionVerifications(ctx, r, t, opts); err != nil {
+		return logPatchError(ctx, "patch.bundle_extension_verification_failed", fmt.Errorf("verify bundle extensions: %w", err))
+	}
 	if err := verifyBundleSigningPlan(ctx, r, t, signingPlan); err != nil {
 		return logPatchError(ctx, "patch.verify_failed", fmt.Errorf("verify: %w", err))
 	}
