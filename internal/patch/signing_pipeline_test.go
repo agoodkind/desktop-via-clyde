@@ -162,7 +162,7 @@ func TestPatchPreparationFailureStopsPipelineAndStateWrite(t *testing.T) {
 	requireNoPatchStateFile(t)
 }
 
-func TestPatchPreResignMutationFailureStopsSealVerificationAndStateWrite(t *testing.T) {
+func TestPatchBundleExtensionMutationFailureStopsSealVerificationAndStateWrite(t *testing.T) {
 	installFixture(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	mutationErr := errors.New("bundle mutation failed")
@@ -603,15 +603,20 @@ func TestStagedFinalizeFailureRestoresPreviousBundleAndSuppressesStateWrite(t *t
 func registerSigningPipelineHook(t *testing.T, action Action) string {
 	t.Helper()
 	hookName := "test-signing-pipeline-" + t.Name()
-	if err := RegisterPreResignHook(hookName, func(_ context.Context, runner *Runner, target targets.Target, _ Options) error {
-		RecordTrace(runner, action, target.ID, target.AppPath)
-		return nil
+	if err := RegisterBundleExtension(hookName, BundleExtension{
+		MutateBeforeSeal: func(_ context.Context, runner *Runner, target targets.Target, _ Options) error {
+			RecordTrace(runner, action, target.ID, target.AppPath)
+			return nil
+		},
+		VerifyAfterSeal: func(context.Context, *Runner, targets.Target, Options) error {
+			return nil
+		},
 	}); err != nil {
-		t.Fatalf("RegisterPreResignHook: %v", err)
+		t.Fatalf("RegisterBundleExtension: %v", err)
 	}
 	t.Cleanup(func() {
 		hooksMu.Lock()
-		delete(preResignHooks, hookName)
+		delete(bundleExtensions, hookName)
 		hooksMu.Unlock()
 	})
 	return hookName
@@ -620,15 +625,20 @@ func registerSigningPipelineHook(t *testing.T, action Action) string {
 func registerFailingSigningPipelineHook(t *testing.T, hookErr error) {
 	t.Helper()
 	hookName := "000-test-signing-pipeline-failure-" + t.Name()
-	if err := RegisterPreResignHook(hookName, func(_ context.Context, runner *Runner, target targets.Target, _ Options) error {
-		RecordTrace(runner, Action("failing_bundle_mutation"), target.ID, target.AppPath)
-		return hookErr
+	if err := RegisterBundleExtension(hookName, BundleExtension{
+		MutateBeforeSeal: func(_ context.Context, runner *Runner, target targets.Target, _ Options) error {
+			RecordTrace(runner, Action("failing_bundle_mutation"), target.ID, target.AppPath)
+			return hookErr
+		},
+		VerifyAfterSeal: func(context.Context, *Runner, targets.Target, Options) error {
+			return nil
+		},
 	}); err != nil {
-		t.Fatalf("RegisterPreResignHook: %v", err)
+		t.Fatalf("RegisterBundleExtension: %v", err)
 	}
 	t.Cleanup(func() {
 		hooksMu.Lock()
-		delete(preResignHooks, hookName)
+		delete(bundleExtensions, hookName)
 		hooksMu.Unlock()
 	})
 }

@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
-	"goodkind.io/desktop-via-clyde/internal/extensions"
 	"goodkind.io/desktop-via-clyde/internal/patch"
 	"goodkind.io/desktop-via-clyde/internal/paths"
 	"goodkind.io/desktop-via-clyde/internal/targets"
@@ -50,51 +49,6 @@ type computerUseAuthPluginRepair struct {
 	Updated      []byte
 	Permissions  os.FileMode
 	Replacements int
-}
-
-// RegisterLifecycleHooks links Computer Use patch lifecycle hooks.
-func RegisterLifecycleHooks() error {
-	if err := patch.RegisterPreResignHook("computer-use-bundled", BundledLifecycleHook); err != nil {
-		return logComputerUseRegistrationError("register bundled Computer Use lifecycle hook", err)
-	}
-	if err := patch.RegisterPostBundleHook("computer-use", LifecycleHook); err != nil {
-		return logComputerUseRegistrationError("register Computer Use lifecycle hook", err)
-	}
-	return nil
-}
-
-// RegisterValidators links Computer Use config validation.
-func RegisterValidators() error {
-	if err := extensions.RegisterAppValidator("computer_use", extensions.ValidateComputerUse); err != nil {
-		return logComputerUseRegistrationError("register Computer Use validator", err)
-	}
-	return nil
-}
-
-// BundledLifecycleHook repairs a bundled Computer Use helper before app signing.
-func BundledLifecycleHook(
-	ctx context.Context,
-	r *patch.Runner,
-	t targets.Target,
-	_ patch.Options,
-) error {
-	if t.Extensions.ComputerUse == nil {
-		return nil
-	}
-	policy := *t.Extensions.ComputerUse
-	localTeamID, err := validateComputerUsePolicy(policy)
-	if err != nil {
-		return err
-	}
-	appPath := bundledComputerUseAppPath(t.AppPath, policy)
-	patch.RecordTrace(r, ActionRepairBundledComputerUse, t.ID, appPath)
-	patch.Note(r, fmt.Sprintf("target=%s repair bundled Computer Use helper at %s", t.ID, appPath))
-	if !r.DryRun {
-		if err := ensureComputerUseAppPath(appPath); err != nil {
-			return err
-		}
-	}
-	return patchComputerUseBundle(ctx, r, t, appPath, policy, localTeamID)
 }
 
 // LifecycleHook repairs installed and cached Computer Use helpers.
@@ -498,6 +452,19 @@ func patchComputerUseBundle(
 	policy targets.ComputerUsePolicy,
 	localTeamID string,
 ) error {
+	if err := mutateComputerUseBundle(ctx, r, appPath, policy, localTeamID); err != nil {
+		return err
+	}
+	return verifyComputerUseHelper(ctx, r, appPath, policy, localTeamID)
+}
+
+func mutateComputerUseBundle(
+	ctx context.Context,
+	r *patch.Runner,
+	appPath string,
+	policy targets.ComputerUsePolicy,
+	localTeamID string,
+) error {
 	if err := patchComputerUseTrustedTeam(ctx, r, appPath, policy, localTeamID); err != nil {
 		return err
 	}
@@ -510,9 +477,6 @@ func patchComputerUseBundle(
 			fmt.Errorf("resolve signing identity: %w", err))
 	}
 	if err := signComputerUseHelper(ctx, r, appPath, policy, id); err != nil {
-		return err
-	}
-	if err := verifyComputerUseHelper(ctx, r, appPath, policy, localTeamID); err != nil {
 		return err
 	}
 	return nil

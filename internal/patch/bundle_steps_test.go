@@ -37,13 +37,21 @@ func TestPatchDryRunRepairsBundledComputerUseBeforeResign(t *testing.T) {
 	trace := &patch.Trace{}
 	runner := patch.NewRunner(context.Background(), true, io.Discard)
 	runner.Trace = trace
-	if err := computeruseext.BundledLifecycleHook(context.Background(), runner, tg, patch.Options{
+	if err := computeruseext.MutateBundledComputerUse(context.Background(), runner, tg, patch.Options{
 		DryRun:          true,
 		MigrateKeychain: false,
 		Out:             io.Discard,
 		Trace:           trace,
 	}); err != nil {
-		t.Fatalf("BundledLifecycleHook dry-run: %v", err)
+		t.Fatalf("MutateBundledComputerUse dry-run: %v", err)
+	}
+	if err := computeruseext.VerifyBundledComputerUse(context.Background(), runner, tg, patch.Options{
+		DryRun:          true,
+		MigrateKeychain: false,
+		Out:             io.Discard,
+		Trace:           trace,
+	}); err != nil {
+		t.Fatalf("VerifyBundledComputerUse dry-run: %v", err)
 	}
 	bundledHelperPath := filepath.Join(tg.AppPath, filepath.FromSlash(tg.Extensions.ComputerUse.BundledAppPath))
 	senderPath := filepath.Join(bundledHelperPath, "Contents/MacOS/SkyComputerUseService")
