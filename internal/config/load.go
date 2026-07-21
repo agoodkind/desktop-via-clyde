@@ -125,9 +125,6 @@ func normalizeAndValidate(cfg *spec.Config) error {
 	if len(cfg.Apps) == 0 {
 		return fmt.Errorf("at least one app must be declared")
 	}
-	if len(cfg.CLIs) == 0 {
-		return fmt.Errorf("at least one cli must be declared")
-	}
 
 	appIDs := sortedAppKeys(cfg.Apps)
 	for _, id := range appIDs {

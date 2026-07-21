@@ -92,6 +92,54 @@ capability = "standalone-cli.status"
 	}
 }
 
+func TestLoadPathAcceptsAppsWithoutCLIs(t *testing.T) {
+	path := writeConfigForTest(t, `
+[signing]
+identity = "Developer ID Application: Test (TEST123456)"
+team_id = "TEST123456"
+
+[apps.fake]
+app_path = "/Applications/Fake.app"
+bundle_id = "example.fake"
+exec_name = "Fake"
+
+[apps.fake.command]
+use = "fake"
+short = "fake"
+
+[apps.fake.entitlements]
+
+[apps.fake.updater]
+kind = "sparkle_appcast"
+url = "https://example.com/appcast.xml"
+user_agent = "desktop-via-clyde/upgrade"
+sparkle_public_key = "abc"
+
+[apps.fake.launch_policy]
+proxy_host = "::1"
+proxy_port = 48723
+ca_certificate = "/tmp/ca.crt"
+no_proxy = "localhost,127.0.0.1,::1,[::1]"
+launch_working_directory = "/tmp"
+
+[apps.fake.operations.status]
+use = "status"
+short = "status"
+capability = "app.status"
+`)
+
+	cfg, err := config.LoadPath(path)
+	if err != nil {
+		t.Fatalf("LoadPath should accept apps without clis, err=%v", err)
+	}
+	if _, ok := cfg.Apps["fake"]; !ok {
+		t.Fatal("expected fake app in loaded config")
+	}
+	if len(cfg.CLIs) != 0 {
+		t.Fatalf("expected no clis, got %#v", cfg.CLIs)
+	}
+}
+
 func TestLoadPathRejectsUnknownCapability(t *testing.T) {
 	path := writeConfigForTest(t, `
 [signing]
