@@ -115,15 +115,12 @@ func normalizeAndValidate(cfg *spec.Config) error {
 
 	cfg.Signing.Identity = strings.TrimSpace(cfg.Signing.Identity)
 	cfg.Signing.TeamID = strings.TrimSpace(cfg.Signing.TeamID)
-	if cfg.Signing.Identity == "" {
-		return fmt.Errorf("signing.identity is required")
-	}
-	if cfg.Signing.TeamID == "" {
-		return fmt.Errorf("signing.team_id is required")
-	}
 
-	if len(cfg.Apps) == 0 {
-		return fmt.Errorf("at least one app must be declared")
+	if len(cfg.Apps) == 0 && len(cfg.CLIs) == 0 {
+		return fmt.Errorf("at least one app or cli must be declared")
+	}
+	if err := validateSigningRequirements(cfg); err != nil {
+		return err
 	}
 
 	appIDs := sortedAppKeys(cfg.Apps)
@@ -145,6 +142,48 @@ func normalizeAndValidate(cfg *spec.Config) error {
 	}
 
 	return nil
+}
+
+func validateSigningRequirements(cfg *spec.Config) error {
+	requiresSigning := configRequiresSigning(cfg)
+	if requiresSigning {
+		if cfg.Signing.Identity == "" {
+			return fmt.Errorf("signing.identity is required")
+		}
+		if cfg.Signing.TeamID == "" {
+			return fmt.Errorf("signing.team_id is required")
+		}
+		return nil
+	}
+	if cfg.Signing.Identity != "" && cfg.Signing.TeamID == "" {
+		return fmt.Errorf("signing.team_id is required when signing.identity is set")
+	}
+	if cfg.Signing.TeamID != "" && cfg.Signing.Identity == "" {
+		return fmt.Errorf("signing.identity is required when signing.team_id is set")
+	}
+	return nil
+}
+
+func configRequiresSigning(cfg *spec.Config) bool {
+	for _, app := range cfg.Apps {
+		if app.DevelopmentSigning.Enabled {
+			return true
+		}
+		for _, operation := range app.Operations {
+			switch strings.TrimSpace(operation.Capability) {
+			case "app.patch", "app.upgrade":
+				return true
+			}
+		}
+	}
+	for _, cli := range cfg.CLIs {
+		for _, operation := range cli.Operations {
+			if strings.TrimSpace(operation.Capability) == "standalone-cli.install" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func normalizeAndValidateApp(id string, app *spec.AppSpec) error {
