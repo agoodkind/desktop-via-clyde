@@ -66,6 +66,11 @@ shim:
 	@$(MAKE) shim-build
 
 shim-build:
+	# Resolve the swift-mk engine before `make build`. swift-build.mk lists
+	# $(SWIFT_MK_BIN) as a normal freshness prerequisite, so a missing binary
+	# becomes "No rule to make target .make/swift-mk" instead of running the
+	# order-only swift-mk-bin recipe. CI cold generates hit that path on cache miss.
+	SWIFT_MK_SKIP_FETCH= $(MAKE) -C $(REPO_ROOT)/shim swift-mk-bin
 	SWIFT_MK_SKIP_FETCH= $(MAKE) -C $(REPO_ROOT)/shim build
 
 shim-test:
