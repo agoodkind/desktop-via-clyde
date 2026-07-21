@@ -7,13 +7,17 @@
 # internal/spec/spec.go, and internal/testconfig/testdata holds the
 # schema-tested fixture. Replace every <PLACEHOLDER> with a real value.
 
-# Local identity used to re-sign patched bundles. This table only names which
-# identity to use; the keychain is the ground truth for whether it resolves.
+# Local identity used to re-sign patched bundles and standalone CLI installs.
+# Required when any declared operation uses app.patch, app.upgrade, or
+# standalone-cli.install, or when an app enables development_signing. Omit the
+# whole table for status-only configs. The keychain is the ground truth for
+# whether the identity resolves.
 [signing]
 identity = "Developer ID Application: <YOUR NAME> (<TEAM_ID>)"
 team_id = "<TEAM_ID>"
 
-# One patch target. Repeat the [apps.<id>] block per app you patch.
+# One patch target. Repeat the [apps.<id>] block per app you patch. Apps are
+# optional when at least one [clis.<id>] block is declared.
 [apps.example]
 app_path = "/Applications/Example.app"
 bundle_id = "com.example.desktop"

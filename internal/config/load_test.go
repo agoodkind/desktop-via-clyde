@@ -70,12 +70,8 @@ func TestLoadPathLoadsDeclaredConfig(t *testing.T) {
 	requireFlagBinding(t, codexCLI.Operations["status"].Flags, "codex-home", "package-home")
 }
 
-func TestLoadPathRejectsNoApps(t *testing.T) {
+func TestLoadPathAcceptsCLIsWithoutApps(t *testing.T) {
 	path := writeConfigForTest(t, `
-[signing]
-identity = "Developer ID Application: Test (TEST123456)"
-team_id = "TEST123456"
-
 [clis.fake.command]
 use = "fake"
 short = "fake"
@@ -86,9 +82,131 @@ short = "status"
 capability = "standalone-cli.status"
 `)
 
+	cfg, err := config.LoadPath(path)
+	if err != nil {
+		t.Fatalf("LoadPath should accept clis without apps, err=%v", err)
+	}
+	if _, ok := cfg.CLIs["fake"]; !ok {
+		t.Fatal("expected fake cli in loaded config")
+	}
+	if len(cfg.Apps) != 0 {
+		t.Fatalf("expected no apps, got %#v", cfg.Apps)
+	}
+}
+
+func TestLoadPathRejectsEmptyAppsAndCLIs(t *testing.T) {
+	path := writeConfigForTest(t, `
+[signing]
+identity = "Developer ID Application: Test (TEST123456)"
+team_id = "TEST123456"
+`)
+
 	_, err := config.LoadPath(path)
-	if err == nil || !strings.Contains(err.Error(), "at least one app must be declared") {
-		t.Fatalf("LoadPath should reject missing apps, err=%v", err)
+	if err == nil || !strings.Contains(err.Error(), "at least one app or cli must be declared") {
+		t.Fatalf("LoadPath should reject empty apps and clis, err=%v", err)
+	}
+}
+
+func TestLoadPathAcceptsAppsWithoutCLIs(t *testing.T) {
+	path := writeConfigForTest(t, `
+[apps.fake]
+app_path = "/Applications/Fake.app"
+bundle_id = "example.fake"
+exec_name = "Fake"
+
+[apps.fake.command]
+use = "fake"
+short = "fake"
+
+[apps.fake.entitlements]
+
+[apps.fake.updater]
+kind = "sparkle_appcast"
+url = "https://example.com/appcast.xml"
+user_agent = "desktop-via-clyde/upgrade"
+sparkle_public_key = "abc"
+
+[apps.fake.launch_policy]
+proxy_host = "::1"
+proxy_port = 48723
+ca_certificate = "/tmp/ca.crt"
+no_proxy = "localhost,127.0.0.1,::1,[::1]"
+launch_working_directory = "/tmp"
+
+[apps.fake.operations.status]
+use = "status"
+short = "status"
+capability = "app.status"
+`)
+
+	cfg, err := config.LoadPath(path)
+	if err != nil {
+		t.Fatalf("LoadPath should accept apps without clis, err=%v", err)
+	}
+	if _, ok := cfg.Apps["fake"]; !ok {
+		t.Fatal("expected fake app in loaded config")
+	}
+	if len(cfg.CLIs) != 0 {
+		t.Fatalf("expected no clis, got %#v", cfg.CLIs)
+	}
+	if cfg.Signing.Identity != "" || cfg.Signing.TeamID != "" {
+		t.Fatalf("status-only apps should not require signing, got %#v", cfg.Signing)
+	}
+}
+
+func TestLoadPathRequiresSigningWhenAppPatchIsDeclared(t *testing.T) {
+	path := writeConfigForTest(t, `
+[apps.fake]
+app_path = "/Applications/Fake.app"
+bundle_id = "example.fake"
+exec_name = "Fake"
+
+[apps.fake.command]
+use = "fake"
+short = "fake"
+
+[apps.fake.entitlements]
+
+[apps.fake.updater]
+kind = "sparkle_appcast"
+url = "https://example.com/appcast.xml"
+user_agent = "desktop-via-clyde/upgrade"
+sparkle_public_key = "abc"
+
+[apps.fake.launch_policy]
+proxy_host = "::1"
+proxy_port = 48723
+ca_certificate = "/tmp/ca.crt"
+no_proxy = "localhost,127.0.0.1,::1,[::1]"
+launch_working_directory = "/tmp"
+
+[apps.fake.operations.patch]
+use = "patch"
+short = "patch"
+capability = "app.patch"
+`)
+
+	_, err := config.LoadPath(path)
+	if err == nil || !strings.Contains(err.Error(), "signing.identity is required") {
+		t.Fatalf("LoadPath should require signing for app.patch, err=%v", err)
+	}
+}
+
+func TestLoadPathRequiresSigningWhenStandaloneCLIInstallIsDeclared(t *testing.T) {
+	path := writeConfigForTest(t, `
+[clis.fake.command]
+use = "fake"
+short = "fake"
+
+[clis.fake.operations.install]
+use = "install"
+short = "install"
+capability = "standalone-cli.install"
+`)
+
+	_, err := config.LoadPath(path)
+	if err == nil || !strings.Contains(err.Error(), "signing.identity is required") {
+		t.Fatalf("LoadPath should require signing for standalone-cli.install, err=%v", err)
 	}
 }
 
