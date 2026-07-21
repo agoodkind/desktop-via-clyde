@@ -170,8 +170,8 @@ func configRequiresSigning(cfg *spec.Config) bool {
 			return true
 		}
 		for _, operation := range app.Operations {
-			switch strings.TrimSpace(operation.Capability) {
-			case "app.patch", "app.upgrade":
+			capability := strings.TrimSpace(operation.Capability)
+			if capability == "app.patch" || capability == "app.upgrade" {
 				return true
 			}
 		}
