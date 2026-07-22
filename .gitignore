@@ -15,3 +15,5 @@ go.work.sum
 !.deadcode-baseline.txt
 !.staticcheck-extra-baseline.txt
 !.go-mk-applied-notices
+
+.worktrees/
