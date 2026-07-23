@@ -60,6 +60,9 @@ const (
 //go:embed dev-entitlements.plist.tmpl
 var devEntitlementsTemplate string
 
+//go:embed testdata/smoke_host.c
+var smokeHostSource string
+
 var devsignLog = slog.With("component", "desktop-via-clyde", "subcomponent", "devsign")
 
 func logDevsignError(ctx context.Context, event string, err error) error {
@@ -489,48 +492,12 @@ func SmokeTestInjector(ctx context.Context, dylibPath string, policyPath string)
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	sourcePath := filepath.Join(tempDir, "host.c")
-	hostPath := filepath.Join(tempDir, "host")
-	source := []byte(`#include <crt_externs.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-int main(void) {
-    const char *inserted = getenv("DYLD_INSERT_LIBRARIES");
-    const char *mode = getenv("DVC_INJECT_SMOKE_MODE");
-    int argc = *_NSGetArgc();
-    char **argv = *_NSGetArgv();
-    int found_arg = 0;
-
-    if (inserted == NULL) {
-        fprintf(stderr, "DYLD_INSERT_LIBRARIES missing\n");
-        return 42;
-    }
-    if (mode == NULL || strcmp(mode, "sentinel") != 0) {
-        return 0;
-    }
-    const char *set_value = getenv("DVC_INJECT_SMOKE_SET");
-    if (set_value == NULL || strcmp(set_value, "ok") != 0) {
-        fprintf(stderr, "sentinel set action missing\n");
-        return 43;
-    }
-    if (getenv("DVC_INJECT_SMOKE_REMOVE") != NULL) {
-        fprintf(stderr, "sentinel unset action missing\n");
-        return 44;
-    }
-    for (int i = 0; i < argc; i++) {
-        if (strcmp(argv[i], "--dvc-inject-smoke-arg") == 0) {
-            found_arg = 1;
-        }
-    }
-    if (!found_arg) {
-        fprintf(stderr, "sentinel argv append missing\n");
-        return 45;
-    }
-    return 0;
-}
-`)
-	if err := os.WriteFile(sourcePath, source, 0o600); err != nil {
+	hostDir := filepath.Join(tempDir, "FakeApp.app", "Contents", "MacOS")
+	hostPath := filepath.Join(hostDir, "host")
+	if err := os.MkdirAll(hostDir, 0o700); err != nil {
+		return logDevsignError(ctx, "devsign.smoke_create_host_dir_failed", fmt.Errorf("create injector smoke host dir: %w", err))
+	}
+	if err := os.WriteFile(sourcePath, []byte(smokeHostSource), 0o600); err != nil {
 		return logDevsignError(ctx, "devsign.smoke_write_host_failed", fmt.Errorf("write injector smoke host source: %w", err))
 	}
 	compile := exec.CommandContext(ctx, "/usr/bin/xcrun", "clang", "-Wall", "-Wextra", "-Werror", "-o", hostPath, sourcePath)
