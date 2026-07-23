@@ -86,11 +86,29 @@ static int read_policy_file(const char *path, char **data_out, size_t *length_ou
     return 0;
 }
 
+static int is_app_macos_executable(void) {
+    char path[PROC_PIDPATHINFO_MAXSIZE];
+    int length = proc_pidpath(getpid(), path, sizeof(path));
+
+    if (length <= 0) {
+        return 0;
+    }
+    if ((size_t)length >= sizeof(path)) {
+        length = (int)sizeof(path) - 1;
+    }
+    path[length] = '\0';
+
+    return strstr(path, ".app/Contents/MacOS/") != NULL;
+}
+
 static int should_append_argv(void) {
     int argc = *_NSGetArgc();
     char **argv = *_NSGetArgv();
     const char *electron_run_as_node = getenv("ELECTRON_RUN_AS_NODE");
 
+    if (!is_app_macos_executable()) {
+        return 0;
+    }
     if (electron_run_as_node != NULL && strcmp(electron_run_as_node, "1") == 0) {
         return 0;
     }
