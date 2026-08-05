@@ -21,7 +21,6 @@ GO_BUILD_EXTRA_FLAGS := -trimpath
 
 # Pipeline modules.
 GO_MK_MODULES := go-build.mk go-release.mk
-GO_MK_DEV_DIR ?= $(HOME)/Sites/go-makefile
 
 # Codegen hook: go.mk runs go-generated-prereqs (proto plus the go:embed shim and
 # injector payloads) as an order-only prerequisite of every build, lint, vet,
