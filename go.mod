@@ -14,7 +14,7 @@ require (
 	golang.org/x/sys v0.47.0
 	goodkind.io/gklog v0.4.4
 	goodkind.io/go-makefile/selfupdate v0.0.0-20260703030139-1d33d4f11d19
-	google.golang.org/grpc v1.83.0
+	google.golang.org/grpc v1.83.1
 	google.golang.org/protobuf v1.36.12
 	howett.net/plist v1.0.1
 )
